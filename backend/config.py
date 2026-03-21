@@ -5,6 +5,17 @@ from typing import Literal
 class Settings(BaseSettings):
     # 数据库配置
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/etf"
+
+    # JWT 配置
+    jwt_secret: str = ""
+
+    # CORS 配置
+    cors_origins: list[str] = [
+        "http://localhost:8123",
+        "http://127.0.0.1:8123",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
     
     # Redis 配置
     redis_url: str = "redis://localhost:6379/0"

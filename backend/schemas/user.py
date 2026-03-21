@@ -34,10 +34,16 @@ class UserResponse(BaseModel):
     username: str
     email: Optional[str] = None
     is_active: bool
+    account_balance: Optional[float] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class AccountBalanceUpdate(BaseModel):
+    """账户金额更新"""
+    account_balance: float = Field(..., gt=0, description="账户金额")
 
 
 class Token(BaseModel):

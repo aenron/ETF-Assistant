@@ -1,11 +1,11 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Portfolio, AdviceLog, EtfInfo
-from schemas.advice import AdviceResponse, AdviceLogResponse
+from schemas.advice import AdviceResponse, AdviceLogResponse, AccountAnalysisResponse
 from schemas.portfolio import PortfolioWithMarket
 from config import settings
 from services.market_service import MarketService
@@ -16,7 +16,10 @@ from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, OllamaClie
 
 class AdvisorService:
     """智能决策服务"""
-    
+
+    ACCOUNT_ANALYSIS_CODE = "ACCOUNT"
+    ACCOUNT_ANALYSIS_NAME = "账户分析"
+
     _llm_client: Optional[BaseLLMClient] = None
     
     @classmethod
@@ -102,6 +105,157 @@ class AdvisorService:
 
 请直接输出JSON对象，不要添加任何markdown标记或代码块符号:
 {{"advice_type": "操作建议", "reason": "分析理由", "confidence": 置信度数值}}"""
+
+    @staticmethod
+    def build_account_analysis_prompt(
+        portfolio_summary_text: str,
+        holdings_text: str,
+        account_balance: float,
+    ) -> str:
+        """构造账户级分析 Prompt"""
+        return f"""你是一名专业的ETF投资顾问。请根据当前账户整体情况，给出账户层面的投资建议。
+
+## 账户概览
+{portfolio_summary_text}
+
+## 持仓明细
+{holdings_text}
+
+## 可用资金
+- 账户金额: {account_balance:.2f} 元
+
+请重点分析：
+1. 当前整体仓位是否偏高、偏低或合理
+2. 当前持仓是否过于集中，是否需要分散或再平衡
+3. 哪些方向应该继续持有，哪些方向应该减仓或观察
+4. 接下来1-3条最重要的账户操作建议
+
+输出要求：
+1. summary: 对当前账户状态的总体判断，120字以内
+2. position_advice: 对整体仓位的建议，80字以内
+3. rebalance_advice: 对结构调整/分散配置的建议，120字以内
+4. risk_level: 风险等级，必须是 "low" / "medium" / "high" 之一
+5. key_actions: 1到3条具体行动建议的字符串数组
+6. confidence: 0-100之间的整数
+
+请直接输出JSON对象，不要添加markdown标记或代码块:
+{{"summary":"...","position_advice":"...","rebalance_advice":"...","risk_level":"medium","key_actions":["..."],"confidence":75}}"""
+
+    @staticmethod
+    def format_account_summary(
+        portfolios: List[PortfolioWithMarket],
+        total_market_value: float,
+        total_cost: float,
+        total_pnl: float,
+        total_pnl_pct: float,
+        account_balance: float,
+        category_distribution: dict,
+    ) -> str:
+        """格式化账户概览"""
+        total_assets = total_market_value + account_balance
+        cash_ratio = (account_balance / total_assets * 100) if total_assets > 0 else 0.0
+        invested_ratio = (total_market_value / total_assets * 100) if total_assets > 0 else 0.0
+        category_text = "、".join(
+            f"{name}:{value / total_market_value * 100:.1f}%"
+            for name, value in sorted(category_distribution.items(), key=lambda item: item[1], reverse=True)
+            if total_market_value > 0
+        ) or "暂无分类数据"
+
+        return "\n".join([
+            f"- 持仓数量: {len(portfolios)}",
+            f"- 持仓市值: {total_market_value:.2f} 元",
+            f"- 总成本: {total_cost:.2f} 元",
+            f"- 总盈亏: {total_pnl:.2f} 元 ({total_pnl_pct:.2f}%)",
+            f"- 账户总资产(持仓+账户金额): {total_assets:.2f} 元",
+            f"- 现金占比: {cash_ratio:.2f}%",
+            f"- 持仓占比: {invested_ratio:.2f}%",
+            f"- 分类分布: {category_text}",
+        ])
+
+    @staticmethod
+    def format_account_holdings(portfolios: List[PortfolioWithMarket], total_market_value: float) -> str:
+        """格式化持仓明细"""
+        if not portfolios:
+            return "暂无持仓"
+
+        lines = []
+        for portfolio in portfolios:
+            market_value = portfolio.market_value or 0.0
+            weight = (market_value / total_market_value * 100) if total_market_value > 0 else 0.0
+            category = MarketService._guess_category(portfolio.etf_name or "")
+            lines.append(
+                f"- {portfolio.etf_code} {portfolio.etf_name or ''}: "
+                f"市值 {market_value:.2f} 元, 权重 {weight:.2f}%, "
+                f"盈亏 {portfolio.pnl or 0.0:.2f} 元 ({portfolio.pnl_pct or 0.0:.2f}%), "
+                f"分类 {category}, 持仓天数 {portfolio.holding_days if portfolio.holding_days is not None else '未知'}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_account_analysis_reason(analysis: AccountAnalysisResponse) -> str:
+        """格式化账户分析历史文本"""
+        actions_text = "\n".join(
+            f"{index + 1}. {action}" for index, action in enumerate(analysis.key_actions)
+        ) or "暂无具体操作建议"
+        return "\n".join([
+            f"总体判断：{analysis.summary}",
+            f"仓位建议：{analysis.position_advice}",
+            f"调仓建议：{analysis.rebalance_advice}",
+            f"风险等级：{analysis.risk_level}",
+            "关键操作：",
+            actions_text,
+        ])
+
+    @classmethod
+    def parse_account_analysis_reason(
+        cls,
+        reason: Optional[str],
+        confidence: Optional[Decimal],
+        created_at: Optional[datetime],
+    ) -> AccountAnalysisResponse:
+        """从历史文本恢复账户分析结构"""
+        text = reason or ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        key_actions: List[str] = []
+        in_actions = False
+        data = {
+            "summary": "",
+            "position_advice": "",
+            "rebalance_advice": "",
+            "risk_level": "medium",
+        }
+
+        for line in lines:
+            if line == "关键操作：":
+                in_actions = True
+                continue
+
+            if in_actions:
+                action = line
+                if ". " in action:
+                    action = action.split(". ", 1)[1]
+                key_actions.append(action)
+                continue
+
+            if line.startswith("总体判断："):
+                data["summary"] = line.removeprefix("总体判断：").strip()
+            elif line.startswith("仓位建议："):
+                data["position_advice"] = line.removeprefix("仓位建议：").strip()
+            elif line.startswith("调仓建议："):
+                data["rebalance_advice"] = line.removeprefix("调仓建议：").strip()
+            elif line.startswith("风险等级："):
+                risk = line.removeprefix("风险等级：").strip().lower()
+                data["risk_level"] = risk if risk in {"low", "medium", "high"} else "medium"
+
+        return AccountAnalysisResponse(
+            summary=data["summary"] or "暂无账户分析摘要",
+            position_advice=data["position_advice"] or "暂无仓位建议",
+            rebalance_advice=data["rebalance_advice"] or "暂无调仓建议",
+            risk_level=data["risk_level"],
+            key_actions=key_actions[:3],
+            confidence=float(confidence) if confidence is not None else 0,
+            created_at=created_at or datetime.now(),
+        )
     
     @staticmethod
     def format_kline_summary(kline_data: List) -> str:
@@ -128,10 +282,11 @@ class AdvisorService:
         user_id: Optional[int] = None,
     ) -> List[AdviceResponse]:
         """生成投资建议"""
+        if user_id is None:
+            raise ValueError("generate_advice requires user_id")
+
         # 获取持仓
-        query = select(Portfolio)
-        if user_id:
-            query = query.where(Portfolio.user_id == user_id)
+        query = select(Portfolio).where(Portfolio.user_id == user_id)
         if etf_codes:
             query = query.where(Portfolio.etf_code.in_(etf_codes))
         
@@ -207,6 +362,7 @@ class AdvisorService:
             
             # 保存日志
             log = AdviceLog(
+                user_id=user_id,
                 etf_code=p.etf_code,
                 advice_type=advice_type,
                 reason=reason,
@@ -237,10 +393,14 @@ class AdvisorService:
         user_id: Optional[int] = None,
     ) -> Optional[AdviceResponse]:
         """生成单个持仓的投资建议"""
+        if user_id is None:
+            raise ValueError("generate_advice_for_portfolio requires user_id")
+
         # 获取持仓
-        query = select(Portfolio).where(Portfolio.id == portfolio_id)
-        if user_id:
-            query = query.where(Portfolio.user_id == user_id)
+        query = select(Portfolio).where(
+            Portfolio.id == portfolio_id,
+            Portfolio.user_id == user_id,
+        )
         
         result = await session.execute(query)
         p = result.scalar_one_or_none()
@@ -359,20 +519,23 @@ class AdvisorService:
             pnl_pct=pnl_pct,
         )
     
-    @staticmethod
+    @classmethod
     async def get_history(
+        cls,
         session: AsyncSession, 
         limit: int = 50,
         user_id: Optional[int] = None,
     ) -> List[AdviceLogResponse]:
         """获取历史建议记录"""
+        if user_id is None:
+            raise ValueError("get_history requires user_id")
+
         query = (
             select(AdviceLog, EtfInfo.name.label("etf_name"))
+            .where(AdviceLog.user_id == user_id)
             .outerjoin(EtfInfo, AdviceLog.etf_code == EtfInfo.code)
             .order_by(AdviceLog.created_at.desc())
         )
-        if user_id:
-            query = query.where(AdviceLog.user_id == user_id)
         query = query.limit(limit)
         
         result = await session.execute(query)
@@ -396,7 +559,136 @@ class AdvisorService:
         return [
             AdviceLogResponse(
                 **{c.key: getattr(log, c.key) for c in AdviceLog.__table__.columns},
-                etf_name=etf_name or etf_names_from_market.get(log.etf_code, None),
+                etf_name=(
+                    cls.ACCOUNT_ANALYSIS_NAME
+                    if log.etf_code == cls.ACCOUNT_ANALYSIS_CODE
+                    else etf_name or etf_names_from_market.get(log.etf_code, None)
+                ),
             )
             for log, etf_name in rows
         ]
+
+    @classmethod
+    async def generate_account_analysis(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+        account_balance: Optional[Decimal] = None,
+    ) -> AccountAnalysisResponse:
+        """生成账户级投资建议"""
+        portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
+        summary = await PortfolioService.get_summary(session, user_id=user_id)
+        available_cash = float(account_balance) if account_balance is not None else 0.0
+
+        if not portfolios:
+            analysis = AccountAnalysisResponse(
+                summary="当前账户暂无持仓，整体风险暴露较低。",
+                position_advice="当前仓位偏低，可先保持观望并逐步建立仓位。",
+                rebalance_advice="暂无调仓需求，建议先明确投资目标后再分批配置ETF。",
+                risk_level="low",
+                key_actions=[
+                    "先建立关注ETF清单，避免一次性满仓",
+                    "优先从宽基ETF开始分批建仓",
+                ],
+                confidence=85,
+                created_at=datetime.now(),
+            )
+            session.add(AdviceLog(
+                user_id=user_id,
+                etf_code=cls.ACCOUNT_ANALYSIS_CODE,
+                advice_type="account",
+                reason=cls.format_account_analysis_reason(analysis),
+                confidence=Decimal(str(analysis.confidence)),
+                llm_provider=settings.llm_provider,
+                llm_model=None,
+            ))
+            await session.flush()
+            return analysis
+
+        portfolio_summary_text = cls.format_account_summary(
+            portfolios=portfolios,
+            total_market_value=summary.total_market_value,
+            total_cost=summary.total_cost,
+            total_pnl=summary.total_pnl,
+            total_pnl_pct=summary.total_pnl_pct,
+            account_balance=available_cash,
+            category_distribution=summary.category_distribution,
+        )
+        holdings_text = cls.format_account_holdings(portfolios, summary.total_market_value)
+        prompt = cls.build_account_analysis_prompt(
+            portfolio_summary_text=portfolio_summary_text,
+            holdings_text=holdings_text,
+            account_balance=available_cash,
+        )
+
+        llm = cls.get_llm_client()
+        try:
+            result_json = await llm.chat_json(prompt)
+            key_actions = result_json.get("key_actions", [])
+            if not isinstance(key_actions, list):
+                key_actions = []
+
+            analysis = AccountAnalysisResponse(
+                summary=result_json.get("summary", "当前账户整体结构中性，建议结合风险偏好持续跟踪。"),
+                position_advice=result_json.get("position_advice", "当前仓位基本合理，建议分批调整。"),
+                rebalance_advice=result_json.get("rebalance_advice", "建议关注持仓集中度，必要时逐步再平衡。"),
+                risk_level=result_json.get("risk_level", "medium"),
+                key_actions=[str(item) for item in key_actions[:3] if str(item).strip()],
+                confidence=float(result_json.get("confidence", 70)),
+                created_at=datetime.now(),
+            )
+            session.add(AdviceLog(
+                user_id=user_id,
+                etf_code=cls.ACCOUNT_ANALYSIS_CODE,
+                advice_type="account",
+                reason=cls.format_account_analysis_reason(analysis),
+                confidence=Decimal(str(analysis.confidence)),
+                llm_provider=settings.llm_provider,
+                llm_model=llm.model if hasattr(llm, 'model') else None,
+            ))
+            await session.flush()
+            return analysis
+        except Exception as e:
+            analysis = AccountAnalysisResponse(
+                summary="账户分析暂时失败，建议先根据总仓位和集中度人工复核。",
+                position_advice="当前建议暂缓大幅加仓，等待分析恢复后再调整。",
+                rebalance_advice=f"LLM调用失败: {str(e)}",
+                risk_level="medium",
+                key_actions=["稍后重试账户分析", "优先检查高权重持仓的风险集中度"],
+                confidence=0,
+                created_at=datetime.now(),
+            )
+            session.add(AdviceLog(
+                user_id=user_id,
+                etf_code=cls.ACCOUNT_ANALYSIS_CODE,
+                advice_type="account",
+                reason=cls.format_account_analysis_reason(analysis),
+                confidence=Decimal("0"),
+                llm_provider=settings.llm_provider,
+                llm_model=llm.model if hasattr(llm, 'model') else None,
+            ))
+            await session.flush()
+            return analysis
+
+    @classmethod
+    async def get_latest_account_analysis(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+    ) -> Optional[AccountAnalysisResponse]:
+        """获取最近一次账户级投资建议"""
+        result = await session.execute(
+            select(AdviceLog)
+            .where(
+                AdviceLog.user_id == user_id,
+                AdviceLog.etf_code == cls.ACCOUNT_ANALYSIS_CODE,
+                AdviceLog.advice_type == "account",
+            )
+            .order_by(AdviceLog.created_at.desc(), AdviceLog.id.desc())
+            .limit(1)
+        )
+        log = result.scalar_one_or_none()
+        if not log:
+            return None
+
+        return cls.parse_account_analysis_reason(log.reason, log.confidence, log.created_at)

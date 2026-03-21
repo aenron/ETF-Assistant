@@ -20,6 +20,17 @@ class AdviceResponse(BaseModel):
     pnl_pct: Optional[float] = None
 
 
+class AccountAnalysisResponse(BaseModel):
+    """账户级分析建议"""
+    summary: str
+    position_advice: str
+    rebalance_advice: str
+    risk_level: str
+    key_actions: List[str]
+    confidence: float
+    created_at: datetime
+
+
 class AdviceLogResponse(BaseModel):
     """建议日志"""
     id: int

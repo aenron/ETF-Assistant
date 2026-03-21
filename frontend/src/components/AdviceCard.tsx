@@ -4,6 +4,7 @@ import { TrendingUp, TrendingDown, Minus, Plus, ArrowDownRight, Lightbulb } from
 
 interface AdviceCardProps {
   advice: AdviceResponse
+  accountBalance?: number
 }
 
 const adviceTypeConfig: Record<string, { label: string; color: string; icon: typeof TrendingUp }> = {
@@ -14,9 +15,44 @@ const adviceTypeConfig: Record<string, { label: string; color: string; icon: typ
   reduce: { label: '减仓', color: 'bg-yellow-500', icon: ArrowDownRight },
 }
 
-export function AdviceCard({ advice }: AdviceCardProps) {
+export function AdviceCard({ advice, accountBalance = 0 }: AdviceCardProps) {
   const config = adviceTypeConfig[advice.advice_type] || adviceTypeConfig.hold
   const Icon = config.icon
+
+  // 计算建议仓位
+  const calculateSuggestedPosition = () => {
+    if (!accountBalance || !advice.current_price) return null
+    
+    // 根据建议类型和置信度计算仓位比例
+    let positionRatio = 0
+    switch (advice.advice_type) {
+      case 'buy':
+        positionRatio = 0.3 * (advice.confidence / 100) // 买入: 30% 资金 * 置信度
+        break
+      case 'add':
+        positionRatio = 0.2 * (advice.confidence / 100) // 加仓: 20% 资金 * 置信度
+        break
+      case 'reduce':
+        positionRatio = 0.15 * (advice.confidence / 100) // 减仓: 15% 估算
+        break
+      case 'sell':
+        positionRatio = 1.0 // 卖出: 全部
+        break
+      default:
+        return null
+    }
+    
+    const suggestedAmount = accountBalance * positionRatio
+    const suggestedShares = Math.floor(suggestedAmount / advice.current_price)
+    
+    return {
+      amount: suggestedAmount,
+      shares: suggestedShares,
+      ratio: positionRatio * 100
+    }
+  }
+
+  const suggestedPosition = calculateSuggestedPosition()
 
   return (
     <Card>
@@ -42,6 +78,15 @@ export function AdviceCard({ advice }: AdviceCardProps) {
               {advice.pnl_pct ? `${advice.pnl_pct.toFixed(2)}%` : '-'}
             </span>
           </div>
+          {suggestedPosition && (advice.advice_type === 'buy' || advice.advice_type === 'add') && (
+            <div className="flex items-center justify-between text-sm bg-muted/50 p-2 rounded">
+              <span className="text-muted-foreground">建议仓位</span>
+              <div className="text-right">
+                <span className="font-medium">{suggestedPosition.shares} 股</span>
+                <span className="text-xs text-muted-foreground ml-1">({suggestedPosition.ratio.toFixed(1)}%资金)</span>
+              </div>
+            </div>
+          )}
           <div className="pt-2 border-t">
             <div className="flex items-start gap-2">
               <Lightbulb className="h-4 w-4 text-yellow-500 mt-0.5 flex-shrink-0" />

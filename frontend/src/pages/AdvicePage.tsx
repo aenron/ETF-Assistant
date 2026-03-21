@@ -3,7 +3,7 @@ import { adviceApi, type AdviceLogResponse } from '@/services/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { RefreshCw, TrendingUp, TrendingDown, Minus, Plus, ArrowDownRight, Bot, Clock, BarChart3 } from 'lucide-react'
+import { RefreshCw, TrendingUp, TrendingDown, Minus, Plus, ArrowDownRight, Bot, Clock, BarChart3, WalletCards } from 'lucide-react'
 
 const adviceTypeConfig: Record<string, { label: string; color: string; bgColor: string; icon: typeof TrendingUp }> = {
   buy: { label: '买入', color: 'text-red-600', bgColor: 'bg-red-50 border-red-200', icon: TrendingUp },
@@ -11,6 +11,7 @@ const adviceTypeConfig: Record<string, { label: string; color: string; bgColor: 
   hold: { label: '持有', color: 'text-blue-600', bgColor: 'bg-blue-50 border-blue-200', icon: Minus },
   add: { label: '加仓', color: 'text-orange-600', bgColor: 'bg-orange-50 border-orange-200', icon: Plus },
   reduce: { label: '减仓', color: 'text-yellow-600', bgColor: 'bg-yellow-50 border-yellow-200', icon: ArrowDownRight },
+  account: { label: '账户分析', color: 'text-violet-700', bgColor: 'bg-violet-50 border-violet-200', icon: WalletCards },
 }
 
 function ConfidenceBar({ value }: { value: number }) {
@@ -64,7 +65,9 @@ export function AdvicePage() {
                 {/* 头部: 代码 + 建议类型 + 置信度 + 时间 */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-lg font-semibold">{log.etf_code || '-'}</span>
+                    <span className="font-mono text-lg font-semibold">
+                      {log.advice_type === 'account' ? 'ACCOUNT' : (log.etf_code || '-')}
+                    </span>
                     {log.etf_name && <span className="text-sm text-muted-foreground">{log.etf_name}</span>}
                     <Badge variant="outline" className={`${config.color} border-current font-medium`}>
                       <Icon className="h-3 w-3 mr-1" />

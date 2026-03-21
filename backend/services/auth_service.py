@@ -12,13 +12,20 @@ from config import settings
 
 
 # JWT配置
-SECRET_KEY = "your-secret-key-change-in-production"  # 生产环境应从配置读取
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7天
 
 
 class AuthService:
     """用户认证服务"""
+
+    @staticmethod
+    def get_jwt_secret() -> str:
+        """获取JWT密钥"""
+        secret = settings.jwt_secret.strip()
+        if not secret:
+            raise RuntimeError("JWT_SECRET 未配置")
+        return secret
     
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -45,17 +52,19 @@ class AuthService:
         
         # sub 必须是字符串
         to_encode = {"sub": str(user_id), "exp": expire}
-        return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return jwt.encode(to_encode, AuthService.get_jwt_secret(), algorithm=ALGORITHM)
     
     @staticmethod
     def decode_token(token: str) -> Optional[int]:
         """解码令牌，返回用户ID"""
         try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            payload = jwt.decode(token, AuthService.get_jwt_secret(), algorithms=[ALGORITHM])
             print(f"[Auth] payload: {payload}")
             user_id = payload.get("sub")
             if user_id:
                 return int(user_id)
+        except RuntimeError:
+            raise
         except (JWTError, ValueError, TypeError) as e:
             print(f"[Auth] JWT解码错误: {e}")
             return None

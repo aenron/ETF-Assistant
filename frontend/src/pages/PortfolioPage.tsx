@@ -4,10 +4,12 @@ import { PortfolioTable } from '@/components/PortfolioTable'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { RefreshCw, TrendingUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { authApi } from '@/services/authApi'
 
 export function PortfolioPage() {
   const [portfolios, setPortfolios] = useState<PortfolioWithMarket[]>([])
   const [summary, setSummary] = useState<PortfolioSummary | null>(null)
+  const [accountBalance, setAccountBalance] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -18,14 +20,16 @@ export function PortfolioPage() {
       const userStr = localStorage.getItem('etf_user')
       console.log('Current user from localStorage:', userStr)
       
-      const [pRes, sRes] = await Promise.all([
+      const [pRes, sRes, balanceRes] = await Promise.all([
         portfolioApi.getList(),
         portfolioApi.getSummary(),
+        authApi.getAccountBalance(),
       ])
       console.log('Portfolio data:', pRes.data, 'Length:', pRes.data?.length)
       console.log('Summary data:', sRes.data)
       setPortfolios(pRes.data)
       setSummary(sRes.data)
+      setAccountBalance(balanceRes.account_balance ?? undefined)
     } catch (error) {
       console.error('Failed to fetch data:', error)
     } finally {
@@ -70,7 +74,11 @@ export function PortfolioPage() {
         </div>
       </div>
 
-      <PortfolioSummaryCard summary={summary} />
+      <PortfolioSummaryCard
+        summary={summary}
+        accountBalance={accountBalance}
+        onAccountBalanceChange={setAccountBalance}
+      />
       <PortfolioTable portfolios={portfolios} onRefresh={fetchData} />
     </div>
   )

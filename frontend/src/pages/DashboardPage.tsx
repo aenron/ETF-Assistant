@@ -1,23 +1,39 @@
 import { useEffect, useState } from 'react'
-import { portfolioApi, adviceApi, marketApi, type PortfolioSummary, type PortfolioWithMarket } from '@/services/api'
+import {
+  portfolioApi,
+  adviceApi,
+  marketApi,
+  type PortfolioSummary,
+  type PortfolioWithMarket,
+  type AccountAnalysisResponse,
+} from '@/services/api'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { AdviceCard } from '@/components/AdviceCard'
+import { AccountAnalysisCard } from '@/components/AccountAnalysisCard'
 import { Button } from '@/components/ui/button'
 import { RefreshCw, Sparkles, AlertCircle, TrendingUp } from 'lucide-react'
 import type { AdviceResponse } from '@/services/api'
+import { authApi } from '@/services/authApi'
 
 export function DashboardPage() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null)
   const [advices, setAdvices] = useState<AdviceResponse[]>([])
+  const [accountAnalysis, setAccountAnalysis] = useState<AccountAnalysisResponse | null>(null)
+  const [accountBalance, setAccountBalance] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
+  const [analyzingAccount, setAnalyzingAccount] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
   const fetchData = async () => {
     setLoading(true)
     try {
-      const res = await portfolioApi.getSummary()
-      setSummary(res.data)
+      const [summaryRes, balanceRes] = await Promise.all([
+        portfolioApi.getSummary(),
+        authApi.getAccountBalance(),
+      ])
+      setSummary(summaryRes.data)
+      setAccountBalance(balanceRes.account_balance ?? undefined)
     } catch (error) {
       console.error('Failed to fetch data:', error)
     } finally {
@@ -40,7 +56,7 @@ export function DashboardPage() {
         const portfolio = quotesMap.get(log.etf_code || '')
         return {
           etf_code: log.etf_code || '',
-          etf_name: log.etf_name || null,
+          etf_name: portfolio?.etf_name ?? log.etf_name ?? null,
           advice_type: log.advice_type || 'hold',
           reason: log.reason || '',
           confidence: log.confidence || 0,
@@ -51,6 +67,15 @@ export function DashboardPage() {
       setAdvices(latestAdvices)
     } catch (error) {
       console.error('Failed to fetch latest advice:', error)
+    }
+  }
+
+  const fetchLatestAccountAnalysis = async () => {
+    try {
+      const res = await adviceApi.getLatestAccountAnalysis()
+      setAccountAnalysis(res.data)
+    } catch (error) {
+      console.error('Failed to fetch latest account analysis:', error)
     }
   }
 
@@ -86,9 +111,23 @@ export function DashboardPage() {
     }
   }
 
+  const handleAnalyzeAccount = async () => {
+    setAnalyzingAccount(true)
+    try {
+      const res = await adviceApi.analyzeAccount()
+      setAccountAnalysis(res.data)
+    } catch (error) {
+      console.error('Failed to analyze account:', error)
+      alert('账户分析失败，请检查LLM配置')
+    } finally {
+      setAnalyzingAccount(false)
+    }
+  }
+
   useEffect(() => {
     fetchData()
     fetchLatestAdvice()
+    fetchLatestAccountAnalysis()
   }, [])
 
   return (
@@ -107,17 +146,27 @@ export function DashboardPage() {
             <Sparkles className="h-4 w-4 mr-2" />
             {generating ? '生成中...' : '生成投资建议'}
           </Button>
+          <Button variant="outline" onClick={handleAnalyzeAccount} disabled={analyzingAccount}>
+            <Sparkles className="h-4 w-4 mr-2" />
+            {analyzingAccount ? '分析中...' : '分析账户'}
+          </Button>
         </div>
       </div>
 
-      <PortfolioSummaryCard summary={summary} />
+      <PortfolioSummaryCard
+        summary={summary}
+        accountBalance={accountBalance}
+        onAccountBalanceChange={setAccountBalance}
+      />
+
+      {accountAnalysis && <AccountAnalysisCard analysis={accountAnalysis} />}
 
       {advices.length > 0 && (
         <div className="space-y-4">
           <h2 className="text-xl font-semibold">智能决策建议</h2>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {advices.map((advice) => (
-              <AdviceCard key={advice.etf_code} advice={advice} />
+              <AdviceCard key={advice.etf_code} advice={advice} accountBalance={accountBalance} />
             ))}
           </div>
         </div>

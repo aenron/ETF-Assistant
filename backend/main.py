@@ -7,6 +7,7 @@ from database import init_db, engine
 from routers import portfolio_router, market_router, advice_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
+from config import settings
 from services.redis_service import RedisService
 from services.scheduler import start_scheduler, shutdown_scheduler
 
@@ -26,6 +27,8 @@ async def run_migrations():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化数据库
+    if not settings.jwt_secret.strip():
+        raise RuntimeError("JWT_SECRET 未配置，请在 .env 中设置")
     await init_db()
     await run_migrations()
     # 启动定时任务调度器
@@ -47,7 +50,7 @@ app = FastAPI(
 # CORS配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -21,6 +21,7 @@ export interface User {
   username: string
   email?: string
   is_active: boolean
+  account_balance?: number
   created_at: string
 }
 
@@ -105,6 +106,16 @@ export const authApi = {
 
   getMe: async (): Promise<User> => {
     const res = await api.get('/auth/me')
+    return res.data
+  },
+
+  getAccountBalance: async (): Promise<{ account_balance: number | null }> => {
+    const res = await api.get('/auth/account-balance')
+    return res.data
+  },
+
+  updateAccountBalance: async (account_balance: number): Promise<{ account_balance: number }> => {
+    const res = await api.put('/auth/account-balance', { account_balance })
     return res.data
   },
 }

@@ -5,7 +5,12 @@ from sqlalchemy import select
 from typing import List, Optional, Dict
 
 from database import get_session
-from schemas.advice import AdviceGenerateRequest, AdviceResponse, AdviceLogResponse
+from schemas.advice import (
+    AdviceGenerateRequest,
+    AdviceResponse,
+    AdviceLogResponse,
+    AccountAnalysisResponse,
+)
 from services.advisor_service import AdvisorService
 from models.advice_log import AdviceLog
 from routers.auth import get_current_user
@@ -22,6 +27,28 @@ async def generate_advice(
 ):
     """生成投资建议（可指定ETF代码列表）"""
     return await AdvisorService.generate_advice(db, request.etf_codes, user_id=current_user.id)
+
+
+@router.post("/account-analysis", response_model=AccountAnalysisResponse)
+async def generate_account_analysis(
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """生成账户级投资建议"""
+    return await AdvisorService.generate_account_analysis(
+        db,
+        user_id=current_user.id,
+        account_balance=current_user.account_balance,
+    )
+
+
+@router.get("/account-analysis/latest", response_model=Optional[AccountAnalysisResponse])
+async def get_latest_account_analysis(
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """获取最近一次账户级投资建议"""
+    return await AdvisorService.get_latest_account_analysis(db, user_id=current_user.id)
 
 
 @router.get("/generate/{portfolio_id}", response_model=AdviceResponse)
@@ -59,7 +86,10 @@ async def get_latest_advices(
     # 子查询：每个etf_code的最大id
     subquery = (
         select(func.max(AdviceLog.id).label("max_id"))
-        .where(AdviceLog.user_id == current_user.id)
+        .where(
+            AdviceLog.user_id == current_user.id,
+            AdviceLog.etf_code != AdvisorService.ACCOUNT_ANALYSIS_CODE,
+        )
         .group_by(AdviceLog.etf_code)
         .subquery()
     )
@@ -73,11 +103,14 @@ async def get_latest_advices(
 
 @router.post("/analyze-all")
 async def analyze_all_portfolios(
-    db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """手动触发分析所有持仓"""
-    from services.scheduler import analyze_all_portfolios as do_analyze
+    """手动触发分析当前用户的所有持仓"""
+    from services.scheduler import analyze_user_portfolios
     # 异步执行分析任务
-    asyncio.create_task(do_analyze())
-    return {"message": "分析任务已启动", "status": "running"}
+    asyncio.create_task(analyze_user_portfolios(current_user.id))
+    return {
+        "message": f"用户 {current_user.id} 的分析任务已启动",
+        "status": "running",
+        "user_id": current_user.id,
+    }

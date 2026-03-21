@@ -1,10 +1,11 @@
 """定时任务服务"""
-import asyncio
 from datetime import datetime
+from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from database import async_session_maker
+from models.user import User
 from services.advisor_service import AdvisorService
 from services.portfolio_service import PortfolioService
 from services.notification_service import NotificationService
@@ -13,45 +14,62 @@ from services.notification_service import NotificationService
 scheduler = AsyncIOScheduler()
 
 
+async def analyze_user_portfolios(user_id: int):
+    """分析单个用户的持仓"""
+    async with async_session_maker() as db:
+        portfolios = await PortfolioService.get_with_market(db, user_id=user_id)
+
+        if not portfolios:
+            print(f"[Scheduler] 用户 {user_id} 无持仓数据，跳过分析")
+            return []
+
+        etf_codes = [p.etf_code for p in portfolios]
+        print(f"[Scheduler] 用户 {user_id} 共 {len(etf_codes)} 个持仓待分析: {etf_codes}")
+
+        results = await AdvisorService.generate_advice(db, etf_codes, user_id=user_id)
+        print(f"[Scheduler] 用户 {user_id} 分析完成，生成 {len(results)} 条建议")
+
+        for r in results:
+            print(f"  - user={user_id} {r.etf_code}: {r.advice_type} (置信度 {r.confidence}%)")
+
+        if results:
+            print(f"[Scheduler] 开始发送用户 {user_id} 的推送通知...")
+            for r in results:
+                await NotificationService.send_advice_notification(
+                    etf_code=r.etf_code,
+                    etf_name=r.etf_name or "",
+                    advice_type=r.advice_type,
+                    reason=r.reason,
+                    confidence=r.confidence
+                )
+            print(f"[Scheduler] 用户 {user_id} 推送通知发送完成")
+
+        return results
+
+
 async def analyze_all_portfolios():
-    """分析所有持仓"""
+    """分析所有活跃用户的持仓"""
     print(f"[Scheduler] {datetime.now()} 开始执行定时分析任务...")
-    
+
     async with async_session_maker() as db:
         try:
-            # 获取所有持仓
-            portfolios = await PortfolioService.get_with_market(db, user_id=1)  # 定时任务使用默认用户
-            
-            if not portfolios:
-                print("[Scheduler] 无持仓数据，跳过分析")
+            result = await db.execute(select(User.id).where(User.is_active == True))
+            user_ids = result.scalars().all()
+
+            if not user_ids:
+                print("[Scheduler] 无活跃用户，跳过分析")
                 return
-            
-            etf_codes = [p.etf_code for p in portfolios]
-            print(f"[Scheduler] 共 {len(etf_codes)} 个持仓待分析: {etf_codes}")
-            
-            # 批量生成建议
-            results = await AdvisorService.generate_advice(db, etf_codes)
-            
-            print(f"[Scheduler] 分析完成，生成 {len(results)} 条建议")
-            
-            for r in results:
-                print(f"  - {r.etf_code}: {r.advice_type} (置信度 {r.confidence}%)")
-            
-            # 发送推送通知
-            if results:
-                print("[Scheduler] 开始发送推送通知...")
-                for r in results:
-                    await NotificationService.send_advice_notification(
-                        etf_code=r.etf_code,
-                        etf_name=r.etf_name or "",
-                        advice_type=r.advice_type,
-                        reason=r.reason,
-                        confidence=r.confidence
-                    )
-                print("[Scheduler] 推送通知发送完成")
-                
+
+            print(f"[Scheduler] 共 {len(user_ids)} 个活跃用户待分析")
         except Exception as e:
-            print(f"[Scheduler] 分析任务执行失败: {e}")
+            print(f"[Scheduler] 加载用户列表失败: {e}")
+            return
+
+    for user_id in user_ids:
+        try:
+            await analyze_user_portfolios(user_id)
+        except Exception as e:
+            print(f"[Scheduler] 用户 {user_id} 分析任务执行失败: {e}")
 
 
 def setup_scheduler():

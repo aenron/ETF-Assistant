@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from database import get_session
-from schemas.user import UserCreate, UserLogin, UserResponse, Token
+from schemas.user import UserCreate, UserLogin, UserResponse, Token, AccountBalanceUpdate
 from services.auth_service import AuthService
 from models.user import User
 from config import settings
@@ -121,3 +121,23 @@ async def login(
 async def get_me(current_user: User = Depends(get_current_user)):
     """获取当前用户信息"""
     return UserResponse.model_validate(current_user)
+
+
+@router.get("/account-balance")
+async def get_account_balance(current_user: User = Depends(get_current_user)):
+    """获取账户金额"""
+    return {"account_balance": current_user.account_balance}
+
+
+@router.put("/account-balance")
+async def update_account_balance(
+    data: AccountBalanceUpdate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """更新账户金额"""
+    from decimal import Decimal
+    current_user.account_balance = Decimal(str(data.account_balance))
+    await session.commit()
+    await session.refresh(current_user)
+    return {"account_balance": current_user.account_balance}

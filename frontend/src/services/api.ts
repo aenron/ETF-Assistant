@@ -123,6 +123,16 @@ export interface AdviceResponse {
   pnl_pct: number | null
 }
 
+export interface AccountAnalysisResponse {
+  summary: string
+  position_advice: string
+  rebalance_advice: string
+  risk_level: string
+  key_actions: string[]
+  confidence: number
+  created_at: string
+}
+
 export interface AdviceLogResponse {
   id: number
   etf_code: string | null
@@ -175,6 +185,8 @@ export const marketApi = {
 
 export const adviceApi = {
   generate: (etfCodes?: string[]) => api.post<AdviceResponse[]>('/advice/generate', { etf_codes: etfCodes }),
+  analyzeAccount: () => api.post<AccountAnalysisResponse>('/advice/account-analysis'),
+  getLatestAccountAnalysis: () => api.get<AccountAnalysisResponse | null>('/advice/account-analysis/latest'),
   generateForPortfolio: (portfolioId: number) => api.get<AdviceResponse>(`/advice/generate/${portfolioId}`),
   getHistory: (limit = 50) => api.get<AdviceLogResponse[]>('/advice/history', { params: { limit } }),
   getLatest: () => api.get<Record<string, AdviceLogResponse>>('/advice/latest'),

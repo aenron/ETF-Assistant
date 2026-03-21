@@ -9,7 +9,11 @@ from services.portfolio_service import PortfolioService
 from routers.auth import get_current_user
 from models.user import User
 
-router = APIRouter(prefix="/api/market", tags=["market"])
+router = APIRouter(
+    prefix="/api/market",
+    tags=["market"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("/quote/{code}", response_model=MarketQuote)
