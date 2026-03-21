@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     qwen_model: str = "qwen-plus"
     qwen_enable_search: bool = True
     
+    # Bark 推送配置
+    bark_key: str = ""
+    bark_url: str = "https://api.day.app"
+    
     # 行情缓存天数
     market_cache_days: int = 60
     

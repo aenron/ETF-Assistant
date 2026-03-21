@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from database import async_session_maker
 from services.advisor_service import AdvisorService
 from services.portfolio_service import PortfolioService
+from services.notification_service import NotificationService
 
 
 scheduler = AsyncIOScheduler()
@@ -35,6 +36,19 @@ async def analyze_all_portfolios():
             
             for r in results:
                 print(f"  - {r.etf_code}: {r.advice_type} (置信度 {r.confidence}%)")
+            
+            # 发送推送通知
+            if results:
+                print("[Scheduler] 开始发送推送通知...")
+                for r in results:
+                    await NotificationService.send_advice_notification(
+                        etf_code=r.etf_code,
+                        etf_name=r.etf_name or "",
+                        advice_type=r.advice_type,
+                        reason=r.reason,
+                        confidence=r.confidence
+                    )
+                print("[Scheduler] 推送通知发送完成")
                 
         except Exception as e:
             print(f"[Scheduler] 分析任务执行失败: {e}")
