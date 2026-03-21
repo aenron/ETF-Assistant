@@ -15,4 +15,6 @@ class AdviceLog(Base):
     advice_type: Mapped[str | None] = mapped_column(String(20))
     reason: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    llm_provider: Mapped[str | None] = mapped_column(String(30))
+    llm_model: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())

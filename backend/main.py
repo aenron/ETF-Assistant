@@ -1,22 +1,39 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 
-from database import init_db
+from database import init_db, engine
 from routers import portfolio_router, market_router, advice_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from services.redis_service import RedisService
+from services.scheduler import start_scheduler, shutdown_scheduler
+
+
+async def run_migrations():
+    """执行数据库迁移"""
+    async with engine.begin() as conn:
+        # advice_log 添加 llm_provider 和 llm_model 字段
+        for col, col_type in [("llm_provider", "VARCHAR(30)"), ("llm_model", "VARCHAR(100)")]:
+            try:
+                await conn.execute(text(f"ALTER TABLE advice_log ADD COLUMN {col} {col_type}"))
+                print(f"[Migration] 添加字段 advice_log.{col}")
+            except Exception:
+                pass  # 字段已存在
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化数据库
     await init_db()
-    # 不再预加载行情，改为按需从Redis获取
+    await run_migrations()
+    # 启动定时任务调度器
+    start_scheduler()
     print("[Startup] 行情数据将按需从Redis缓存获取")
     yield
     # 关闭时清理资源
+    shutdown_scheduler()
     await RedisService.close()
 
 

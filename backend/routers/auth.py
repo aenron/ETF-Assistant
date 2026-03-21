@@ -21,11 +21,9 @@ async def get_current_user(
 ) -> User:
     """获取当前登录用户"""
     token = credentials.credentials
-    print(f"[Auth] 收到Token: {token[:20]}...")
-    
+
     user_id = AuthService.decode_token(token)
-    print(f"[Auth] 解码user_id: {user_id}")
-    
+
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

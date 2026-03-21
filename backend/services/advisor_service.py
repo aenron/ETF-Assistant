@@ -93,7 +93,7 @@ class AdvisorService:
 ## 近期政策
 {policy_news}
 
-请综合考虑技术面、基本面、政策面和市场情绪，如果可以的话，搜索最新的相关消息，给出投资建议。
+请综合考虑技术面、基本面、政策面和市场情绪，同时搜索最新的相关新闻和政策消息，给出投资建议。
 
 输出要求：
 1. advice_type: 操作建议，必须是以下五个值之一: "buy"(买入), "sell"(卖出), "hold"(持有), "add"(加仓), "reduce"(减仓)
@@ -170,7 +170,16 @@ class AdvisorService:
             kline_summary = cls.format_kline_summary(kline_data)
             
             # 计算技术指标
-            indicators = MarketService.calc_technical_indicators(kline_data)
+            indicators = MarketService.calculate_technical_indicators(kline_data)
+            indicators_dict = {
+                'ma5': indicators.ma5,
+                'ma10': indicators.ma10,
+                'ma20': indicators.ma20,
+                'rsi': indicators.rsi14,
+                'dif': indicators.macd_dif,
+                'dea': indicators.macd_dea,
+                'macd_bar': indicators.macd_histogram,
+            }
             
             # 构造Prompt
             prompt = cls.build_prompt(
@@ -182,7 +191,7 @@ class AdvisorService:
                 pnl_pct=pnl_pct,
                 holding_days=holding_days,
                 kline_summary=kline_summary,
-                indicators=indicators,
+                indicators=indicators_dict,
             )
             
             # 调用LLM
@@ -202,6 +211,8 @@ class AdvisorService:
                 advice_type=advice_type,
                 reason=reason,
                 confidence=confidence,
+                llm_provider=settings.llm_provider,
+                llm_model=llm.model if hasattr(llm, 'model') else None,
             )
             session.add(log)
             
@@ -253,11 +264,22 @@ class AdvisorService:
             holding_days = (date.today() - p.buy_date).days
         
         # 获取历史K线
+        print(f"[AdvisorService] 开始获取历史K线: {p.etf_code}")
         kline_data = MarketService.get_history_kline(p.etf_code, days=60)
+        print(f"[AdvisorService] 获取到 {len(kline_data)} 条K线数据")
         kline_summary = cls.format_kline_summary(kline_data)
         
         # 计算技术指标
-        indicators = MarketService.calc_technical_indicators(kline_data)
+        indicators = MarketService.calculate_technical_indicators(kline_data)
+        indicators_dict = {
+            'ma5': indicators.ma5,
+            'ma10': indicators.ma10,
+            'ma20': indicators.ma20,
+            'rsi': indicators.rsi14,
+            'dif': indicators.macd_dif,
+            'dea': indicators.macd_dea,
+            'macd_bar': indicators.macd_histogram,
+        }
         
         # 获取相关新闻和政策
         print(f"[AdvisorService] 获取 {quote.name} 相关新闻...")
@@ -278,7 +300,7 @@ class AdvisorService:
             pnl_pct=pnl_pct,
             holding_days=holding_days,
             kline_summary=kline_summary,
-            indicators=indicators,
+            indicators=indicators_dict,
             news_summary=news_summary,
             policy_news=policy_news,
         )
@@ -321,6 +343,8 @@ class AdvisorService:
             advice_type=advice_type,
             reason=reason,
             confidence=confidence,
+            llm_provider=settings.llm_provider,
+            llm_model=llm.model if hasattr(llm, 'model') else None,
         )
         session.add(log)
         await session.flush()

@@ -96,6 +96,23 @@ export interface KLineItem {
   change_pct: number
 }
 
+export interface TechnicalIndicators {
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  rsi14: number | null
+  macd_dif: number | null
+  macd_dea: number | null
+  macd_histogram: number | null
+}
+
+export interface MarketHistoryResponse {
+  code: string
+  name: string
+  data: KLineItem[]
+  indicators: TechnicalIndicators | null
+}
+
 export interface AdviceResponse {
   etf_code: string
   etf_name: string | null
@@ -112,6 +129,8 @@ export interface AdviceLogResponse {
   advice_type: string | null
   reason: string | null
   confidence: number | null
+  llm_provider: string | null
+  llm_model: string | null
   created_at: string
 }
 
@@ -147,14 +166,17 @@ export const portfolioApi = {
 
 export const marketApi = {
   getQuote: (code: string) => api.get<MarketQuote>(`/market/quote/${code}`),
-  getHistory: (code: string, days = 60) => api.get(`/market/history/${code}`, { params: { days } }),
+  getHistory: (code: string, days = 60) => api.get<MarketHistoryResponse>(`/market/history/${code}`, { params: { days } }),
   searchEtf: (q: string) => api.get<EtfSearchResult[]>('/market/etf/search', { params: { q } }),
+  refreshQuote: (code: string) => api.post(`/market/refresh/${code}`),
+  refreshAll: () => api.post('/market/refresh-all'),
 }
 
 export const adviceApi = {
   generate: (etfCodes?: string[]) => api.post<AdviceResponse[]>('/advice/generate', { etf_codes: etfCodes }),
   generateForPortfolio: (portfolioId: number) => api.get<AdviceResponse>(`/advice/generate/${portfolioId}`),
   getHistory: (limit = 50) => api.get<AdviceLogResponse[]>('/advice/history', { params: { limit } }),
+  getLatest: () => api.get<Record<string, AdviceLogResponse>>('/advice/latest'),
 }
 
 export const llmApi = {

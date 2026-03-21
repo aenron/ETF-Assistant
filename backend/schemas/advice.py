@@ -27,6 +27,8 @@ class AdviceLogResponse(BaseModel):
     advice_type: Optional[str] = None
     reason: Optional[str] = None
     confidence: Optional[float] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

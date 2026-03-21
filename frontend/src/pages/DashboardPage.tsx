@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { portfolioApi, adviceApi, type PortfolioSummary } from '@/services/api'
+import { portfolioApi, adviceApi, marketApi, type PortfolioSummary } from '@/services/api'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { AdviceCard } from '@/components/AdviceCard'
 import { Button } from '@/components/ui/button'
-import { RefreshCw, Sparkles, AlertCircle } from 'lucide-react'
+import { RefreshCw, Sparkles, AlertCircle, TrendingUp } from 'lucide-react'
 import type { AdviceResponse } from '@/services/api'
 
 export function DashboardPage() {
@@ -11,6 +11,7 @@ export function DashboardPage() {
   const [advices, setAdvices] = useState<AdviceResponse[]>([])
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
   const fetchData = async () => {
     setLoading(true)
@@ -21,6 +22,25 @@ export function DashboardPage() {
       console.error('Failed to fetch data:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleRefreshMarket = async () => {
+    setRefreshing(true)
+    try {
+      const res = await marketApi.refreshAll()
+      if (res.data.success) {
+        // 刷新后重新获取数据
+        await fetchData()
+        alert(res.data.message || '行情刷新成功')
+      } else {
+        alert(res.data.message || '刷新失败')
+      }
+    } catch (error) {
+      console.error('Failed to refresh market:', error)
+      alert('刷新行情失败')
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -48,6 +68,10 @@ export function DashboardPage() {
         <div className="flex gap-2">
           <Button variant="outline" size="icon" onClick={fetchData} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          </Button>
+          <Button variant="outline" onClick={handleRefreshMarket} disabled={refreshing}>
+            <TrendingUp className="h-4 w-4 mr-2" />
+            {refreshing ? '刷新中...' : '刷新行情'}
           </Button>
           <Button onClick={handleGenerateAdvice} disabled={generating}>
             <Sparkles className="h-4 w-4 mr-2" />

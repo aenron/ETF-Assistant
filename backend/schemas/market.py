@@ -28,11 +28,23 @@ class KLineItem(BaseModel):
     change_pct: float
 
 
+class TechnicalIndicators(BaseModel):
+    """技术指标"""
+    ma5: Optional[float] = None
+    ma10: Optional[float] = None
+    ma20: Optional[float] = None
+    rsi14: Optional[float] = None
+    macd_dif: Optional[float] = None
+    macd_dea: Optional[float] = None
+    macd_histogram: Optional[float] = None
+
+
 class MarketDailyResponse(BaseModel):
     """历史行情响应"""
     code: str
     name: str
     data: List[KLineItem]
+    indicators: Optional[TechnicalIndicators] = None
 
 
 class EtfSearchResult(BaseModel):
