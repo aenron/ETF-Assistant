@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from database import init_db
 from routers import portfolio_router, market_router, advice_router
 from routers.auth import router as auth_router
+from routers.llm_config import router as llm_config_router
 from services.redis_service import RedisService
 
 
@@ -40,6 +41,7 @@ app.include_router(auth_router)
 app.include_router(portfolio_router)
 app.include_router(market_router)
 app.include_router(advice_router)
+app.include_router(llm_config_router)
 
 
 @app.get("/")

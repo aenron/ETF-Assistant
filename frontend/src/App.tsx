@@ -6,6 +6,7 @@ import LoginPage from '@/pages/LoginPage'
 import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User } from 'lucide-react'
 import { isAuthenticated, getCurrentUser, removeToken } from '@/services/authApi'
 import { useState, useEffect } from 'react'
+import { LLMSelector } from '@/components/LLMSelector'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated() ? <>{children}</> : <Navigate to="/login" replace />
@@ -66,6 +67,7 @@ export default function App() {
                 </NavLink>
               </nav>
               <div className="flex items-center gap-4">
+                <LLMSelector />
                 <span className="flex items-center gap-1 text-sm text-muted-foreground">
                   <User className="h-4 w-4" />
                   {user?.username}

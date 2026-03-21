@@ -122,6 +122,19 @@ export interface EtfSearchResult {
   exchange: string | null
 }
 
+export interface LLMProvider {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  supports_search: boolean
+}
+
+export interface LLMConfigResponse {
+  current_provider: string
+  providers: LLMProvider[]
+}
+
 // API 服务
 export const portfolioApi = {
   getList: () => api.get<PortfolioWithMarket[]>('/portfolio'),
@@ -142,4 +155,9 @@ export const adviceApi = {
   generate: (etfCodes?: string[]) => api.post<AdviceResponse[]>('/advice/generate', { etf_codes: etfCodes }),
   generateForPortfolio: (portfolioId: number) => api.get<AdviceResponse>(`/advice/generate/${portfolioId}`),
   getHistory: (limit = 50) => api.get<AdviceLogResponse[]>('/advice/history', { params: { limit } }),
+}
+
+export const llmApi = {
+  getProviders: () => api.get<LLMConfigResponse>('/llm/providers'),
+  switchProvider: (provider: string) => api.post(`/llm/switch`, null, { params: { provider } }),
 }
