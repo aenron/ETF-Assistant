@@ -24,6 +24,7 @@ export default function LoginPage() {
     username: '',
     password: '',
     email: '',
+    invite_code: '',
   })
 
   const from = (location.state as any)?.from?.pathname || '/'
@@ -138,6 +139,16 @@ export default function LoginPage() {
                     required
                     minLength={6}
                     placeholder="密码（至少6个字符）"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="register-invite-code">邀请码 <span className="text-red-500">*</span></Label>
+                  <Input
+                    id="register-invite-code"
+                    value={registerData.invite_code}
+                    onChange={(e) => setRegisterData({ ...registerData, invite_code: e.target.value })}
+                    required
+                    placeholder="请输入邀请码"
                   />
                 </div>
                 {error && <p className="text-red-500 text-sm">{error}</p>}

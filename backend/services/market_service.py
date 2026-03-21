@@ -536,8 +536,8 @@ class MarketService:
         return cls._get_empty_quotes(codes)
     
     @classmethod
-    async def _cache_all_quotes(cls, df: pd.DataFrame):
-        """缓存全量ETF行情数据到Redis"""
+    async def _cache_all_quotes(cls, df: pd.DataFrame, session: Optional[AsyncSession] = None):
+        """缓存全量ETF行情数据到Redis，并同步ETF基本信息到数据库"""
         if not settings.redis_enabled:
             return
         
@@ -553,12 +553,15 @@ class MarketService:
         amount_col = "成交额" if "成交额" in df.columns else None
         
         cached_count = 0
+        etf_infos_to_save = []
+        
         for _, row in df.iterrows():
             code = str(row[code_col])
+            name = str(row.get(name_col, ""))
             try:
                 quote = MarketQuote(
                     code=code,
-                    name=str(row.get(name_col, "")),
+                    name=name,
                     price=float(row.get(price_col, 0) or 0),
                     change_pct=float(row.get(change_col, 0) or 0) if change_col else 0.0,
                     open_price=float(row.get(open_col, 0)) if open_col and row.get(open_col) else None,
@@ -569,8 +572,25 @@ class MarketService:
                 )
                 await cls.cache_quote(code, quote)
                 cached_count += 1
+                
+                # 收集 ETF 基本信息
+                if name:
+                    etf_infos_to_save.append((code, name))
             except Exception:
                 continue
+        
+        # 同步 ETF 基本信息到数据库
+        if session and etf_infos_to_save:
+            try:
+                from sqlalchemy.dialects.postgresql import insert
+                for code, name in etf_infos_to_save:
+                    # 使用 UPSERT 语法，不存在则插入，存在则忽略
+                    stmt = insert(EtfInfo).values(code=code, name=name).on_conflict_do_nothing(index_elements=['code'])
+                    await session.execute(stmt)
+                await session.commit()
+                print(f"[MarketService] ✓ 已同步 {len(etf_infos_to_save)} 只ETF基本信息到数据库")
+            except Exception as e:
+                print(f"[MarketService] 同步ETF基本信息失败: {e}")
         
         print(f"[MarketService] ✓ 已缓存 {cached_count} 只ETF行情到Redis (有效期7天, 缓存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     

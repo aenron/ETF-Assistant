@@ -8,6 +8,7 @@ from database import get_session
 from schemas.user import UserCreate, UserLogin, UserResponse, Token
 from services.auth_service import AuthService
 from models.user import User
+from config import settings
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
@@ -72,6 +73,12 @@ async def register(
     session: AsyncSession = Depends(get_session),
 ):
     """用户注册"""
+    # 校验邀请码
+    if not settings.invite_code or user_data.invite_code != settings.invite_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="邀请码无效",
+        )
     try:
         user = await AuthService.create_user(session, user_data)
         access_token = AuthService.create_access_token(user.id)

@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     bark_key: str = ""
     bark_url: str = "https://api.day.app"
     
+    # 注册邀请码
+    invite_code: str = ""
+    
     # 行情缓存天数
     market_cache_days: int = 60
     

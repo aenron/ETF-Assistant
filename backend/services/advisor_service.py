@@ -377,10 +377,26 @@ class AdvisorService:
         
         result = await session.execute(query)
         rows = result.all()
+        
+        # 收集需要补充名称的 ETF 代码
+        etf_codes_to_fetch = []
+        for log, etf_name in rows:
+            if not etf_name and log.etf_code:
+                etf_codes_to_fetch.append(log.etf_code)
+        
+        # 从实时行情获取缺失的 ETF 名称
+        etf_names_from_market = {}
+        if etf_codes_to_fetch:
+            try:
+                quotes = await MarketService.get_quotes_for_codes(etf_codes_to_fetch)
+                etf_names_from_market = {code: quote.name for code, quote in quotes.items() if quote.name}
+            except Exception as e:
+                print(f"[AdvisorService] 从行情获取ETF名称失败: {e}")
+        
         return [
             AdviceLogResponse(
                 **{c.key: getattr(log, c.key) for c in AdviceLog.__table__.columns},
-                etf_name=etf_name,
+                etf_name=etf_name or etf_names_from_market.get(log.etf_code, None),
             )
             for log, etf_name in rows
         ]
