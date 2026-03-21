@@ -34,7 +34,7 @@ class GeminiClient(BaseLLMClient):
         
         # 配置生成参数（tools放在config中）
         config = types.GenerateContentConfig(
-            temperature=0.7,
+            temperature=0.0,
             max_output_tokens=8192,
             response_mime_type="application/json",
             tools=tools,

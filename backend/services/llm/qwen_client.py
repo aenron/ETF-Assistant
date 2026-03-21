@@ -28,6 +28,7 @@ class QwenClient:
         response = Generation.call(
             model=self.model,
             messages=messages,
+            temperature=0.0,
             result_format="text",
             enable_search=self.enable_search,
         )

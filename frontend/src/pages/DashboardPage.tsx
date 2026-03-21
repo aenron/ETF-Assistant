@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { portfolioApi, adviceApi, marketApi, type PortfolioSummary } from '@/services/api'
+import { portfolioApi, adviceApi, marketApi, type PortfolioSummary, type PortfolioWithMarket } from '@/services/api'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { AdviceCard } from '@/components/AdviceCard'
 import { Button } from '@/components/ui/button'
@@ -22,6 +22,35 @@ export function DashboardPage() {
       console.error('Failed to fetch data:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  // 获取缓存的最新建议
+  const fetchLatestAdvice = async () => {
+    try {
+      const res = await adviceApi.getLatest()
+      const adviceLogs = Object.values(res.data || {})
+      
+      // 获取用户持仓的实时行情
+      const quotesRes = await portfolioApi.getList()
+      const quotesMap = new Map(quotesRes.data.map((p: PortfolioWithMarket) => [p.etf_code, p]))
+      
+      // 将 Record<string, AdviceLogResponse> 转换为 AdviceResponse[]
+      const latestAdvices: AdviceResponse[] = adviceLogs.map(log => {
+        const portfolio = quotesMap.get(log.etf_code || '')
+        return {
+          etf_code: log.etf_code || '',
+          etf_name: log.etf_name || null,
+          advice_type: log.advice_type || 'hold',
+          reason: log.reason || '',
+          confidence: log.confidence || 0,
+          current_price: portfolio?.current_price ?? null,
+          pnl_pct: portfolio?.pnl_pct ?? null,
+        }
+      })
+      setAdvices(latestAdvices)
+    } catch (error) {
+      console.error('Failed to fetch latest advice:', error)
     }
   }
 
@@ -59,6 +88,7 @@ export function DashboardPage() {
 
   useEffect(() => {
     fetchData()
+    fetchLatestAdvice()
   }, [])
 
   return (
