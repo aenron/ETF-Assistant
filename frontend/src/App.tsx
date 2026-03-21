@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { PortfolioPage } from '@/pages/PortfolioPage'
 import { AdvicePage } from '@/pages/AdvicePage'
@@ -12,12 +12,15 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated() ? <>{children}</> : <Navigate to="/login" replace />
 }
 
-export default function App() {
+function AppContent() {
+  const location = useLocation()
   const [user, setUser] = useState(getCurrentUser())
+  const [authed, setAuthed] = useState(isAuthenticated())
 
   useEffect(() => {
+    setAuthed(isAuthenticated())
     setUser(getCurrentUser())
-  }, [])
+  }, [location])
 
   const handleLogout = () => {
     removeToken()
@@ -25,9 +28,8 @@ export default function App() {
   }
 
   return (
-    <BrowserRouter>
-      <div className="min-h-screen bg-background">
-        {isAuthenticated() && (
+    <div className="min-h-screen bg-background">
+      {authed && (
           <header className="border-b">
             <div className="container mx-auto px-4 h-14 flex items-center justify-between">
               <h1 className="text-xl font-bold">ETF投资智能体</h1>
@@ -83,15 +85,22 @@ export default function App() {
             </div>
           </header>
         )}
-        <main className="container mx-auto px-4 py-6">
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
-            <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
-            <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
-          </Routes>
-        </main>
-      </div>
+      <main className="container mx-auto px-4 py-6">
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
+          <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
+          <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
+        </Routes>
+      </main>
+    </div>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppContent />
     </BrowserRouter>
   )
 }

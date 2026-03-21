@@ -2,10 +2,7 @@ import { useEffect, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import {
-  X, TrendingUp, TrendingDown, Minus, Plus, ArrowDownRight,
-  BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock
-} from 'lucide-react'
+import { X, BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock } from 'lucide-react'
 import {
   marketApi, adviceApi,
   type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse
@@ -98,7 +95,6 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     change: k.change_pct,
   }))
 
-  const adviceConfig = advice ? (adviceTypeConfig[advice.advice_type] || adviceTypeConfig.hold) : null
   const displayAdvice = advice || latestAdvice
   const displayConfig = displayAdvice ? (adviceTypeConfig[displayAdvice.advice_type || 'hold'] || adviceTypeConfig.hold) : null
   const displayConfidence = displayAdvice ? (displayAdvice.confidence || 0) : 0

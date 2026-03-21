@@ -65,6 +65,7 @@ export function AdvicePage() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className="font-mono text-lg font-semibold">{log.etf_code || '-'}</span>
+                    {log.etf_name && <span className="text-sm text-muted-foreground">{log.etf_name}</span>}
                     <Badge variant="outline" className={`${config.color} border-current font-medium`}>
                       <Icon className="h-3 w-3 mr-1" />
                       {config.label}

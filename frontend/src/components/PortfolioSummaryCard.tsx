@@ -1,7 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { type PortfolioSummary } from '@/services/api'
 import { TrendingUp, TrendingDown, Wallet, PieChart } from 'lucide-react'
-import { PieChart as RechartsPie, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts'
+import { PieChart as RechartsPie, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 
 interface PortfolioSummaryCardProps {
   summary: PortfolioSummary | null

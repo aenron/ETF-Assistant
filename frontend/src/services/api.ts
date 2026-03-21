@@ -126,6 +126,7 @@ export interface AdviceResponse {
 export interface AdviceLogResponse {
   id: number
   etf_code: string | null
+  etf_name: string | null
   advice_type: string | null
   reason: string | null
   confidence: number | null

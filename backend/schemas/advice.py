@@ -24,6 +24,7 @@ class AdviceLogResponse(BaseModel):
     """建议日志"""
     id: int
     etf_code: Optional[str] = None
+    etf_name: Optional[str] = None
     advice_type: Optional[str] = None
     reason: Optional[str] = None
     confidence: Optional[float] = None

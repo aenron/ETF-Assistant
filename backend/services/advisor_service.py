@@ -4,7 +4,7 @@ from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Portfolio, AdviceLog
+from models import Portfolio, AdviceLog, EtfInfo
 from schemas.advice import AdviceResponse, AdviceLogResponse
 from schemas.portfolio import PortfolioWithMarket
 from config import settings
@@ -366,11 +366,21 @@ class AdvisorService:
         user_id: Optional[int] = None,
     ) -> List[AdviceLogResponse]:
         """获取历史建议记录"""
-        query = select(AdviceLog).order_by(AdviceLog.created_at.desc())
+        query = (
+            select(AdviceLog, EtfInfo.name.label("etf_name"))
+            .outerjoin(EtfInfo, AdviceLog.etf_code == EtfInfo.code)
+            .order_by(AdviceLog.created_at.desc())
+        )
         if user_id:
             query = query.where(AdviceLog.user_id == user_id)
         query = query.limit(limit)
         
         result = await session.execute(query)
-        logs = result.scalars().all()
-        return [AdviceLogResponse.model_validate(log) for log in logs]
+        rows = result.all()
+        return [
+            AdviceLogResponse(
+                **{c.key: getattr(log, c.key) for c in AdviceLog.__table__.columns},
+                etf_name=etf_name,
+            )
+            for log, etf_name in rows
+        ]
