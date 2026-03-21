@@ -9,7 +9,7 @@ from schemas.user import UserCreate, UserLogin, UserResponse, Token
 from services.auth_service import AuthService
 from models.user import User
 
-router = APIRouter(prefix="/auth", tags=["认证"])
+router = APIRouter(prefix="/api/auth", tags=["认证"])
 
 # Bearer Token认证
 security = HTTPBearer()
@@ -21,7 +21,10 @@ async def get_current_user(
 ) -> User:
     """获取当前登录用户"""
     token = credentials.credentials
+    print(f"[Auth] 收到Token: {token[:20]}...")
+    
     user_id = AuthService.decode_token(token)
+    print(f"[Auth] 解码user_id: {user_id}")
     
     if not user_id:
         raise HTTPException(

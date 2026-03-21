@@ -3,16 +3,13 @@ from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from passlib.context import CryptContext
+import bcrypt
 from jose import JWTError, jwt
 
 from models.user import User
 from schemas.user import UserCreate, UserResponse
 from config import settings
 
-
-# 密码加密上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT配置
 SECRET_KEY = "your-secret-key-change-in-production"  # 生产环境应从配置读取
@@ -26,12 +23,17 @@ class AuthService:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """验证密码"""
-        return pwd_context.verify(plain_password, hashed_password)
+        password_bytes = plain_password.encode('utf-8')[:72]
+        hashed_bytes = hashed_password.encode('utf-8')
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
     
     @staticmethod
     def get_password_hash(password: str) -> str:
         """生成密码哈希"""
-        return pwd_context.hash(password)
+        password_bytes = password.encode('utf-8')[:72]
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password_bytes, salt)
+        return hashed.decode('utf-8')
     
     @staticmethod
     def create_access_token(user_id: int, expires_delta: Optional[timedelta] = None) -> str:
@@ -41,7 +43,8 @@ class AuthService:
         else:
             expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         
-        to_encode = {"sub": user_id, "exp": expire}
+        # sub 必须是字符串
+        to_encode = {"sub": str(user_id), "exp": expire}
         return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     
     @staticmethod
@@ -49,10 +52,12 @@ class AuthService:
         """解码令牌，返回用户ID"""
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            user_id: int = payload.get("sub")
+            print(f"[Auth] payload: {payload}")
+            user_id = payload.get("sub")
             if user_id:
-                return user_id
-        except JWTError:
+                return int(user_id)
+        except (JWTError, ValueError, TypeError) as e:
+            print(f"[Auth] JWT解码错误: {e}")
             return None
         return None
     
