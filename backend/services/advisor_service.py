@@ -11,7 +11,7 @@ from config import settings
 from services.market_service import MarketService
 from services.portfolio_service import PortfolioService
 from services.news_service import NewsService
-from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, OllamaClient, GeminiClient
+from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, OllamaClient, GeminiClient, QwenClient
 
 
 class AdvisorService:
@@ -40,6 +40,12 @@ class AdvisorService:
                     api_key=settings.gemini_api_key,
                     model=settings.gemini_model,
                     enable_grounding=settings.gemini_enable_grounding,
+                )
+            elif settings.llm_provider == "qwen":
+                cls._llm_client = QwenClient(
+                    api_key=settings.qwen_api_key,
+                    model=settings.qwen_model,
+                    enable_search=settings.qwen_enable_search,
                 )
             else:  # ollama
                 cls._llm_client = OllamaClient(

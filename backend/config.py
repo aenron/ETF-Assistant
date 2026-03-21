@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     redis_enabled: bool = True
     
     # LLM 配置
-    llm_provider: Literal["openai", "deepseek", "ollama", "gemini"] = "deepseek"
+    llm_provider: Literal["openai", "deepseek", "ollama", "gemini", "qwen"] = "deepseek"
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = "deepseek-chat"
@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
     gemini_enable_grounding: bool = True
+    
+    # 通义千问 配置
+    qwen_api_key: str = ""
+    qwen_model: str = "qwen-plus"
+    qwen_enable_search: bool = True
     
     # 行情缓存天数
     market_cache_days: int = 60

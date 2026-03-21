@@ -1,6 +1,9 @@
+"""Google Gemini API客户端（使用官方google-genai SDK）"""
 import json
-import httpx
+import re
 from typing import Optional, Dict, Any, List
+from google import genai
+from google.genai import types
 from services.llm.base import BaseLLMClient
 
 
@@ -14,100 +17,60 @@ class GeminiClient(BaseLLMClient):
         enable_grounding: bool = True,
     ):
         self.api_key = api_key
-        self.model = model
+        self.model_name = model
         self.enable_grounding = enable_grounding
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        # 创建客户端
+        self.client = genai.Client(api_key=api_key)
     
     async def chat(self, prompt: str) -> str:
         """发送prompt并获取响应"""
-        url = f"{self.base_url}/models/{self.model}:generateContent"
-        
-        # 定义JSON Schema for Structured Output
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "advice_type": {
-                    "type": "string",
-                    "enum": ["buy", "sell", "hold", "add", "reduce"],
-                    "description": "操作建议"
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "分析理由"
-                },
-                "confidence": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 100,
-                    "description": "置信度"
-                }
-            },
-            "required": ["advice_type", "reason", "confidence"]
-        }
-        
-        # 构建请求体
-        request_body: Dict[str, Any] = {
-            "contents": [
-                {
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 8192,
-                "responseMimeType": "application/json",
-                "responseSchema": response_schema,  # Structured Output Schema
-            }
-        }
-        
         # 启用Google Search Grounding
+        tools = None
         if self.enable_grounding:
-            request_body["tools"] = [
-                {
-                    "googleSearch": {}
-                }
-            ]
+            tools = [types.Tool(
+                google_search=types.GoogleSearch()
+            )]
             print(f"[GeminiClient] 已启用 Google Search Grounding")
         
-        print(f"[GeminiClient] 已启用 Structured Output (JSON Schema)")
+        # 配置生成参数（tools放在config中）
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            max_output_tokens=8192,
+            response_mime_type="application/json",
+            tools=tools,
+        )
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                },
-                json=request_body,
+        print(f"[GeminiClient] 已启用 Structured Output (JSON)")
+        
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
             )
-            response.raise_for_status()
-            data = response.json()
             
             # 打印Grounding元数据
-            if self.enable_grounding and "candidates" in data:
-                candidate = data["candidates"][0]
-                if "groundingMetadata" in candidate:
-                    metadata = candidate["groundingMetadata"]
+            if self.enable_grounding and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                    metadata = candidate.grounding_metadata
                     print(f"[GeminiClient] Grounding元数据:")
-                    if "webSearchQueries" in metadata:
-                        print(f"  - 搜索查询: {metadata['webSearchQueries']}")
-                    if "groundingChunks" in metadata:
-                        print(f"  - 来源数量: {len(metadata.get('groundingChunks', []))}")
+                    if hasattr(metadata, 'web_search_queries'):
+                        print(f"  - 搜索查询: {metadata.web_search_queries}")
+                    if hasattr(metadata, 'grounding_chunks'):
+                        print(f"  - 来源数量: {len(metadata.grounding_chunks or [])}")
             
-            # 提取响应文本
-            if "candidates" in data and len(data["candidates"]) > 0:
-                candidate = data["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    for part in candidate["content"]["parts"]:
-                        if "text" in part:
-                            return part["text"]
+            return response.text
             
-            return json.dumps(data)
+        except Exception as e:
+            print(f"[GeminiClient] 错误: {e}")
+            return json.dumps({"error": str(e)})
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
-        response = await self.chat(prompt)
         try:
+            response = await self.chat(prompt)
+            
             # 清理markdown代码块标记
             text = response.strip()
             if text.startswith("```"):
@@ -130,8 +93,6 @@ class GeminiClient(BaseLLMClient):
                     print(f"[GeminiClient] JSON不完整，尝试补全: ...{json_str[-50:]}")
                     # 尝试补全缺失的字段
                     if '"advice_type"' in json_str and '"reason"' in json_str:
-                        # 提取已有的值
-                        import re
                         advice_match = re.search(r'"advice_type"\s*:\s*"(\w+)"', json_str)
                         reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', json_str)
                         
@@ -144,70 +105,51 @@ class GeminiClient(BaseLLMClient):
                     return {"error": "JSON decode failed", "raw": response}
             return {"error": "No JSON found", "raw": response}
         except Exception as e:
-            return {"error": f"Parse error: {e}", "raw": response}
+            return {"error": f"Parse error: {e}", "raw": str(e)}
     
     async def chat_with_grounding(self, prompt: str) -> Dict[str, Any]:
         """发送prompt并获取带Grounding信息的响应"""
-        url = f"{self.base_url}/models/{self.model}:generateContent"
+        tools = [types.Tool(google_search=types.GoogleSearch())] if self.enable_grounding else None
         
-        request_body: Dict[str, Any] = {
-            "contents": [
-                {
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 2048,
-            },
-            "tools": [
-                {
-                    "googleSearch": {}
-                }
-            ]
-        }
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            max_output_tokens=2048,
+            tools=tools,
+        )
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                },
-                json=request_body,
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
             )
-            response.raise_for_status()
-            data = response.json()
             
             result = {
-                "text": "",
+                "text": response.text,
                 "grounding_metadata": None,
                 "search_queries": [],
             }
             
-            if "candidates" in data and len(data["candidates"]) > 0:
-                candidate = data["candidates"][0]
-                
-                # 提取响应文本
-                if "content" in candidate and "parts" in candidate["content"]:
-                    for part in candidate["content"]["parts"]:
-                        if "text" in part:
-                            result["text"] = part["text"]
-                
-                # 提取Grounding元数据
-                if "groundingMetadata" in candidate:
-                    metadata = candidate["groundingMetadata"]
+            # 提取Grounding元数据
+            if response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                    metadata = candidate.grounding_metadata
                     result["grounding_metadata"] = metadata
-                    
-                    # 提取搜索查询
-                    if "webSearchQueries" in metadata:
-                        result["search_queries"] = metadata["webSearchQueries"]
+                    if hasattr(metadata, 'web_search_queries'):
+                        result["search_queries"] = metadata.web_search_queries or []
             
             return result
+            
+        except Exception as e:
+            return {"text": "", "grounding_metadata": None, "search_queries": [], "error": str(e)}
     
     async def chat_json_with_sources(self, prompt: str) -> dict:
         """获取JSON响应并包含来源信息"""
         result = await self.chat_with_grounding(prompt)
+        
+        if "error" in result:
+            return {"error": result["error"]}
         
         try:
             text = result["text"]
