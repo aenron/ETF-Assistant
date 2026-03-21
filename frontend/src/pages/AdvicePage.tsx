@@ -26,6 +26,13 @@ function ConfidenceBar({ value }: { value: number }) {
   )
 }
 
+function formatBeijingTime(value: string) {
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    ? value
+    : `${value.replace(' ', 'T')}Z`
+  return new Date(normalized).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+}
+
 export function AdvicePage() {
   const [logs, setLogs] = useState<AdviceLogResponse[]>([])
   const [loading, setLoading] = useState(true)
@@ -80,7 +87,7 @@ export function AdvicePage() {
                   </div>
                   <div className="flex items-center gap-1 text-muted-foreground text-xs">
                     <Clock className="h-3 w-3" />
-                    {new Date(log.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
+                    {formatBeijingTime(log.created_at)}
                   </div>
                 </div>
 

@@ -676,28 +676,40 @@ class MarketService:
     @staticmethod
     def _guess_category(name: str) -> str:
         """根据名称猜测ETF类别"""
-        if any(k in name for k in ["沪深300", "中证500", "中证1000", "上证50", "创业板", "科创50", "科创100"]):
-            return "宽基"
-        elif any(k in name for k in ["医药", "医疗", "生物", "药"]):
-            return "医药"
-        elif any(k in name for k in ["芯片", "半导体", "电子", "计算机", "科技", "信息"]):
-            return "科技"
-        elif any(k in name for k in ["消费", "食品", "饮料", "白酒"]):
-            return "消费"
-        elif any(k in name for k in ["新能源", "光伏", "锂电", "电池", "储能"]):
-            return "新能源"
-        elif any(k in name for k in ["银行", "证券", "券商", "保险", "金融"]):
-            return "金融"
-        elif any(k in name for k in ["军工", "国防"]):
-            return "军工"
-        elif any(k in name for k in ["黄金", "白银", "豆粕", "原油", "商品"]):
-            return "商品"
-        elif any(k in name for k in ["债券", "国债", "地方债"]):
+        if any(k in name for k in ["货币", "现金", "短融", "同业存单"]):
+            return "现金管理"
+        elif any(k in name for k in ["国债", "地方债", "政金债", "信用债", "可转债", "债券"]):
             return "债券"
-        elif any(k in name for k in ["红利", "股息"]):
-            return "红利"
+        elif any(k in name for k in ["沪深300", "中证500", "中证1000", "上证50", "创业板指", "深证100", "A50", "全指", "科创宽基"]):
+            return "宽基指数"
+        elif any(k in name for k in ["红利", "股息", "高股息", "央企红利"]):
+            return "红利策略"
+        elif any(k in name for k in ["恒生", "纳指", "纳斯达克", "标普", "日经", "德国", "法国", "海外", "全球", "美国", "港股"]):
+            return "海外市场"
+        elif any(k in name for k in ["医药", "医疗", "生物", "创新药", "疫苗", "中药"]):
+            return "医药医疗"
+        elif any(k in name for k in ["芯片", "半导体", "集成电路"]):
+            return "半导体芯片"
+        elif any(k in name for k in ["人工智能", "AI", "机器人", "算力", "通信", "5G", "软件", "云计算", "信息技术", "计算机", "科技"]):
+            return "TMT/人工智能"
+        elif any(k in name for k in ["消费", "食品", "饮料", "白酒", "家电", "养殖", "农业消费"]):
+            return "消费"
+        elif any(k in name for k in ["新能源", "光伏", "锂电", "电池", "储能", "风电", "电车", "新能源汽车"]):
+            return "新能源"
+        elif any(k in name for k in ["银行", "证券", "券商", "保险", "金融", "地产", "房地产"]):
+            return "金融地产"
+        elif any(k in name for k in ["军工", "国防", "航空航天"]):
+            return "军工国防"
+        elif any(k in name for k in ["黄金", "白银", "贵金属"]):
+            return "贵金属"
+        elif any(k in name for k in ["原油", "煤炭", "油气", "能源", "化工"]):
+            return "能源化工"
+        elif any(k in name for k in ["豆粕", "农产品", "农业", "饲料"]):
+            return "农产品"
+        elif any(k in name for k in ["REIT", "reits", "不动产"]):
+            return "REITs"
         else:
-            return "其他"
+            return "未分类"
     
     @classmethod
     def calc_technical_indicators(cls, kline_data: List[KLineItem]) -> Dict[str, Any]:

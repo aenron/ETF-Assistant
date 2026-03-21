@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,7 @@ class AdvisorService:
 
     ACCOUNT_ANALYSIS_CODE = "ACCOUNT"
     ACCOUNT_ANALYSIS_NAME = "账户分析"
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
     _llm_client: Optional[BaseLLMClient] = None
     
@@ -207,6 +209,20 @@ class AdvisorService:
         ])
 
     @classmethod
+    def now_in_shanghai(cls) -> datetime:
+        """获取北京时间"""
+        return datetime.now(cls.SHANGHAI_TZ)
+
+    @classmethod
+    def ensure_shanghai_datetime(cls, value: Optional[datetime]) -> datetime:
+        """将时间统一为北京时间"""
+        if value is None:
+            return cls.now_in_shanghai()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=ZoneInfo("UTC")).astimezone(cls.SHANGHAI_TZ)
+        return value.astimezone(cls.SHANGHAI_TZ)
+
+    @classmethod
     def parse_account_analysis_reason(
         cls,
         reason: Optional[str],
@@ -254,7 +270,7 @@ class AdvisorService:
             risk_level=data["risk_level"],
             key_actions=key_actions[:3],
             confidence=float(confidence) if confidence is not None else 0,
-            created_at=created_at or datetime.now(),
+            created_at=cls.ensure_shanghai_datetime(created_at),
         )
     
     @staticmethod
@@ -542,16 +558,20 @@ class AdvisorService:
         rows = result.all()
         
         # 收集需要补充名称的 ETF 代码
-        etf_codes_to_fetch = []
+        etf_codes_to_fetch = set()
         for log, etf_name in rows:
-            if not etf_name and log.etf_code:
-                etf_codes_to_fetch.append(log.etf_code)
+            if (
+                not etf_name
+                and log.etf_code
+                and log.etf_code != cls.ACCOUNT_ANALYSIS_CODE
+            ):
+                etf_codes_to_fetch.add(log.etf_code)
         
         # 从实时行情获取缺失的 ETF 名称
         etf_names_from_market = {}
         if etf_codes_to_fetch:
             try:
-                quotes = await MarketService.get_quotes_for_codes(etf_codes_to_fetch)
+                quotes = await MarketService.get_quotes_for_codes(list(etf_codes_to_fetch))
                 etf_names_from_market = {code: quote.name for code, quote in quotes.items() if quote.name}
             except Exception as e:
                 print(f"[AdvisorService] 从行情获取ETF名称失败: {e}")
@@ -591,7 +611,7 @@ class AdvisorService:
                     "优先从宽基ETF开始分批建仓",
                 ],
                 confidence=85,
-                created_at=datetime.now(),
+                created_at=cls.now_in_shanghai(),
             )
             session.add(AdviceLog(
                 user_id=user_id,
@@ -635,7 +655,7 @@ class AdvisorService:
                 risk_level=result_json.get("risk_level", "medium"),
                 key_actions=[str(item) for item in key_actions[:3] if str(item).strip()],
                 confidence=float(result_json.get("confidence", 70)),
-                created_at=datetime.now(),
+                created_at=cls.now_in_shanghai(),
             )
             session.add(AdviceLog(
                 user_id=user_id,
@@ -656,7 +676,7 @@ class AdvisorService:
                 risk_level="medium",
                 key_actions=["稍后重试账户分析", "优先检查高权重持仓的风险集中度"],
                 confidence=0,
-                created_at=datetime.now(),
+                created_at=cls.now_in_shanghai(),
             )
             session.add(AdviceLog(
                 user_id=user_id,
