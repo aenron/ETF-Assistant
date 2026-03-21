@@ -1,0 +1,46 @@
+from pydantic_settings import BaseSettings
+from typing import Literal
+
+
+class Settings(BaseSettings):
+    # 数据库配置
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/etf"
+    
+    # Redis 配置
+    redis_url: str = "redis://localhost:6379/0"
+    redis_enabled: bool = True
+    
+    # LLM 配置
+    llm_provider: Literal["openai", "deepseek", "ollama", "gemini"] = "deepseek"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = "deepseek-chat"
+    
+    # OpenAI 默认配置
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
+    
+    # DeepSeek 默认配置
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_model: str = "deepseek-chat"
+    
+    # Ollama 默认配置
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    
+    # Gemini 配置
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_enable_grounding: bool = True
+    
+    # 行情缓存天数
+    market_cache_days: int = 60
+    
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
+
+
+settings = Settings()
