@@ -20,6 +20,18 @@ export function PortfolioSummaryCard({ summary }: PortfolioSummaryCardProps) {
     )
   }
 
+  // 无持仓数据时显示提示
+  if (summary.total_cost === 0 && summary.total_market_value === 0) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center">
+          <p className="text-muted-foreground mb-4">暂无持仓数据</p>
+          <p className="text-sm text-muted-foreground">请前往"持仓管理"添加ETF持仓</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
   const pieData = Object.entries(summary.category_distribution).map(([name, value]) => ({
     name,
     value: Number(value),
