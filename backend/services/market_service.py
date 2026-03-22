@@ -1,6 +1,7 @@
+import asyncio
 import akshare as ak
+import httpx
 import pandas as pd
-import requests
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
@@ -25,8 +26,10 @@ class MarketService:
     
     # Redis缓存key
     REDIS_KEY_QUOTE_PREFIX = "etf:quote:"
+    REDIS_KEY_KLINE_PREFIX = "etf:kline:"
     REDIS_KEY_ALL_QUOTES = "etf:all_quotes"
     CACHE_EXPIRE_SECONDS = 604800  # 7天缓存 (7 * 24 * 60 * 60)
+    KLINE_CACHE_EXPIRE_SECONDS = 7200  # 2小时缓存
 
     @staticmethod
     def _with_refresh_time(
@@ -47,6 +50,42 @@ class MarketService:
             data["refreshed_at"] = data.get("refreshed_at") or cached.get("cached_at")
             return MarketQuote(**data)
         return None
+
+    @classmethod
+    def _kline_cache_key(cls, code: str, days: int) -> str:
+        return f"{cls.REDIS_KEY_KLINE_PREFIX}{code}:{days}"
+
+    @classmethod
+    async def get_kline_from_cache(cls, code: str, days: int) -> Optional[List[KLineItem]]:
+        """从 Redis 读取历史 K 线缓存"""
+        if not settings.redis_enabled:
+            return None
+
+        cached = await RedisService.get(cls._kline_cache_key(code, days))
+        if not cached or "data" not in cached:
+            return None
+
+        try:
+            return [KLineItem(**item) for item in cached["data"]]
+        except Exception as e:
+            print(f"[MarketService] K线缓存反序列化失败: {code}, {e}")
+            return None
+
+    @classmethod
+    async def cache_kline(cls, code: str, days: int, data: List[KLineItem]) -> None:
+        """缓存历史 K 线到 Redis"""
+        if not settings.redis_enabled or not data:
+            return
+
+        payload = {
+            "data": [item.model_dump(mode="json") for item in data],
+            "cached_at": datetime.now().isoformat(),
+        }
+        await RedisService.set(
+            cls._kline_cache_key(code, days),
+            payload,
+            expire=cls.KLINE_CACHE_EXPIRE_SECONDS,
+        )
     
     @classmethod
     async def cache_quote(cls, code: str, quote: MarketQuote) -> MarketQuote:
@@ -140,7 +179,14 @@ class MarketService:
         return None
     
     @classmethod
-    def _fetch_from_eastmoney_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+    def _build_default_headers(cls, referer: str) -> Dict[str, str]:
+        return {
+            "User-Agent": os.environ["HTTP_USER_AGENT"],
+            "Referer": referer,
+        }
+
+    @classmethod
+    async def _fetch_from_eastmoney_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """直接从东方财富API获取行情（绕过akshare爬虫）"""
         # 东方财富ETF行情API
         url = "https://push2.eastmoney.com/api/qt/clist/get"
@@ -156,14 +202,13 @@ class MarketService:
             "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
             "fields": "f1,f2,f3,f4,f5,f6,f7,f12,f13,f14,f15,f16,f17,f18"
         }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://quote.eastmoney.com/",
-        }
+        headers = cls._build_default_headers("https://quote.eastmoney.com/")
         
         try:
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            data = response.json()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                data = response.json()
             
             if data.get("data") and data["data"].get("diff"):
                 result = {}
@@ -191,7 +236,7 @@ class MarketService:
         return {}
     
     @classmethod
-    def _fetch_from_sina_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+    async def _fetch_from_sina_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """从新浪财经API获取行情（备用）"""
         # 新浪财经实时行情API
         # 格式: https://hq.sinajs.cn/list=sh513300,sz159915
@@ -206,13 +251,12 @@ class MarketService:
                 code_list.append(f"sh{code}")
         
         url = f"https://hq.sinajs.cn/list={','.join(code_list)}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://finance.sina.com.cn/",
-        }
+        headers = cls._build_default_headers("https://finance.sina.com.cn/")
         
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
             # 返回格式: var hq_str_sh513300="名称,今开,昨收,当前价格,最高,最低,买一,卖一,成交量,成交额,..."
             text = response.text
             result = {}
@@ -293,7 +337,7 @@ class MarketService:
         return []
     
     @classmethod
-    def _fetch_history_kline_eastmoney(cls, code: str, days: int = 60) -> List[KLineItem]:
+    async def _fetch_history_kline_eastmoney(cls, code: str, days: int = 60) -> List[KLineItem]:
         """从东方财富API获取历史K线数据（备用）"""
         # 东方财富历史K线API
         # 判断市场
@@ -310,15 +354,14 @@ class MarketService:
             "end": "20500000",
             "lmt": str(days),
         }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://quote.eastmoney.com/",
-        }
+        headers = cls._build_default_headers("https://quote.eastmoney.com/")
         
         try:
             print(f"[MarketService] >>> 东方财富API获取历史K线: {code}")
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            data = response.json()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                data = response.json()
             
             if data.get("data") and data["data"].get("klines"):
                 result = []
@@ -353,7 +396,7 @@ class MarketService:
         return []
     
     @classmethod
-    def _fetch_history_kline_sina(cls, code: str, days: int = 60) -> List[KLineItem]:
+    async def _fetch_history_kline_sina(cls, code: str, days: int = 60) -> List[KLineItem]:
         """从新浪财经API获取历史K线数据"""
         if code.startswith(("51", "58")):
             symbol = f"sh{code}"
@@ -369,15 +412,14 @@ class MarketService:
             "ma": "no",
             "datalen": str(days),
         }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://finance.sina.com.cn/",
-        }
+        headers = cls._build_default_headers("https://finance.sina.com.cn/")
         
         try:
             print(f"[MarketService] >>> 新浪API获取历史K线: {code} ({symbol})")
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            data = response.json()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                data = response.json()
             
             if data and isinstance(data, list):
                 result = []
@@ -407,30 +449,37 @@ class MarketService:
         return []
     
     @classmethod
-    def get_history_kline(cls, code: str, days: int = 60) -> List[KLineItem]:
+    async def get_history_kline(cls, code: str, days: int = 60) -> List[KLineItem]:
         """获取历史K线数据（akshare → 东方财富API → 新浪API）"""
         print(f"[MarketService] 开始获取历史K线: {code}, 天数: {days}")
+
+        cached = await cls.get_kline_from_cache(code, days)
+        if cached:
+            return cached
         
         # 优先使用akshare
         try:
-            result = cls._fetch_history_kline_akshare(code, days)
+            result = await asyncio.to_thread(cls._fetch_history_kline_akshare, code, days)
             if result:
+                await cls.cache_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] akshare获取K线异常: {e}")
         
         # 备用：东方财富API
         try:
-            result = cls._fetch_history_kline_eastmoney(code, days)
+            result = await cls._fetch_history_kline_eastmoney(code, days)
             if result:
+                await cls.cache_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] 东方财富API获取K线异常: {e}")
         
         # 备用：新浪API
         try:
-            result = cls._fetch_history_kline_sina(code, days)
+            result = await cls._fetch_history_kline_sina(code, days)
             if result:
+                await cls.cache_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] 新浪API获取K线异常: {e}")
@@ -524,7 +573,7 @@ class MarketService:
         print(f"[MarketService] 开始获取 {len(codes)} 只ETF行情: {codes}")
         
         # 优先使用东方财富API
-        result = cls._fetch_from_eastmoney_api(codes)
+        result = await cls._fetch_from_eastmoney_api(codes)
         if result:
             print(f"[MarketService] ✓ 东方财富API成功: {len(result)} 只ETF")
             for code, quote in result.items():
@@ -533,7 +582,7 @@ class MarketService:
         
         # 备用：新浪财经API
         print("[MarketService] >>> 尝试备用数据源: 新浪财经API")
-        result = cls._fetch_from_sina_api(codes)
+        result = await cls._fetch_from_sina_api(codes)
         if result:
             print(f"[MarketService] ✓ 新浪API成功: {len(result)} 只ETF")
             for code, quote in result.items():
@@ -659,8 +708,8 @@ class MarketService:
     async def search_etf(cls, query: str, limit: int = 20) -> List[EtfSearchResult]:
         """搜索ETF"""
         try:
-            # 直接从AKShare获取全市场ETF列表
-            df = ak.fund_etf_spot_em()
+            # akshare 仍是同步库，放到线程池里避免阻塞事件循环
+            df = await asyncio.to_thread(ak.fund_etf_spot_em)
             if df.empty:
                 return []
             

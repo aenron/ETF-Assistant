@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
@@ -20,6 +21,7 @@ class AdvisorService:
     ACCOUNT_ANALYSIS_CODE = "ACCOUNT"
     ACCOUNT_ANALYSIS_NAME = "账户分析"
     SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+    ADVICE_CONCURRENCY = 4
 
     _llm_client: Optional[BaseLLMClient] = None
     
@@ -433,6 +435,94 @@ class AdvisorService:
                 f"涨跌{item.change_pct:.2f}%"
             )
         return "\n".join(lines)
+
+    @classmethod
+    async def _build_advice_payload(
+        cls,
+        p: Portfolio,
+        quote,
+        llm: BaseLLMClient,
+    ) -> dict:
+        """构建单个持仓建议结果，不在并发任务中访问数据库会话。"""
+        market_value = float(p.shares) * quote.price
+        cost = float(p.shares) * float(p.cost_price)
+        pnl = market_value - cost
+        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+
+        holding_days = None
+        if p.buy_date:
+            holding_days = (date.today() - p.buy_date).days
+
+        kline_data = await MarketService.get_history_kline(p.etf_code, days=250)
+        kline_summary = cls.format_kline_summary(kline_data)
+        indicators = MarketService.calculate_technical_indicators(kline_data)
+        indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
+
+        prompt = cls.build_prompt(
+            etf_code=p.etf_code,
+            etf_name=quote.name,
+            shares=p.shares,
+            cost_price=p.cost_price,
+            current_price=quote.price,
+            pnl_pct=pnl_pct,
+            holding_days=holding_days,
+            kline_summary=kline_summary,
+            indicators=indicators_dict,
+        )
+
+        try:
+            result_json = await llm.chat_json(prompt)
+            if "error" in result_json:
+                raw_reason = f"AI分析结果（JSON解析失败）:\n{result_json.get('raw', '无响应内容')}"
+                short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
+                medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
+                long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
+                main_judgment = raw_reason
+                action = "hold"
+                why = ["模型返回格式异常，未能提炼出稳定依据"]
+                news_basis = []
+                policy_basis = []
+            else:
+                short_term = cls.parse_period_advice(result_json, "short_term")
+                medium_term = cls.parse_period_advice(result_json, "medium_term")
+                long_term = cls.parse_period_advice(result_json, "long_term")
+                main_judgment = str(result_json.get("main_judgment", medium_term.conclusion)).strip() or medium_term.conclusion
+                action = str(result_json.get("action", medium_term.advice_type)).strip() or medium_term.advice_type
+                why = cls.parse_basis_items(result_json, "why", limit=3)
+                news_basis = cls.parse_basis_items(result_json, "news_basis", limit=2)
+                policy_basis = cls.parse_basis_items(result_json, "policy_basis", limit=2)
+        except Exception as e:
+            short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
+            medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
+            long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
+            main_judgment = medium_term.conclusion
+            action = medium_term.advice_type
+            why = ["模型调用失败，暂时无法生成关键依据"]
+            news_basis = []
+            policy_basis = []
+
+        advice_type = medium_term.advice_type
+        reason = cls.format_multi_horizon_reason(
+            main_judgment, action, why, news_basis, policy_basis, short_term, medium_term, long_term
+        )
+        confidence = Decimal(str(medium_term.confidence))
+
+        return {
+            "portfolio": p,
+            "quote": quote,
+            "advice_type": advice_type,
+            "main_judgment": main_judgment,
+            "action": action,
+            "why": why,
+            "news_basis": news_basis,
+            "policy_basis": policy_basis,
+            "reason": reason,
+            "confidence": confidence,
+            "short_term": short_term,
+            "medium_term": medium_term,
+            "long_term": long_term,
+            "pnl_pct": pnl_pct,
+        }
     
     @classmethod
     async def generate_advice(
@@ -463,103 +553,52 @@ class AdvisorService:
         quotes = await MarketService.get_quotes_for_codes(portfolio_codes)
         
         llm = cls.get_llm_client()
-        advices = []
-        
-        for p in portfolios:
+        semaphore = asyncio.Semaphore(cls.ADVICE_CONCURRENCY)
+
+        async def analyze_portfolio(p: Portfolio) -> Optional[dict]:
             quote = quotes.get(p.etf_code)
             if not quote:
-                continue
-            
-            # 计算盈亏
-            market_value = float(p.shares) * quote.price
-            cost = float(p.shares) * float(p.cost_price)
-            pnl = market_value - cost
-            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-            
-            holding_days = None
-            if p.buy_date:
-                holding_days = (date.today() - p.buy_date).days
-            
-            # 获取历史K线
-            kline_data = MarketService.get_history_kline(p.etf_code, days=250)
-            kline_summary = cls.format_kline_summary(kline_data)
-            
-            # 计算技术指标
-            indicators = MarketService.calculate_technical_indicators(kline_data)
-            indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
-            
-            # 构造Prompt
-            prompt = cls.build_prompt(
-                etf_code=p.etf_code,
-                etf_name=quote.name,
-                shares=p.shares,
-                cost_price=p.cost_price,
-                current_price=quote.price,
-                pnl_pct=pnl_pct,
-                holding_days=holding_days,
-                kline_summary=kline_summary,
-                indicators=indicators_dict,
-            )
-            
-            # 调用LLM
-            try:
-                result_json = await llm.chat_json(prompt)
-                short_term = cls.parse_period_advice(result_json, "short_term")
-                medium_term = cls.parse_period_advice(result_json, "medium_term")
-                long_term = cls.parse_period_advice(result_json, "long_term")
-                main_judgment = str(result_json.get("main_judgment", medium_term.conclusion)).strip() or medium_term.conclusion
-                action = str(result_json.get("action", medium_term.advice_type)).strip() or medium_term.advice_type
-                why = cls.parse_basis_items(result_json, "why", limit=3)
-                news_basis = cls.parse_basis_items(result_json, "news_basis", limit=2)
-                policy_basis = cls.parse_basis_items(result_json, "policy_basis", limit=2)
-                advice_type = medium_term.advice_type
-                reason = cls.format_multi_horizon_reason(
-                    main_judgment, action, why, news_basis, policy_basis, short_term, medium_term, long_term
-                )
-                confidence = Decimal(str(medium_term.confidence))
-            except Exception as e:
-                short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-                medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-                long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-                main_judgment = medium_term.conclusion
-                action = medium_term.advice_type
-                why = ["模型调用失败，暂时无法生成关键依据"]
-                news_basis = []
-                policy_basis = []
-                advice_type = "hold"
-                reason = cls.format_multi_horizon_reason(
-                    main_judgment, action, why, news_basis, policy_basis, short_term, medium_term, long_term
-                )
-                confidence = Decimal("0")
-            
-            # 保存日志
+                return None
+            async with semaphore:
+                return await cls._build_advice_payload(p, quote, llm)
+
+        advice_payloads = [
+            payload
+            for payload in await asyncio.gather(*(analyze_portfolio(p) for p in portfolios))
+            if payload is not None
+        ]
+
+        advices = []
+        for payload in advice_payloads:
+            p = payload["portfolio"]
+            quote = payload["quote"]
             log = AdviceLog(
                 user_id=user_id,
                 etf_code=p.etf_code,
-                advice_type=advice_type,
-                reason=reason,
-                confidence=confidence,
+                advice_type=payload["advice_type"],
+                reason=payload["reason"],
+                confidence=payload["confidence"],
                 llm_provider=settings.llm_provider,
                 llm_model=llm.model if hasattr(llm, 'model') else None,
             )
             session.add(log)
-            
+
             advices.append(AdviceResponse(
                 etf_code=p.etf_code,
                 etf_name=quote.name,
-                advice_type=advice_type,
-                main_judgment=main_judgment,
-                action=action,
-                why=why,
-                news_basis=news_basis,
-                policy_basis=policy_basis,
-                reason=reason,
-                confidence=confidence,
-                short_term=short_term,
-                medium_term=medium_term,
-                long_term=long_term,
+                advice_type=payload["advice_type"],
+                main_judgment=payload["main_judgment"],
+                action=payload["action"],
+                why=payload["why"],
+                news_basis=payload["news_basis"],
+                policy_basis=payload["policy_basis"],
+                reason=payload["reason"],
+                confidence=payload["confidence"],
+                short_term=payload["short_term"],
+                medium_term=payload["medium_term"],
+                long_term=payload["long_term"],
                 current_price=quote.price,
-                pnl_pct=pnl_pct,
+                pnl_pct=payload["pnl_pct"],
             ))
         
         await session.flush()
@@ -593,99 +632,16 @@ class AdvisorService:
         if not quote:
             return None
         
-        # 计算盈亏
-        market_value = float(p.shares) * quote.price
-        cost = float(p.shares) * float(p.cost_price)
-        pnl = market_value - cost
-        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-        
-        holding_days = None
-        if p.buy_date:
-            holding_days = (date.today() - p.buy_date).days
-        
-        # 获取历史K线
-        print(f"[AdvisorService] 开始获取历史K线: {p.etf_code}")
-        kline_data = MarketService.get_history_kline(p.etf_code, days=250)
-        print(f"[AdvisorService] 获取到 {len(kline_data)} 条K线数据")
-        kline_summary = cls.format_kline_summary(kline_data)
-        
-        # 计算技术指标
-        indicators = MarketService.calculate_technical_indicators(kline_data)
-        indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
-        
-        # 构造Prompt
         llm = cls.get_llm_client()
-        prompt = cls.build_prompt(
-            etf_code=p.etf_code,
-            etf_name=quote.name,
-            shares=p.shares,
-            cost_price=p.cost_price,
-            current_price=quote.price,
-            pnl_pct=pnl_pct,
-            holding_days=holding_days,
-            kline_summary=kline_summary,
-            indicators=indicators_dict,
-        )
-        
-        # 调用LLM
-        try:
-            print(f"\n{'='*60}")
-            print(f"[AdvisorService] 发送给LLM的Prompt:")
-            print(f"{'='*60}")
-            print(prompt)
-            print(f"{'='*60}\n")
-            
-            result_json = await llm.chat_json(prompt)
-            
-            print(f"[AdvisorService] LLM返回结果:")
-            print(f"{'='*60}")
-            print(f"{result_json}")
-            print(f"{'='*60}\n")
-            
-            # 检查是否有错误
-            if "error" in result_json:
-                raw_reason = f"AI分析结果（JSON解析失败）:\n{result_json.get('raw', '无响应内容')}"
-                short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
-                medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
-                long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
-                main_judgment = raw_reason
-                action = "hold"
-                why = ["模型返回格式异常，未能提炼出稳定依据"]
-                news_basis = []
-                policy_basis = []
-            else:
-                short_term = cls.parse_period_advice(result_json, "short_term")
-                medium_term = cls.parse_period_advice(result_json, "medium_term")
-                long_term = cls.parse_period_advice(result_json, "long_term")
-                main_judgment = str(result_json.get("main_judgment", medium_term.conclusion)).strip() or medium_term.conclusion
-                action = str(result_json.get("action", medium_term.advice_type)).strip() or medium_term.advice_type
-                why = cls.parse_basis_items(result_json, "why", limit=3)
-                news_basis = cls.parse_basis_items(result_json, "news_basis", limit=2)
-                policy_basis = cls.parse_basis_items(result_json, "policy_basis", limit=2)
-        except Exception as e:
-            print(f"[AdvisorService] LLM调用失败: {e}")
-            short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-            medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-            long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
-            main_judgment = medium_term.conclusion
-            action = medium_term.advice_type
-            why = ["模型调用失败，暂时无法生成关键依据"]
-            news_basis = []
-            policy_basis = []
-
-        advice_type = medium_term.advice_type
-        reason = cls.format_multi_horizon_reason(
-            main_judgment, action, why, news_basis, policy_basis, short_term, medium_term, long_term
-        )
-        confidence = medium_term.confidence
+        payload = await cls._build_advice_payload(p, quote, llm)
         
         # 保存日志
         log = AdviceLog(
             user_id=user_id,
             etf_code=p.etf_code,
-            advice_type=advice_type,
-            reason=reason,
-            confidence=confidence,
+            advice_type=payload["advice_type"],
+            reason=payload["reason"],
+            confidence=payload["confidence"],
             llm_provider=settings.llm_provider,
             llm_model=llm.model if hasattr(llm, 'model') else None,
         )
@@ -695,19 +651,19 @@ class AdvisorService:
         return AdviceResponse(
             etf_code=p.etf_code,
             etf_name=quote.name,
-            advice_type=advice_type,
-            main_judgment=main_judgment,
-            action=action,
-            why=why,
-            news_basis=news_basis,
-            policy_basis=policy_basis,
-            reason=reason,
-            confidence=confidence,
-            short_term=short_term,
-            medium_term=medium_term,
-            long_term=long_term,
+            advice_type=payload["advice_type"],
+            main_judgment=payload["main_judgment"],
+            action=payload["action"],
+            why=payload["why"],
+            news_basis=payload["news_basis"],
+            policy_basis=payload["policy_basis"],
+            reason=payload["reason"],
+            confidence=payload["confidence"],
+            short_term=payload["short_term"],
+            medium_term=payload["medium_term"],
+            long_term=payload["long_term"],
             current_price=quote.price,
-            pnl_pct=pnl_pct,
+            pnl_pct=payload["pnl_pct"],
         )
     
     @classmethod
@@ -772,7 +728,7 @@ class AdvisorService:
     ) -> AccountAnalysisResponse:
         """生成账户级投资建议"""
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-        summary = await PortfolioService.get_summary(session, user_id=user_id)
+        summary = PortfolioService.build_summary_from_portfolios(portfolios)
         available_cash = float(account_balance) if account_balance is not None else 0.0
 
         if not portfolios:

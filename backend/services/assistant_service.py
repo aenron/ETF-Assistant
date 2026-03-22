@@ -350,7 +350,7 @@ class AssistantService:
     ) -> str:
         user = await session.get(User, user_id)
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-        summary = await PortfolioService.get_summary(session, user_id=user_id)
+        summary = PortfolioService.build_summary_from_portfolios(portfolios)
 
         history_result = await session.execute(
             select(AssistantSessionMessage)

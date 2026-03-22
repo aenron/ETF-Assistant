@@ -63,7 +63,7 @@ async def get_history(
     days: int = Query(default=60, ge=1, le=365)
 ):
     """获取历史K线和技术指标"""
-    kline_data = MarketService.get_history_kline(code, days=days)
+    kline_data = await MarketService.get_history_kline(code, days=days)
     quotes = await MarketService.get_quotes_for_codes([code])
     quote = quotes.get(code)
     

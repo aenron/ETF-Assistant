@@ -14,6 +14,43 @@ from services.market_service import MarketService
 
 class PortfolioService:
     """持仓管理服务"""
+
+    @staticmethod
+    def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket]) -> PortfolioSummary:
+        """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
+        total_market_value = 0.0
+        total_cost = 0.0
+        today_pnl = 0.0
+        category_distribution = {}
+
+        for p in portfolios:
+            if p.market_value:
+                total_market_value += p.market_value
+                cost = float(p.shares) * float(p.cost_price)
+                total_cost += cost
+
+                if p.change_pct and p.market_value:
+                    yesterday_value = p.market_value / (1 + p.change_pct / 100)
+                    today_pnl += p.market_value - yesterday_value
+
+                category = MarketService._guess_category(p.etf_name or "")
+                if category not in category_distribution:
+                    category_distribution[category] = 0.0
+                category_distribution[category] += p.market_value
+
+        total_pnl = total_market_value - total_cost
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+        today_pnl_pct = (today_pnl / (total_market_value - today_pnl) * 100) if total_market_value > today_pnl else 0.0
+
+        return PortfolioSummary(
+            total_market_value=total_market_value,
+            total_cost=total_cost,
+            total_pnl=total_pnl,
+            total_pnl_pct=total_pnl_pct,
+            today_pnl=today_pnl,
+            today_pnl_pct=today_pnl_pct,
+            category_distribution=category_distribution,
+        )
     
     @staticmethod
     async def get_all(session: AsyncSession, user_id: int) -> List[PortfolioResponse]:
@@ -155,39 +192,4 @@ class PortfolioService:
     async def get_summary(session: AsyncSession, user_id: int) -> PortfolioSummary:
         """获取持仓汇总"""
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-        
-        total_market_value = 0.0
-        total_cost = 0.0
-        today_pnl = 0.0
-        category_distribution = {}
-        
-        for p in portfolios:
-            if p.market_value:
-                total_market_value += p.market_value
-                cost = float(p.shares) * float(p.cost_price)
-                total_cost += cost
-                
-                if p.change_pct and p.market_value:
-                    # 今日盈亏 ≈ 昨日市值 * 涨跌幅
-                    yesterday_value = p.market_value / (1 + p.change_pct / 100)
-                    today_pnl += p.market_value - yesterday_value
-                
-                # 分类统计
-                category = MarketService._guess_category(p.etf_name or "")
-                if category not in category_distribution:
-                    category_distribution[category] = 0.0
-                category_distribution[category] += p.market_value
-        
-        total_pnl = total_market_value - total_cost
-        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
-        today_pnl_pct = (today_pnl / (total_market_value - today_pnl) * 100) if total_market_value > today_pnl else 0.0
-        
-        return PortfolioSummary(
-            total_market_value=total_market_value,
-            total_cost=total_cost,
-            total_pnl=total_pnl,
-            total_pnl_pct=total_pnl_pct,
-            today_pnl=today_pnl,
-            today_pnl_pct=today_pnl_pct,
-            category_distribution=category_distribution,
-        )
+        return PortfolioService.build_summary_from_portfolios(portfolios)
