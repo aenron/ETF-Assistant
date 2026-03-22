@@ -58,10 +58,19 @@ async def analyze_user_account(user_id: int):
             print(f"[Scheduler] 用户 {user_id} 不存在或已禁用，跳过账户分析")
             return None
 
+        # 计算实际可用现金：账户总金额 - 持仓市值
+        portfolios = await PortfolioService.get_with_market(db, user_id=user_id)
+        summary = PortfolioService.build_summary_from_portfolios(portfolios)
+        total_market_value = summary.total_market_value
+        
+        # 如果用户设置了账户总金额，计算可用现金；否则为0
+        user_total_balance = float(user.account_balance) if user.account_balance else 0.0
+        available_cash = max(0.0, user_total_balance - total_market_value)
+        
         analysis = await AdvisorService.generate_account_analysis(
             db,
             user_id=user_id,
-            account_balance=user.account_balance,
+            account_balance=available_cash,
         )
         await db.commit()
         print(f"[Scheduler] 用户 {user_id} 账户分析完成，风险等级 {analysis.risk_level}")

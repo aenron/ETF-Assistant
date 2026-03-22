@@ -274,7 +274,7 @@ class AdvisorService:
 {holdings_text}
 
 ## 可用资金
-- 账户金额: {account_balance:.2f} 元
+- Cash (liquid funds available): {account_balance:.2f} 元
 
 请重点分析：
 1. 当前整体仓位是否偏高、偏低或合理
@@ -318,7 +318,7 @@ class AdvisorService:
             f"- 持仓市值: {total_market_value:.2f} 元",
             f"- 总成本: {total_cost:.2f} 元",
             f"- 总盈亏: {total_pnl:.2f} 元 ({total_pnl_pct:.2f}%)",
-            f"- 账户总资产(持仓+账户金额): {total_assets:.2f} 元",
+            f"- 账户总资产(持仓市值+现金余额): {total_assets:.2f} 元",
             f"- 现金占比: {cash_ratio:.2f}%",
             f"- 持仓占比: {invested_ratio:.2f}%",
             f"- 分类分布: {category_text}",

@@ -367,6 +367,8 @@ class AssistantService:
         current_time = datetime.now(cls.SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
         account_balance = float(user.account_balance) if user and user.account_balance is not None else 0.0
+        total_market_value = summary.total_market_value
+        available_cash = max(0.0, account_balance - total_market_value)  # 计算实际可用现金
         portfolio_lines = []
         for item in portfolios:
             current_price = f"{item.current_price:.4f}" if item.current_price is not None else "N/A"
@@ -388,8 +390,9 @@ class AssistantService:
             f"当前时间:\n"
             f"- {current_time}\n\n"
             f"账户概况:\n"
-            f"- 账户余额: {account_balance:.2f}\n"
+            f"- 账户总金额: {account_balance:.2f}\n"
             f"- 持仓总市值: {summary.total_market_value:.2f}\n"
+            f"- 可用现金: {available_cash:.2f}\n"
             f"- 总成本: {summary.total_cost:.2f}\n"
             f"- 总盈亏: {summary.total_pnl:.2f} ({summary.total_pnl_pct:.2f}%)\n"
             f"- 今日盈亏: {summary.today_pnl or 0:.2f} ({summary.today_pnl_pct or 0:.2f}%)\n"

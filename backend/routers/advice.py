@@ -35,10 +35,24 @@ async def generate_account_analysis(
     current_user: User = Depends(get_current_user),
 ):
     """生成账户级投资建议"""
+    # 刷新用户数据以获取最新的账户余额
+    await db.refresh(current_user)
+    
+    # 计算实际可用现金：账户总金额 - 持仓市值
+    from services.portfolio_service import PortfolioService
+    
+    portfolios = await PortfolioService.get_with_market(db, user_id=current_user.id)
+    summary = PortfolioService.build_summary_from_portfolios(portfolios)
+    total_market_value = summary.total_market_value
+    
+    # 如果用户设置了账户总金额，计算可用现金；否则为0
+    user_total_balance = float(current_user.account_balance) if current_user.account_balance else 0.0
+    available_cash = max(0.0, user_total_balance - total_market_value)
+    
     return await AdvisorService.generate_account_analysis(
         db,
         user_id=current_user.id,
-        account_balance=current_user.account_balance,
+        account_balance=available_cash,
     )
 
 
