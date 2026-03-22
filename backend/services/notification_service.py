@@ -115,6 +115,46 @@ class NotificationService:
         if bark:
             return await bark.send_advice(etf_code, etf_name, advice_type, reason, confidence)
         return False
+
+    @classmethod
+    async def send_account_analysis_notification(
+        cls,
+        summary: str,
+        position_advice: str,
+        rebalance_advice: str,
+        risk_level: str,
+        key_actions: List[str],
+        confidence: float,
+    ) -> bool:
+        """发送账户分析通知"""
+        bark = cls.get_bark()
+        if not bark:
+            return False
+
+        risk_labels = {
+            "low": "低风险",
+            "medium": "中风险",
+            "high": "高风险",
+        }
+        risk_text = risk_labels.get(risk_level, risk_level)
+        actions_text = "\n".join(
+            f"{index + 1}. {action}" for index, action in enumerate(key_actions[:3])
+        ) or "暂无关键操作"
+        body = (
+            f"风险等级: {risk_text}\n"
+            f"置信度: {confidence:.0f}%\n\n"
+            f"总体判断:\n{summary}\n\n"
+            f"仓位建议:\n{position_advice}\n\n"
+            f"调仓建议:\n{rebalance_advice}\n\n"
+            f"关键操作:\n{actions_text}"
+        )
+
+        message = NotificationMessage(
+            title="【账户分析】每周投资建议",
+            body=body,
+            group="ETF账户分析",
+        )
+        return await bark.send(message)
     
     @classmethod
     async def send_batch_advices(cls, advices: List[dict]) -> int:

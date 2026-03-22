@@ -59,6 +59,7 @@ export interface PortfolioWithMarket {
   etf_name: string | null
   current_price: number | null
   change_pct: number | null
+  market_refreshed_at: string | null
   market_value: number | null
   pnl: number | null
   pnl_pct: number | null
@@ -84,6 +85,7 @@ export interface MarketQuote {
   high_price: number | null
   low_price: number | null
   volume: number | null
+  refreshed_at: string | null
 }
 
 export interface KLineItem {
@@ -165,6 +167,22 @@ export interface LLMConfigResponse {
   providers: LLMProvider[]
 }
 
+export interface AssistantMessage {
+  id: number
+  role: string
+  content: string
+  created_at: string
+}
+
+export interface AssistantHistoryResponse {
+  messages: AssistantMessage[]
+}
+
+export interface AssistantChatResponse {
+  user_message: AssistantMessage
+  assistant_message: AssistantMessage
+}
+
 // API 服务
 export const portfolioApi = {
   getList: () => api.get<PortfolioWithMarket[]>('/portfolio'),
@@ -195,4 +213,19 @@ export const adviceApi = {
 export const llmApi = {
   getProviders: () => api.get<LLMConfigResponse>('/llm/providers'),
   switchProvider: (provider: string) => api.post(`/llm/switch`, null, { params: { provider } }),
+}
+
+export const assistantApi = {
+  getHistory: () => api.get<AssistantHistoryResponse>('/assistant/history'),
+  chat: (message: string) => api.post<AssistantChatResponse>('/assistant/chat', { message }),
+  clearHistory: () => api.delete('/assistant/history'),
+  streamChat: async (message: string) =>
+    fetch('/api/assistant/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      },
+      body: JSON.stringify({ message }),
+    }),
 }

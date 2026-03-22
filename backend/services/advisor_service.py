@@ -12,7 +12,7 @@ from config import settings
 from services.market_service import MarketService
 from services.portfolio_service import PortfolioService
 from services.news_service import NewsService
-from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, OllamaClient, GeminiClient, QwenClient
+from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, GeminiClient, QwenClient
 
 
 class AdvisorService:
@@ -52,11 +52,8 @@ class AdvisorService:
                     model=settings.qwen_model,
                     enable_search=settings.qwen_enable_search,
                 )
-            else:  # ollama
-                cls._llm_client = OllamaClient(
-                    base_url=settings.ollama_base_url,
-                    model=settings.ollama_model,
-                )
+            else:
+                raise ValueError(f"不支持的LLM提供商: {settings.llm_provider}")
         return cls._llm_client
     
     @staticmethod

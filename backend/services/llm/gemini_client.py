@@ -1,6 +1,7 @@
 """Google Gemini API客户端（使用官方google-genai SDK）"""
 import json
 import re
+from collections.abc import AsyncIterator
 from typing import Optional, Dict, Any, List
 from google import genai
 from google.genai import types
@@ -21,27 +22,22 @@ class GeminiClient(BaseLLMClient):
         self.enable_grounding = enable_grounding
         # 创建客户端
         self.client = genai.Client(api_key=api_key)
+
+    def _build_tools(self):
+        return [types.Tool(google_search=types.GoogleSearch())] if self.enable_grounding else None
     
     async def chat(self, prompt: str) -> str:
         """发送prompt并获取响应"""
-        # 启用Google Search Grounding
-        tools = None
-        if self.enable_grounding:
-            tools = [types.Tool(
-                google_search=types.GoogleSearch()
-            )]
+        tools = self._build_tools()
+        if tools:
             print(f"[GeminiClient] 已启用 Google Search Grounding")
-        
-        # 配置生成参数（tools放在config中）
+
         config = types.GenerateContentConfig(
             temperature=0.0,
             max_output_tokens=8192,
-            response_mime_type="application/json",
             tools=tools,
         )
-        
-        print(f"[GeminiClient] 已启用 Structured Output (JSON)")
-        
+
         try:
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -65,11 +61,44 @@ class GeminiClient(BaseLLMClient):
         except Exception as e:
             print(f"[GeminiClient] 错误: {e}")
             return json.dumps({"error": str(e)})
+
+    async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
+        """Gemini 原生流式输出"""
+        tools = self._build_tools()
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=8192,
+            tools=tools,
+        )
+
+        try:
+            for chunk in self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
+            ):
+                text = getattr(chunk, "text", None)
+                if text:
+                    yield text
+        except Exception as e:
+            print(f"[GeminiClient] 流式响应失败: {e}")
+            raise
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
         try:
-            response = await self.chat(prompt)
+            tools = self._build_tools()
+            config = types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+                tools=tools,
+            )
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
+            ).text
             
             # 清理markdown代码块标记
             text = response.strip()
@@ -109,7 +138,7 @@ class GeminiClient(BaseLLMClient):
     
     async def chat_with_grounding(self, prompt: str) -> Dict[str, Any]:
         """发送prompt并获取带Grounding信息的响应"""
-        tools = [types.Tool(google_search=types.GoogleSearch())] if self.enable_grounding else None
+        tools = self._build_tools()
         
         config = types.GenerateContentConfig(
             temperature=0.7,

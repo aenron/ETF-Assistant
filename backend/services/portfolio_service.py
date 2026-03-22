@@ -131,6 +131,7 @@ class PortfolioService:
                     etf_name=quote.name,
                     current_price=quote.price,
                     change_pct=quote.change_pct,
+                    market_refreshed_at=quote.refreshed_at,
                     market_value=market_value,
                     pnl=pnl,
                     pnl_pct=pnl_pct,

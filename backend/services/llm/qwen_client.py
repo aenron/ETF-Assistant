@@ -1,12 +1,14 @@
 """通义千问 LLM 客户端（使用官方dashscope SDK）"""
+from collections.abc import AsyncIterator
 from typing import Dict, Any, Optional
 import json
 import re
 import dashscope
 from dashscope import Generation
+from services.llm.base import BaseLLMClient
 
 
-class QwenClient:
+class QwenClient(BaseLLMClient):
     """通义千问客户端（支持网络搜索）"""
     
     def __init__(
@@ -38,6 +40,41 @@ class QwenClient:
         else:
             print(f"[QwenClient] 错误: {response.code} - {response.message}")
             return ""
+
+    async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
+        """通义千问原生流式输出"""
+        messages = [{"role": "user", "content": prompt}]
+
+        responses = Generation.call(
+            model=self.model,
+            messages=messages,
+            temperature=0.0,
+            result_format="message",
+            enable_search=self.enable_search,
+            stream=True,
+            incremental_output=True,
+        )
+
+        for response in responses:
+            if response.status_code != 200:
+                print(f"[QwenClient] 流式错误: {response.code} - {response.message}")
+                raise RuntimeError(f"{response.code}: {response.message}")
+
+            if getattr(response.output, "text", None):
+                yield response.output.text
+                continue
+
+            choices = getattr(response.output, "choices", None) or []
+            if not choices:
+                continue
+
+            message = getattr(choices[0], "message", None)
+            if not message:
+                continue
+
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content:
+                yield content
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""

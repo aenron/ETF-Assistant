@@ -24,6 +24,19 @@ export function DashboardPage() {
   const [generating, setGenerating] = useState(false)
   const [analyzingAccount, setAnalyzingAccount] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [marketRefreshAt, setMarketRefreshAt] = useState<string | null>(null)
+
+  const formatMarketRefreshAt = (value: string | null) => {
+    if (!value) return '暂无缓存行情'
+    return new Date(value).toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
 
   const fetchData = async () => {
     setLoading(true)
@@ -49,6 +62,12 @@ export function DashboardPage() {
       
       // 获取用户持仓的实时行情
       const quotesRes = await portfolioApi.getList()
+      const latestRefreshAt = quotesRes.data
+        .map((portfolio: PortfolioWithMarket) => portfolio.market_refreshed_at)
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(-1) ?? null
+      setMarketRefreshAt(latestRefreshAt)
       const quotesMap = new Map(quotesRes.data.map((p: PortfolioWithMarket) => [p.etf_code, p]))
       
       // 将 Record<string, AdviceLogResponse> 转换为 AdviceResponse[]
@@ -85,7 +104,7 @@ export function DashboardPage() {
       const res = await marketApi.refreshAll()
       if (res.data.success) {
         // 刷新后重新获取数据
-        await fetchData()
+        await Promise.all([fetchData(), fetchLatestAdvice()])
         alert(res.data.message || '行情刷新成功')
       } else {
         alert(res.data.message || '刷新失败')
@@ -132,8 +151,13 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">投资仪表盘</h1>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">投资仪表盘</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            当前使用行情时间：{formatMarketRefreshAt(marketRefreshAt)}
+          </p>
+        </div>
         <div className="flex gap-2">
           <Button variant="outline" size="icon" onClick={fetchData} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />

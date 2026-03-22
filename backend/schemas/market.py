@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, List
 
@@ -15,6 +15,7 @@ class MarketQuote(BaseModel):
     low_price: Optional[float] = None
     volume: Optional[int] = None
     amount: Optional[float] = None
+    refreshed_at: Optional[datetime] = None
 
 
 class KLineItem(BaseModel):

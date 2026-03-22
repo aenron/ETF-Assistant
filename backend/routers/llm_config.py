@@ -58,13 +58,6 @@ PROVIDERS = {
         enabled=bool(settings.gemini_api_key),
         supports_search=True,
     ),
-    "ollama": LLMProvider(
-        id="ollama",
-        name="Ollama",
-        description="本地Ollama模型",
-        enabled=True,  # Ollama是本地的，默认可用
-        supports_search=False,
-    ),
 }
 
 

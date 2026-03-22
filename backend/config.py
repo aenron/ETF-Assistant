@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     redis_enabled: bool = True
     
     # LLM 配置
-    llm_provider: Literal["openai", "deepseek", "ollama", "gemini", "qwen"] = "deepseek"
+    llm_provider: Literal["openai", "deepseek", "gemini", "qwen"] = "deepseek"
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = "deepseek-chat"
@@ -36,10 +36,6 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
-    
-    # Ollama 默认配置
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
     
     # Gemini 配置
     gemini_api_key: str = ""

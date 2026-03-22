@@ -42,6 +42,7 @@ class PortfolioWithMarket(PortfolioResponse):
     etf_name: Optional[str] = None
     current_price: Optional[float] = None
     change_pct: Optional[float] = None
+    market_refreshed_at: Optional[datetime] = None
     market_value: Optional[float] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None

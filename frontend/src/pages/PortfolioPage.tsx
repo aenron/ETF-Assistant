@@ -13,6 +13,24 @@ export function PortfolioPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
 
+  const latestMarketRefreshAt = portfolios
+    .map((portfolio) => portfolio.market_refreshed_at)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1) ?? null
+
+  const formatMarketRefreshAt = (value: string | null) => {
+    if (!value) return '暂无缓存行情'
+    return new Date(value).toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
   const fetchData = async () => {
     setLoading(true)
     try {
@@ -61,8 +79,13 @@ export function PortfolioPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">持仓管理</h1>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">持仓管理</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            当前使用行情时间：{formatMarketRefreshAt(latestMarketRefreshAt)}
+          </p>
+        </div>
         <div className="flex gap-2">
           <Button variant="outline" size="icon" onClick={fetchData} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />

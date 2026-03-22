@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 
 from database import init_db, engine
-from routers import portfolio_router, market_router, advice_router
+from routers import portfolio_router, market_router, advice_router, assistant_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from config import settings
@@ -61,6 +61,7 @@ app.include_router(auth_router)
 app.include_router(portfolio_router)
 app.include_router(market_router)
 app.include_router(advice_router)
+app.include_router(assistant_router)
 app.include_router(llm_config_router)
 
 

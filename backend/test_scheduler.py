@@ -1,7 +1,7 @@
 """测试定时任务"""
 import asyncio
 from database import async_session_maker
-from services.scheduler import analyze_all_portfolios
+from services.scheduler import analyze_all_accounts, analyze_all_portfolios, refresh_market_quotes
 
 
 async def main():
@@ -10,6 +10,8 @@ async def main():
     print("=" * 50)
     
     await analyze_all_portfolios()
+    await analyze_all_accounts()
+    await refresh_market_quotes()
     
     print("=" * 50)
     print("测试完成")

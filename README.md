@@ -24,7 +24,7 @@
 - Database: PostgreSQL / SQLite
 - Cache: Redis
 - Market Data: AKShare + fallback HTTP sources
-- LLM Providers: DeepSeek, OpenAI, Gemini, Qwen, Ollama
+- LLM Providers: DeepSeek, OpenAI, Gemini, Qwen
 
 ## Project Structure
 

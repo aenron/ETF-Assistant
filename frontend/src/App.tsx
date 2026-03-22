@@ -1,12 +1,20 @@
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
-import { DashboardPage } from '@/pages/DashboardPage'
-import { PortfolioPage } from '@/pages/PortfolioPage'
-import { AdvicePage } from '@/pages/AdvicePage'
-import LoginPage from '@/pages/LoginPage'
 import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User } from 'lucide-react'
 import { isAuthenticated, getCurrentUser, removeToken } from '@/services/authApi'
-import { useState, useEffect } from 'react'
 import { LLMSelector } from '@/components/LLMSelector'
+import { FloatingAssistant } from '@/components/FloatingAssistant'
+
+const DashboardPage = lazy(() =>
+  import('@/pages/DashboardPage').then((module) => ({ default: module.DashboardPage })),
+)
+const PortfolioPage = lazy(() =>
+  import('@/pages/PortfolioPage').then((module) => ({ default: module.PortfolioPage })),
+)
+const AdvicePage = lazy(() =>
+  import('@/pages/AdvicePage').then((module) => ({ default: module.AdvicePage })),
+)
+const LoginPage = lazy(() => import('@/pages/LoginPage'))
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated() ? <>{children}</> : <Navigate to="/login" replace />
@@ -86,13 +94,16 @@ function AppContent() {
           </header>
         )}
       <main className="container mx-auto px-4 py-6">
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
-          <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
-          <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
-        </Routes>
+        <Suspense fallback={<div className="py-12 text-center text-sm text-muted-foreground">页面加载中...</div>}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
+            <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
+            <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
+          </Routes>
+        </Suspense>
       </main>
+      {authed && <FloatingAssistant />}
     </div>
   )
 }

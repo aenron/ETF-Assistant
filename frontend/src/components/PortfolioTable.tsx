@@ -155,6 +155,17 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     return colors[type] || 'text-gray-500'
   }
 
+  const formatMarketRefreshedAt = (value: string | null) => {
+    if (!value) return '未缓存'
+    return new Date(value).toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
@@ -263,7 +274,14 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   <td className="py-3 px-2">{p.etf_name || '-'}</td>
                   <td className="py-3 px-2 text-right">{p.shares.toLocaleString()}</td>
                   <td className="py-3 px-2 text-right">{p.cost_price.toFixed(4)}</td>
-                  <td className="py-3 px-2 text-right">{p.current_price?.toFixed(3) || '-'}</td>
+                  <td className="py-3 px-2 text-right">
+                    <div className="flex flex-col items-end">
+                      <span>{p.current_price?.toFixed(3) || '-'}</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatMarketRefreshedAt(p.market_refreshed_at)}
+                      </span>
+                    </div>
+                  </td>
                   <td className="py-3 px-2 text-right">{p.market_value?.toFixed(2) || '-'}</td>
                   <td className={`py-3 px-2 text-right ${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''}`}>
                     {p.pnl_pct ? `${p.pnl_pct.toFixed(2)}%` : '-'}

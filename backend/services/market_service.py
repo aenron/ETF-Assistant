@@ -27,6 +27,14 @@ class MarketService:
     REDIS_KEY_QUOTE_PREFIX = "etf:quote:"
     REDIS_KEY_ALL_QUOTES = "etf:all_quotes"
     CACHE_EXPIRE_SECONDS = 604800  # 7天缓存 (7 * 24 * 60 * 60)
+
+    @staticmethod
+    def _with_refresh_time(
+        quote: MarketQuote,
+        refreshed_at: Optional[datetime] = None,
+    ) -> MarketQuote:
+        """为行情附加刷新时间"""
+        return quote.model_copy(update={"refreshed_at": refreshed_at or datetime.now()})
     
     @classmethod
     async def get_quote_from_cache(cls, code: str) -> Optional[MarketQuote]:
@@ -35,20 +43,24 @@ class MarketService:
             return None
         cached = await RedisService.get(f"{cls.REDIS_KEY_QUOTE_PREFIX}{code}")
         if cached and "data" in cached:
-            return MarketQuote(**cached["data"])
+            data = dict(cached["data"])
+            data["refreshed_at"] = data.get("refreshed_at") or cached.get("cached_at")
+            return MarketQuote(**data)
         return None
     
     @classmethod
-    async def cache_quote(cls, code: str, quote: MarketQuote):
+    async def cache_quote(cls, code: str, quote: MarketQuote) -> MarketQuote:
         """缓存单个ETF行情到Redis（带时间戳）"""
         # 不缓存空数据或价格为0的数据
         if quote.price <= 0:
             print(f"[MarketService] 跳过缓存空数据: {code}")
-            return
+            return quote
+
+        quote_with_time = cls._with_refresh_time(quote, quote.refreshed_at)
         if settings.redis_enabled:
             cache_data = {
-                "data": quote.model_dump(),
-                "cached_at": datetime.now().isoformat(),
+                "data": quote_with_time.model_dump(mode="json"),
+                "cached_at": quote_with_time.refreshed_at.isoformat() if quote_with_time.refreshed_at else datetime.now().isoformat(),
                 "cache_date": date.today().isoformat(),
             }
             await RedisService.set(
@@ -56,6 +68,7 @@ class MarketService:
                 cache_data, 
                 expire=cls.CACHE_EXPIRE_SECONDS
             )
+        return quote_with_time
     
     @classmethod
     async def get_quotes_for_codes(cls, codes: List[str]) -> Dict[str, MarketQuote]:
@@ -77,7 +90,6 @@ class MarketService:
                 quotes = await cls._fetch_quotes_from_akshare(uncached_codes)
                 for code, quote in quotes.items():
                     result[code] = quote
-                    await cls.cache_quote(code, quote)
             except Exception as e:
                 print(f"[MarketService] ✗ 获取行情失败: {e}")
                 # 尝试从旧缓存获取（即使过期）
@@ -96,7 +108,6 @@ class MarketService:
         try:
             quotes = await cls._fetch_quotes_from_akshare([code])
             if code in quotes:
-                await cls.cache_quote(code, quotes[code])
                 return quotes[code]
         except Exception as e:
             print(f"[MarketService] 刷新行情失败: {code}, {e}")
@@ -110,8 +121,6 @@ class MarketService:
         
         try:
             quotes = await cls._fetch_quotes_from_akshare(codes)
-            for code, quote in quotes.items():
-                await cls.cache_quote(code, quote)
             return quotes
         except Exception as e:
             print(f"[MarketService] 批量刷新行情失败: {e}")
@@ -519,7 +528,7 @@ class MarketService:
         if result:
             print(f"[MarketService] ✓ 东方财富API成功: {len(result)} 只ETF")
             for code, quote in result.items():
-                await cls.cache_quote(code, quote)
+                result[code] = await cls.cache_quote(code, quote)
             return result
         
         # 备用：新浪财经API
@@ -528,7 +537,7 @@ class MarketService:
         if result:
             print(f"[MarketService] ✓ 新浪API成功: {len(result)} 只ETF")
             for code, quote in result.items():
-                await cls.cache_quote(code, quote)
+                result[code] = await cls.cache_quote(code, quote)
             return result
         
         # 获取失败，返回空数据

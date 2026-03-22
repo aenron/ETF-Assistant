@@ -9,6 +9,23 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          charts: ['recharts'],
+          'radix-dialog': ['@radix-ui/react-dialog'],
+          'radix-forms': [
+            '@radix-ui/react-label',
+            '@radix-ui/react-radio-group',
+            '@radix-ui/react-select',
+            '@radix-ui/react-slot',
+            '@radix-ui/react-tabs',
+          ],
+        },
+      },
+    },
+  },
   server: {
     host: '0.0.0.0',
     port: 3000,
