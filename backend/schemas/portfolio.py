@@ -58,3 +58,4 @@ class PortfolioSummary(BaseModel):
     today_pnl: Optional[float] = None
     today_pnl_pct: Optional[float] = None
     category_distribution: dict[str, float]
+    total_assets: Optional[float] = None  # 总金额 = 持仓市值 + 可用资金

@@ -16,7 +16,7 @@ class PortfolioService:
     """持仓管理服务"""
 
     @staticmethod
-    def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket]) -> PortfolioSummary:
+    def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket], available_cash: float = 0.0) -> PortfolioSummary:
         """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
         total_market_value = 0.0
         total_cost = 0.0
@@ -41,6 +41,7 @@ class PortfolioService:
         total_pnl = total_market_value - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         today_pnl_pct = (today_pnl / (total_market_value - today_pnl) * 100) if total_market_value > today_pnl else 0.0
+        total_assets = total_market_value + available_cash
 
         return PortfolioSummary(
             total_market_value=total_market_value,
@@ -50,6 +51,7 @@ class PortfolioService:
             today_pnl=today_pnl,
             today_pnl_pct=today_pnl_pct,
             category_distribution=category_distribution,
+            total_assets=total_assets,
         )
     
     @staticmethod
@@ -191,5 +193,12 @@ class PortfolioService:
     @staticmethod
     async def get_summary(session: AsyncSession, user_id: int) -> PortfolioSummary:
         """获取持仓汇总"""
+        from models.user import User
+        
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-        return PortfolioService.build_summary_from_portfolios(portfolios)
+        # 获取用户可用资金
+        user_result = await session.execute(select(User).where(User.id == user_id))
+        user = user_result.scalar_one_or_none()
+        available_cash = float(user.account_balance) if user and user.account_balance else 0.0
+        
+        return PortfolioService.build_summary_from_portfolios(portfolios, available_cash)
