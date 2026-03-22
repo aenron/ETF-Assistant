@@ -1,12 +1,21 @@
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.assistant_message import AssistantMessage
+from models.assistant_session import AssistantSession
+from models.assistant_session_message import AssistantSessionMessage
 from models.user import User
-from schemas.assistant import AssistantChatResponse, AssistantHistoryResponse, AssistantMessageResponse
+from schemas.assistant import (
+    AssistantChatResponse,
+    AssistantHistoryResponse,
+    AssistantMessageResponse,
+    AssistantSessionListResponse,
+    AssistantSessionResponse,
+)
 from services.advisor_service import AdvisorService
 from services.portfolio_service import PortfolioService
 
@@ -16,6 +25,7 @@ class AssistantService:
 
     HISTORY_LIMIT = 20
     MEMORY_WINDOW = 12
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
     @staticmethod
     def normalize_response(text: str) -> str:
@@ -114,67 +124,162 @@ class AssistantService:
 
         yield "done", final_text
 
+    @staticmethod
+    def build_session_title(message: str) -> str:
+        title = " ".join(message.strip().split())
+        return (title[:24] + "...") if len(title) > 24 else (title or "新会话")
+
+    @staticmethod
+    def build_preview(message: str) -> str:
+        preview = " ".join(message.strip().split())
+        return (preview[:80] + "...") if len(preview) > 80 else preview
+
+    @classmethod
+    async def list_sessions(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+    ) -> AssistantSessionListResponse:
+        result = await session.execute(
+            select(AssistantSession)
+            .where(AssistantSession.user_id == user_id)
+            .order_by(AssistantSession.updated_at.desc(), AssistantSession.id.desc())
+        )
+        sessions = result.scalars().all()
+        return AssistantSessionListResponse(
+            sessions=[AssistantSessionResponse.model_validate(item) for item in sessions]
+        )
+
+    @classmethod
+    async def create_session(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+        title: str | None = None,
+    ) -> AssistantSessionResponse:
+        conversation = AssistantSession(
+            user_id=user_id,
+            title=(title or "新会话")[:120],
+        )
+        session.add(conversation)
+        await session.flush()
+        return AssistantSessionResponse.model_validate(conversation)
+
+    @classmethod
+    async def get_or_create_session(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+        session_id: int | None,
+    ) -> AssistantSession:
+        if session_id is not None:
+            conversation = await session.get(AssistantSession, session_id)
+            if conversation and conversation.user_id == user_id:
+                return conversation
+            raise ValueError("session not found")
+
+        result = await session.execute(
+            select(AssistantSession)
+            .where(AssistantSession.user_id == user_id)
+            .order_by(AssistantSession.updated_at.desc(), AssistantSession.id.desc())
+            .limit(1)
+        )
+        conversation = result.scalar_one_or_none()
+        if conversation:
+            return conversation
+
+        created = AssistantSession(user_id=user_id, title="新会话")
+        session.add(created)
+        await session.flush()
+        return created
+
     @classmethod
     async def get_history(
         cls,
         session: AsyncSession,
         user_id: int,
+        session_id: int | None = None,
         limit: int = HISTORY_LIMIT,
     ) -> AssistantHistoryResponse:
+        conversation = await cls.get_or_create_session(session, user_id, session_id)
         result = await session.execute(
-            select(AssistantMessage)
-            .where(AssistantMessage.user_id == user_id)
-            .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
+            select(AssistantSessionMessage)
+            .where(AssistantSessionMessage.user_id == user_id, AssistantSessionMessage.session_id == conversation.id)
+            .order_by(AssistantSessionMessage.created_at.desc(), AssistantSessionMessage.id.desc())
             .limit(limit)
         )
         messages = list(reversed(result.scalars().all()))
         return AssistantHistoryResponse(
+            session=AssistantSessionResponse.model_validate(conversation),
             messages=[AssistantMessageResponse.model_validate(message) for message in messages]
         )
 
     @classmethod
-    async def clear_history(cls, session: AsyncSession, user_id: int) -> int:
+    async def delete_session(cls, session: AsyncSession, user_id: int, session_id: int) -> int:
+        conversation = await cls.get_or_create_session(session, user_id, session_id)
+        await session.execute(
+            delete(AssistantSessionMessage).where(AssistantSessionMessage.session_id == conversation.id)
+        )
         result = await session.execute(
-            delete(AssistantMessage).where(AssistantMessage.user_id == user_id)
+            delete(AssistantSession).where(AssistantSession.id == conversation.id, AssistantSession.user_id == user_id)
         )
         return result.rowcount or 0
+
+    @classmethod
+    async def touch_session(
+        cls,
+        conversation: AssistantSession,
+        message: str,
+        set_title: bool = False,
+    ) -> None:
+        conversation.updated_at = datetime.now(cls.SHANGHAI_TZ).replace(tzinfo=None)
+        conversation.last_message_preview = cls.build_preview(message)
+        if set_title and (not conversation.title or conversation.title == "新会话"):
+            conversation.title = cls.build_session_title(message)
 
     @classmethod
     async def chat(
         cls,
         session: AsyncSession,
         user_id: int,
+        session_id: int | None,
         message: str,
     ) -> AssistantChatResponse:
         clean_message = message.strip()
         if not clean_message:
             raise ValueError("message cannot be empty")
 
-        prompt = await cls.build_prompt(session, user_id, clean_message)
+        conversation = await cls.get_or_create_session(session, user_id, session_id)
+        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
         llm = AdvisorService.get_llm_client()
 
-        user_message = AssistantMessage(
+        user_message = AssistantSessionMessage(
+            session_id=conversation.id,
             user_id=user_id,
             role="user",
             content=clean_message,
         )
         session.add(user_message)
         await session.flush()
+        await cls.touch_session(conversation, clean_message, set_title=True)
 
         try:
             reply_text = cls.normalize_response(await llm.chat(prompt))
         except Exception as exc:
             reply_text = f"当前智能体暂时不可用，请稍后重试。错误信息：{exc}"
 
-        assistant_message = AssistantMessage(
+        assistant_message = AssistantSessionMessage(
+            session_id=conversation.id,
             user_id=user_id,
             role="assistant",
             content=reply_text,
         )
         session.add(assistant_message)
         await session.flush()
+        await cls.touch_session(conversation, reply_text)
 
         return AssistantChatResponse(
+            session=AssistantSessionResponse.model_validate(conversation),
             user_message=AssistantMessageResponse.model_validate(user_message),
             assistant_message=AssistantMessageResponse.model_validate(assistant_message),
         )
@@ -184,25 +289,29 @@ class AssistantService:
         cls,
         session: AsyncSession,
         user_id: int,
+        session_id: int | None,
         message: str,
     ) -> tuple[None, AsyncIterator[str]]:
         clean_message = message.strip()
         if not clean_message:
             raise ValueError("message cannot be empty")
 
-        prompt = await cls.build_prompt(session, user_id, clean_message)
+        conversation = await cls.get_or_create_session(session, user_id, session_id)
+        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
         llm = AdvisorService.get_llm_client()
 
-        user_message = AssistantMessage(
+        user_message = AssistantSessionMessage(
+            session_id=conversation.id,
             user_id=user_id,
             role="user",
             content=clean_message,
         )
         session.add(user_message)
         await session.flush()
+        await cls.touch_session(conversation, clean_message, set_title=True)
 
         async def event_stream() -> AsyncIterator[str]:
-            yield f"event: meta\ndata: {json.dumps({'user_message': AssistantMessageResponse.model_validate(user_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
+            yield f"event: meta\ndata: {json.dumps({'session': AssistantSessionResponse.model_validate(conversation).model_dump(mode='json'), 'user_message': AssistantMessageResponse.model_validate(user_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
 
             final_text = ""
             try:
@@ -216,16 +325,18 @@ class AssistantService:
                 for chunk in cls.iter_response_chunks(final_text):
                     yield f"event: chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
 
-            assistant_message = AssistantMessage(
+            assistant_message = AssistantSessionMessage(
+                session_id=conversation.id,
                 user_id=user_id,
                 role="assistant",
                 content=final_text or "我暂时没有生成有效回复，请稍后重试。",
             )
             session.add(assistant_message)
             await session.flush()
+            await cls.touch_session(conversation, assistant_message.content)
             await session.commit()
 
-            yield f"event: done\ndata: {json.dumps({'assistant_message': AssistantMessageResponse.model_validate(assistant_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'session': AssistantSessionResponse.model_validate(conversation).model_dump(mode='json'), 'assistant_message': AssistantMessageResponse.model_validate(assistant_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
 
         return None, event_stream()
 
@@ -234,6 +345,7 @@ class AssistantService:
         cls,
         session: AsyncSession,
         user_id: int,
+        session_id: int,
         latest_user_message: str,
     ) -> str:
         user = await session.get(User, user_id)
@@ -241,9 +353,9 @@ class AssistantService:
         summary = await PortfolioService.get_summary(session, user_id=user_id)
 
         history_result = await session.execute(
-            select(AssistantMessage)
-            .where(AssistantMessage.user_id == user_id)
-            .order_by(AssistantMessage.created_at.desc(), AssistantMessage.id.desc())
+            select(AssistantSessionMessage)
+            .where(AssistantSessionMessage.user_id == user_id, AssistantSessionMessage.session_id == session_id)
+            .order_by(AssistantSessionMessage.created_at.desc(), AssistantSessionMessage.id.desc())
             .limit(cls.MEMORY_WINDOW)
         )
         history_messages = list(reversed(history_result.scalars().all()))
@@ -252,6 +364,7 @@ class AssistantService:
             f"{'用户' if item.role == 'user' else '助手'}: {item.content}"
             for item in history_messages
         ) or "暂无历史对话。"
+        current_time = datetime.now(cls.SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
         account_balance = float(user.account_balance) if user and user.account_balance is not None else 0.0
         portfolio_lines = []
@@ -269,8 +382,11 @@ class AssistantService:
             "你是 ETF 投资智能体中的前端浮动助手。你的职责是基于用户当前持仓、账户概况和历史对话，"
             "回答投资组合相关问题、解释已有建议、提示风险，并给出务实、可执行的下一步建议。"
             "不要编造不存在的持仓或收益数据；如果上下文里没有，就明确说没有。"
-            "回答使用简体中文，优先简洁、直接、可操作。直接输出自然语言内容，不要返回 JSON、代码块或 response 字段包装。"
-            "如果适合，使用短标题、项目符号和分段来提升可读性。\n\n"
+            "回答时搜索相关资讯以增强回答的准确性和时效性。"
+            "回答使用简体中文，优先简洁、直接、可操作。请直接输出 Markdown 正文，不要返回 JSON、代码块外壳或 response 字段包装。"
+            "如果适合，使用 Markdown 标题、项目符号、编号列表、加粗重点和分段来提升可读性。\n\n"
+            f"当前时间:\n"
+            f"- {current_time}\n\n"
             f"账户概况:\n"
             f"- 账户余额: {account_balance:.2f}\n"
             f"- 持仓总市值: {summary.total_market_value:.2f}\n"

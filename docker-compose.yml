@@ -4,19 +4,17 @@ services:
   # 后端服务
   backend:
     build: ./backend
-    image: etf-backend:latest
-    container_name: etf-backend
+    image: etf-assistant-backend:latest
+    container_name: etf-assistant-backend
     volumes:
       - ./backend/.env:/app/.env:ro
-    ports:
-      - "8000:8000"
     restart: unless-stopped
 
   # 前端服务
   frontend:
     build: ./frontend
-    image: etf-frontend:latest
-    container_name: etf-frontend
+    image: etf-assistant-frontend:latest
+    container_name: etf-assistant-frontend
     depends_on:
       - backend
     ports:

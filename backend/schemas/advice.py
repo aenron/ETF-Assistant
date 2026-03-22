@@ -4,6 +4,16 @@ from decimal import Decimal
 from typing import Optional, List
 
 
+class PeriodAdvice(BaseModel):
+    """单个周期建议"""
+    advice_type: str
+    action: str
+    conclusion: str
+    signals: List[str]
+    risks: List[str]
+    confidence: float
+
+
 class AdviceGenerateRequest(BaseModel):
     """生成建议请求"""
     etf_codes: Optional[List[str]] = None  # 为空则生成全部持仓建议
@@ -14,8 +24,16 @@ class AdviceResponse(BaseModel):
     etf_code: str
     etf_name: Optional[str] = None
     advice_type: str  # buy/sell/hold/add/reduce
+    main_judgment: str
+    action: str
+    why: List[str]
+    news_basis: List[str]
+    policy_basis: List[str]
     reason: str
     confidence: float
+    short_term: PeriodAdvice
+    medium_term: PeriodAdvice
+    long_term: PeriodAdvice
     current_price: Optional[float] = None
     pnl_pct: Optional[float] = None
 

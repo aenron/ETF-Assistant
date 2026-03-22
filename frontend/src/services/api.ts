@@ -119,10 +119,27 @@ export interface AdviceResponse {
   etf_code: string
   etf_name: string | null
   advice_type: string
+  main_judgment: string
+  action: string
+  why: string[]
+  news_basis: string[]
+  policy_basis: string[]
   reason: string
   confidence: number
+  short_term: PeriodAdvice
+  medium_term: PeriodAdvice
+  long_term: PeriodAdvice
   current_price: number | null
   pnl_pct: number | null
+}
+
+export interface PeriodAdvice {
+  advice_type: string
+  action: string
+  conclusion: string
+  signals: string[]
+  risks: string[]
+  confidence: number
 }
 
 export interface AccountAnalysisResponse {
@@ -174,13 +191,27 @@ export interface AssistantMessage {
   created_at: string
 }
 
+export interface AssistantSession {
+  id: number
+  title: string
+  last_message_preview: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface AssistantHistoryResponse {
+  session: AssistantSession
   messages: AssistantMessage[]
 }
 
 export interface AssistantChatResponse {
+  session: AssistantSession
   user_message: AssistantMessage
   assistant_message: AssistantMessage
+}
+
+export interface AssistantSessionListResponse {
+  sessions: AssistantSession[]
 }
 
 // API 服务
@@ -216,16 +247,18 @@ export const llmApi = {
 }
 
 export const assistantApi = {
-  getHistory: () => api.get<AssistantHistoryResponse>('/assistant/history'),
-  chat: (message: string) => api.post<AssistantChatResponse>('/assistant/chat', { message }),
-  clearHistory: () => api.delete('/assistant/history'),
-  streamChat: async (message: string) =>
+  listSessions: () => api.get<AssistantSessionListResponse>('/assistant/sessions'),
+  createSession: (title?: string) => api.post<AssistantSession>('/assistant/sessions', { title }),
+  getHistory: (sessionId?: number) => api.get<AssistantHistoryResponse>('/assistant/history', { params: { session_id: sessionId } }),
+  chat: (message: string, sessionId?: number) => api.post<AssistantChatResponse>('/assistant/chat', { message, session_id: sessionId }),
+  deleteSession: (sessionId: number) => api.delete(`/assistant/sessions/${sessionId}`),
+  streamChat: async (message: string, sessionId?: number) =>
     fetch('/api/assistant/chat/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, session_id: sessionId }),
     }),
 }

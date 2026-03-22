@@ -6,6 +6,7 @@ import {
   type PortfolioSummary,
   type PortfolioWithMarket,
   type AccountAnalysisResponse,
+  type PeriodAdvice,
 } from '@/services/api'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { AdviceCard } from '@/components/AdviceCard'
@@ -73,12 +74,28 @@ export function DashboardPage() {
       // 将 Record<string, AdviceLogResponse> 转换为 AdviceResponse[]
       const latestAdvices: AdviceResponse[] = adviceLogs.map(log => {
         const portfolio = quotesMap.get(log.etf_code || '')
+        const fallbackPeriod: PeriodAdvice = {
+          advice_type: log.advice_type || 'hold',
+          action: '继续观察',
+          conclusion: log.reason || '',
+          signals: [],
+          risks: [],
+          confidence: log.confidence || 0,
+        }
         return {
           etf_code: log.etf_code || '',
           etf_name: portfolio?.etf_name ?? log.etf_name ?? null,
           advice_type: log.advice_type || 'hold',
+          main_judgment: log.reason || '',
+          action: log.advice_type || 'hold',
+          why: [],
+          news_basis: [],
+          policy_basis: [],
           reason: log.reason || '',
           confidence: log.confidence || 0,
+          short_term: fallbackPeriod,
+          medium_term: fallbackPeriod,
+          long_term: fallbackPeriod,
           current_price: portfolio?.current_price ?? null,
           pnl_pct: portfolio?.pnl_pct ?? null,
         }

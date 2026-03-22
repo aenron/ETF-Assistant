@@ -3,6 +3,8 @@ from models.portfolio import Portfolio
 from models.market_daily import MarketDaily
 from models.advice_log import AdviceLog
 from models.assistant_message import AssistantMessage
+from models.assistant_session import AssistantSession
+from models.assistant_session_message import AssistantSessionMessage
 from models.user import User
 
-__all__ = ["EtfInfo", "Portfolio", "MarketDaily", "AdviceLog", "AssistantMessage", "User"]
+__all__ = ["EtfInfo", "Portfolio", "MarketDaily", "AdviceLog", "AssistantMessage", "AssistantSession", "AssistantSessionMessage", "User"]

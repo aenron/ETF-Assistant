@@ -42,7 +42,7 @@ PROVIDERS = {
         name="DeepSeek",
         description="DeepSeek深度求索大模型",
         enabled=bool(settings.deepseek_api_key),
-        supports_search=True,
+        supports_search=False,
     ),
     "qwen": LLMProvider(
         id="qwen",

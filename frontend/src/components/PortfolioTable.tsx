@@ -379,7 +379,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 
                 <div className="flex items-center gap-4">
                   <div>
-                    <span className="text-sm text-muted-foreground">建议操作</span>
+                    <span className="text-sm text-muted-foreground">中期建议</span>
                     <div className={`text-xl font-bold ${getAdviceTypeColor(currentAdvice.advice_type)}`}>
                       {getAdviceTypeLabel(currentAdvice.advice_type)}
                     </div>
@@ -390,9 +390,65 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </div>
                 </div>
                 
-                <div>
-                  <span className="text-sm text-muted-foreground">分析理由</span>
-                  <p className="mt-1 text-sm leading-relaxed">{currentAdvice.reason}</p>
+                <div className="space-y-3">
+                  <div className="rounded-xl border bg-primary/5 p-4">
+                    <div className="text-xs font-medium text-muted-foreground">主建议</div>
+                    <p className="mt-2 text-sm leading-relaxed">
+                      {currentAdvice.main_judgment || `中期以${getAdviceTypeLabel(currentAdvice.advice_type)}为主，${currentAdvice.medium_term.conclusion}`}
+                    </p>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      执行动作：{currentAdvice.action || currentAdvice.advice_type}。短期偏{currentAdvice.short_term.conclusion}；长期看{currentAdvice.long_term.conclusion}
+                    </p>
+                  </div>
+                  {(currentAdvice.why.length > 0 || currentAdvice.news_basis.length > 0 || currentAdvice.policy_basis.length > 0) && (
+                    <div className="rounded-xl border bg-background/60 p-4">
+                      <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {currentAdvice.why.slice(0, 3).map((item, index) => (
+                          <span key={`why-${index}`} className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">
+                            {item}
+                          </span>
+                        ))}
+                        {currentAdvice.news_basis[0] && (
+                          <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-800">
+                            新闻：{currentAdvice.news_basis[0]}
+                          </span>
+                        )}
+                        {currentAdvice.policy_basis[0] && (
+                          <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
+                            政策：{currentAdvice.policy_basis[0]}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <div className="rounded-xl border bg-background/60 p-4">
+                    <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+                    <div className="mt-2 space-y-3 text-sm">
+                      <div>
+                        <span className="font-medium">短期：</span>
+                        <span>{currentAdvice.short_term.action}，{currentAdvice.short_term.conclusion}</span>
+                        {(currentAdvice.short_term.signals[0] || currentAdvice.short_term.risks[0]) && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {currentAdvice.short_term.signals[0] ? `依据：${currentAdvice.short_term.signals[0]}` : ''}
+                            {currentAdvice.short_term.signals[0] && currentAdvice.short_term.risks[0] ? '；' : ''}
+                            {currentAdvice.short_term.risks[0] ? `风险：${currentAdvice.short_term.risks[0]}` : ''}
+                          </p>
+                        )}
+                      </div>
+                      <div>
+                        <span className="font-medium">长期：</span>
+                        <span>{currentAdvice.long_term.action}，{currentAdvice.long_term.conclusion}</span>
+                        {(currentAdvice.long_term.signals[0] || currentAdvice.long_term.risks[0]) && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {currentAdvice.long_term.signals[0] ? `依据：${currentAdvice.long_term.signals[0]}` : ''}
+                            {currentAdvice.long_term.signals[0] && currentAdvice.long_term.risks[0] ? '；' : ''}
+                            {currentAdvice.long_term.risks[0] ? `风险：${currentAdvice.long_term.risks[0]}` : ''}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 
                 {currentAdvice.current_price && (

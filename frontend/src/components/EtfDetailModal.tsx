@@ -25,6 +25,153 @@ const adviceTypeConfig: Record<string, { label: string; color: string; bgColor: 
   reduce: { label: '减仓', color: 'text-yellow-600', bgColor: 'bg-yellow-50' },
 }
 
+type ParsedPeriodAdvice = {
+  label: string
+  adviceType: string
+  action: string
+  confidence: number
+  conclusion: string
+  signals: string[]
+  risks: string[]
+}
+
+type ParsedDecisionSummary = {
+  mainJudgment: string
+  action: string
+  why: string[]
+  newsBasis: string[]
+  policyBasis: string[]
+}
+
+function splitAdviceItems(value: string) {
+  return value
+    .split(/[；;]\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item && item !== '暂无' && item !== '-')
+}
+
+function parseMultiHorizonReason(reason: string | null): ParsedPeriodAdvice[] {
+  const text = reason || ''
+  const sections = text
+    .split(/(?=【(?:短期|中期|长期)】)/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  return sections
+    .map((section) => {
+      const lines = section.split('\n').map((item) => item.trim()).filter(Boolean)
+      const header = lines[0] || ''
+      const match = header.match(/^【(短期|中期|长期)】([^（(]+)(?:[（(](\d+)%[）)])?/)
+      return {
+        label: match?.[1] || '周期',
+        adviceType: (match?.[2] || 'hold').trim().toLowerCase(),
+        action: lines.find((line) => line.startsWith('动作：'))?.replace('动作：', '').trim() || '继续观察',
+        confidence: Number(match?.[3] || 0),
+        conclusion: lines.find((line) => line.startsWith('结论：'))?.replace('结论：', '').trim() || '',
+        signals: splitAdviceItems(lines.find((line) => line.startsWith('信号：'))?.replace('信号：', '').trim() || ''),
+        risks: splitAdviceItems(lines.find((line) => line.startsWith('风险：'))?.replace('风险：', '').trim() || ''),
+      }
+    })
+    .filter((item) => item.conclusion || item.signals.length > 0 || item.risks.length > 0)
+}
+
+function parseDecisionSummary(reason: string | null): ParsedDecisionSummary | null {
+  const text = reason || ''
+  if (!text.includes('主判断：') && !text.includes('执行动作：') && !text.includes('关键依据：')) {
+    return null
+  }
+
+  const lines = text.split('\n').map((item) => item.trim()).filter(Boolean)
+  return {
+    mainJudgment: lines.find((line) => line.startsWith('主判断：'))?.replace('主判断：', '').trim() || '',
+    action: lines.find((line) => line.startsWith('执行动作：'))?.replace('执行动作：', '').trim() || '',
+    why: splitAdviceItems(lines.find((line) => line.startsWith('关键依据：'))?.replace('关键依据：', '').trim() || ''),
+    newsBasis: splitAdviceItems(lines.find((line) => line.startsWith('新闻依据：'))?.replace('新闻依据：', '').trim() || ''),
+    policyBasis: splitAdviceItems(lines.find((line) => line.startsWith('政策依据：'))?.replace('政策依据：', '').trim() || ''),
+  }
+}
+
+function LegacyAdviceContent({ reason }: { reason: string | null }) {
+  const periods = parseMultiHorizonReason(reason)
+  const summary = parseDecisionSummary(reason)
+  if (periods.length > 0) {
+    const medium = periods.find((period) => period.label === '中期')
+    const short = periods.find((period) => period.label === '短期')
+    const long = periods.find((period) => period.label === '长期')
+    return (
+      <div className="space-y-3">
+        <div className="rounded-xl border bg-primary/5 p-4">
+          <div className="text-xs font-medium text-muted-foreground">主建议</div>
+          <p className="mt-2 text-sm leading-relaxed">
+            {summary?.mainJudgment || `中期以${adviceTypeConfig[medium?.adviceType || 'hold'].label}为主，${medium?.conclusion || '延续中期判断'}`}
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+            执行动作：{summary?.action || medium?.adviceType || 'hold'}。短期偏{short?.conclusion || '短线节奏'}；长期看{long?.conclusion || '长期配置价值'}
+          </p>
+        </div>
+        {(summary?.why.length || summary?.newsBasis.length || summary?.policyBasis.length) ? (
+          <div className="rounded-xl border bg-background/60 p-4">
+            <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {summary.why.slice(0, 3).map((item, index) => (
+                <span key={`legacy-why-${index}`} className="rounded-full border bg-white/70 px-2 py-0.5 text-xs text-foreground/70">
+                  {item}
+                </span>
+              ))}
+              {summary.newsBasis[0] && (
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-800">
+                  新闻：{summary.newsBasis[0]}
+                </span>
+              )}
+              {summary.policyBasis[0] && (
+                <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
+                  政策：{summary.policyBasis[0]}
+                </span>
+              )}
+            </div>
+          </div>
+        ) : null}
+        <div className="rounded-xl border bg-background/60 p-4">
+          <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+          <div className="mt-2 space-y-3 text-sm">
+            <div>
+              <span className="font-medium">短期：</span>
+              <span>{short?.action || '继续观察'}，{short?.conclusion || '短线节奏待确认'}</span>
+              {(short?.signals[0] || short?.risks[0]) && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {short?.signals[0] ? `依据：${short.signals[0]}` : ''}
+                  {short?.signals[0] && short?.risks[0] ? '；' : ''}
+                  {short?.risks[0] ? `风险：${short.risks[0]}` : ''}
+                </p>
+              )}
+            </div>
+            <div>
+              <span className="font-medium">长期：</span>
+              <span>{long?.action || '继续持有'}，{long?.conclusion || '长期配置价值待观察'}</span>
+              {(long?.signals[0] || long?.risks[0]) && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {long?.signals[0] ? `依据：${long.signals[0]}` : ''}
+                  {long?.signals[0] && long?.risks[0] ? '；' : ''}
+                  {long?.risks[0] ? `风险：${long.risks[0]}` : ''}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const lines = (reason || '').split('\n').map((line) => line.trim()).filter(Boolean)
+  return (
+    <div className="rounded-lg border bg-background/70 p-4"> 
+      <div className="space-y-2 text-sm leading-relaxed text-foreground/80"> 
+        {lines.length > 0 ? lines.map((line, index) => <p key={`${line}-${index}`}>{line}</p>) : <p>-</p>}
+      </div>
+    </div>
+  )
+}
+
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice'>('chart')
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
@@ -361,8 +508,71 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                       </Button>
                     </div>
                     <div>
-                      <h4 className="text-sm font-medium text-muted-foreground mb-2">分析理由</h4>
-                      <p className="text-sm leading-relaxed">{displayAdvice.reason || '-'}</p>
+                      <h4 className="text-sm font-medium text-muted-foreground mb-2">多周期建议</h4>
+                      {'short_term' in displayAdvice ? (
+                        <div className="space-y-3">
+                          <div className="rounded-xl border bg-primary/5 p-4">
+                            <div className="text-xs font-medium text-muted-foreground">主建议</div>
+                            <p className="mt-2 text-sm leading-relaxed">
+                              {displayAdvice.main_judgment || `中期以${displayConfig?.label || displayAdvice.advice_type}为主，${displayAdvice.medium_term.conclusion}`}
+                            </p>
+                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                              执行动作：{displayAdvice.action || displayAdvice.advice_type}。短期偏{displayAdvice.short_term.conclusion}；长期看{displayAdvice.long_term.conclusion}
+                            </p>
+                          </div>
+                          {(displayAdvice.why.length > 0 || displayAdvice.news_basis.length > 0 || displayAdvice.policy_basis.length > 0) && (
+                            <div className="rounded-xl border bg-background/60 p-4">
+                              <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {displayAdvice.why.slice(0, 3).map((item, index) => (
+                                  <span key={`why-${index}`} className="rounded-full border bg-white/70 px-2 py-0.5 text-xs text-foreground/70">
+                                    {item}
+                                  </span>
+                                ))}
+                                {displayAdvice.news_basis[0] && (
+                                  <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-800">
+                                    新闻：{displayAdvice.news_basis[0]}
+                                  </span>
+                                )}
+                                {displayAdvice.policy_basis[0] && (
+                                  <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
+                                    政策：{displayAdvice.policy_basis[0]}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          <div className="rounded-xl border bg-background/60 p-4">
+                            <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+                            <div className="mt-2 space-y-3 text-sm">
+                              <div>
+                                <span className="font-medium">短期：</span>
+                                <span>{displayAdvice.short_term.action}，{displayAdvice.short_term.conclusion}</span>
+                                {(displayAdvice.short_term.signals[0] || displayAdvice.short_term.risks[0]) && (
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {displayAdvice.short_term.signals[0] ? `依据：${displayAdvice.short_term.signals[0]}` : ''}
+                                    {displayAdvice.short_term.signals[0] && displayAdvice.short_term.risks[0] ? '；' : ''}
+                                    {displayAdvice.short_term.risks[0] ? `风险：${displayAdvice.short_term.risks[0]}` : ''}
+                                  </p>
+                                )}
+                              </div>
+                              <div>
+                                <span className="font-medium">长期：</span>
+                                <span>{displayAdvice.long_term.action}，{displayAdvice.long_term.conclusion}</span>
+                                {(displayAdvice.long_term.signals[0] || displayAdvice.long_term.risks[0]) && (
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {displayAdvice.long_term.signals[0] ? `依据：${displayAdvice.long_term.signals[0]}` : ''}
+                                    {displayAdvice.long_term.signals[0] && displayAdvice.long_term.risks[0] ? '；' : ''}
+                                    {displayAdvice.long_term.risks[0] ? `风险：${displayAdvice.long_term.risks[0]}` : ''}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <LegacyAdviceContent reason={displayAdvice.reason} />
+                      )}
                     </div>
                     {/* 决策时间 */}
                     <div className="flex items-center gap-1.5 pt-2 border-t border-border/50">

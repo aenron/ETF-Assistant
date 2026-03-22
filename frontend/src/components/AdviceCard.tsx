@@ -19,36 +19,34 @@ export function AdviceCard({ advice, accountBalance = 0 }: AdviceCardProps) {
   const config = adviceTypeConfig[advice.advice_type] || adviceTypeConfig.hold
   const Icon = config.icon
 
-  // 计算建议仓位
   const calculateSuggestedPosition = () => {
     if (!accountBalance || !advice.current_price) return null
-    
-    // 根据建议类型和置信度计算仓位比例
+
     let positionRatio = 0
     switch (advice.advice_type) {
       case 'buy':
-        positionRatio = 0.3 * (advice.confidence / 100) // 买入: 30% 资金 * 置信度
+        positionRatio = 0.3 * (advice.confidence / 100)
         break
       case 'add':
-        positionRatio = 0.2 * (advice.confidence / 100) // 加仓: 20% 资金 * 置信度
+        positionRatio = 0.2 * (advice.confidence / 100)
         break
       case 'reduce':
-        positionRatio = 0.15 * (advice.confidence / 100) // 减仓: 15% 估算
+        positionRatio = 0.15 * (advice.confidence / 100)
         break
       case 'sell':
-        positionRatio = 1.0 // 卖出: 全部
+        positionRatio = 1.0
         break
       default:
         return null
     }
-    
+
     const suggestedAmount = accountBalance * positionRatio
     const suggestedShares = Math.floor(suggestedAmount / advice.current_price)
-    
+
     return {
       amount: suggestedAmount,
       shares: suggestedShares,
-      ratio: positionRatio * 100
+      ratio: positionRatio * 100,
     }
   }
 
@@ -59,9 +57,9 @@ export function AdviceCard({ advice, accountBalance = 0 }: AdviceCardProps) {
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <div className="flex items-center gap-2">
           <CardTitle className="text-lg">{advice.etf_name || advice.etf_code}</CardTitle>
-          <span className="text-sm text-muted-foreground font-mono">{advice.etf_code}</span>
+          <span className="font-mono text-sm text-muted-foreground">{advice.etf_code}</span>
         </div>
-        <span className={`${config.color} text-white px-3 py-1 rounded-full text-sm font-medium flex items-center gap-1`}>
+        <span className={`${config.color} flex items-center gap-1 rounded-full px-3 py-1 text-sm font-medium text-white`}>
           <Icon className="h-3 w-3" />
           {config.label}
         </span>
@@ -79,30 +77,86 @@ export function AdviceCard({ advice, accountBalance = 0 }: AdviceCardProps) {
             </span>
           </div>
           {suggestedPosition && (advice.advice_type === 'buy' || advice.advice_type === 'add') && (
-            <div className="flex items-center justify-between text-sm bg-muted/50 p-2 rounded">
+            <div className="flex items-center justify-between rounded bg-muted/50 p-2 text-sm">
               <span className="text-muted-foreground">建议仓位</span>
               <div className="text-right">
                 <span className="font-medium">{suggestedPosition.shares} 股</span>
-                <span className="text-xs text-muted-foreground ml-1">({suggestedPosition.ratio.toFixed(1)}%资金)</span>
+                <span className="ml-1 text-xs text-muted-foreground">({suggestedPosition.ratio.toFixed(1)}%资金)</span>
               </div>
             </div>
           )}
-          <div className="pt-2 border-t">
+          <div className="border-t pt-2">
             <div className="flex items-start gap-2">
-              <Lightbulb className="h-4 w-4 text-yellow-500 mt-0.5 flex-shrink-0" />
-              <p className="text-sm">{advice.reason}</p>
+              <Lightbulb className="mt-0.5 h-4 w-4 flex-shrink-0 text-yellow-500" />
+              <div className="w-full space-y-3">
+                <div className="rounded-xl border bg-primary/5 p-4">
+                  <div className="text-xs font-medium text-muted-foreground">主建议</div>
+                  <p className="mt-2 text-sm leading-relaxed">
+                    {advice.main_judgment || `中期以${config.label}为主，${advice.medium_term.conclusion}`}
+                  </p>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    执行动作：{advice.action || advice.advice_type}。短期偏{advice.short_term.conclusion}；长期看{advice.long_term.conclusion}
+                  </p>
+                </div>
+                {(advice.why.length > 0 || advice.news_basis.length > 0 || advice.policy_basis.length > 0) && (
+                  <div className="rounded-xl border bg-background/60 p-4">
+                    <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {advice.why.slice(0, 3).map((item, index) => (
+                        <span key={`why-${index}`} className="rounded-full border bg-background px-2.5 py-1 text-xs text-foreground/80">
+                          {item}
+                        </span>
+                      ))}
+                      {advice.news_basis[0] && (
+                        <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-800">
+                          新闻：{advice.news_basis[0]}
+                        </span>
+                      )}
+                      {advice.policy_basis[0] && (
+                        <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs text-violet-800">
+                          政策：{advice.policy_basis[0]}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div className="rounded-xl border bg-background/60 p-4">
+                  <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+                  <div className="mt-2 space-y-3 text-sm">
+                    <div>
+                      <span className="font-medium">短期：</span>
+                      <span>{advice.short_term.action}，{advice.short_term.conclusion}</span>
+                      {(advice.short_term.signals[0] || advice.short_term.risks[0]) && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {advice.short_term.signals[0] ? `依据：${advice.short_term.signals[0]}` : ''}
+                          {advice.short_term.signals[0] && advice.short_term.risks[0] ? '；' : ''}
+                          {advice.short_term.risks[0] ? `风险：${advice.short_term.risks[0]}` : ''}
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <span className="font-medium">长期：</span>
+                      <span>{advice.long_term.action}，{advice.long_term.conclusion}</span>
+                      {(advice.long_term.signals[0] || advice.long_term.risks[0]) && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {advice.long_term.signals[0] ? `依据：${advice.long_term.signals[0]}` : ''}
+                          {advice.long_term.signals[0] && advice.long_term.risks[0] ? '；' : ''}
+                          {advice.long_term.risks[0] ? `风险：${advice.long_term.risks[0]}` : ''}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-          <div className="flex items-center justify-between text-sm pt-2">
+          <div className="flex items-center justify-between pt-2 text-sm">
             <span className="text-muted-foreground">置信度</span>
             <div className="flex items-center gap-2">
-              <div className="w-24 h-2 bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-primary transition-all"
-                  style={{ width: `${advice.confidence}%` }}
-                />
+              <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
+                <div className="h-full bg-primary transition-all" style={{ width: `${advice.confidence}%` }} />
               </div>
-              <span className="font-medium w-10 text-right">{advice.confidence}%</span>
+              <span className="w-10 text-right font-medium">{advice.confidence}%</span>
             </div>
           </div>
         </div>
