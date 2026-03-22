@@ -37,6 +37,7 @@ type ParsedPeriodAdvice = {
 
 type ParsedDecisionSummary = {
   mainJudgment: string
+  summary: string
   action: string
   why: string[]
   newsBasis: string[]
@@ -110,6 +111,7 @@ function parseDecisionSummary(reason: string | null): ParsedDecisionSummary | nu
   const lines = text.split('\n').map((item) => item.trim()).filter(Boolean)
   return {
     mainJudgment: lines.find((line) => line.startsWith('主判断：'))?.replace('主判断：', '').trim() || '',
+    summary: lines.find((line) => line.startsWith('综合说明：'))?.replace('综合说明：', '').trim() || '',
     action: lines.find((line) => line.startsWith('执行动作：'))?.replace('执行动作：', '').trim() || '',
     why: splitItems(lines.find((line) => line.startsWith('关键依据：'))?.replace('关键依据：', '').trim() || ''),
     newsBasis: splitItems(lines.find((line) => line.startsWith('新闻依据：'))?.replace('新闻依据：', '').trim() || ''),
@@ -231,15 +233,18 @@ function HistoryReasonContent({ log }: { log: AdviceLogResponse }) {
           <p className="mt-2 text-sm leading-relaxed">
             {summary?.mainJudgment || `中期以${(adviceTypeConfig[log.advice_type || 'hold'] || adviceTypeConfig.hold).label}为主，${periods.find((item) => item.label === '中期')?.conclusion || '延续中期判断'}`}
           </p>
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            执行动作：{summary?.action || log.advice_type || 'hold'}。短期偏{periods.find((item) => item.label === '短期')?.conclusion || '短线节奏'}；
-            长期看{periods.find((item) => item.label === '长期')?.conclusion || '长期配置价值'}
-          </p>
-        </div>
-        {(summary?.why.length || summary?.newsBasis.length || summary?.policyBasis.length) ? (
-          <div className="rounded-xl border bg-white/70 p-4 shadow-sm">
-            <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
-            <div className="mt-2 flex flex-wrap gap-2">
+          {summary?.summary ? (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              {summary.summary}
+            </p>
+          ) : (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              执行动作：{summary?.action || log.advice_type || 'hold'}。短期偏{periods.find((item) => item.label === '短期')?.conclusion || '短线节奏'}；
+              长期看{periods.find((item) => item.label === '长期')?.conclusion || '长期配置价值'}
+            </p>
+          )}
+          {(summary?.why.length || summary?.newsBasis.length || summary?.policyBasis.length) ? (
+            <div className="mt-3 flex flex-wrap gap-2">
               {summary.why.slice(0, 3).map((item, index) => (
                 <span key={`why-${index}`} className="rounded-full border bg-background px-2.5 py-1 text-xs text-foreground/80">{item}</span>
               ))}
@@ -250,8 +255,8 @@ function HistoryReasonContent({ log }: { log: AdviceLogResponse }) {
                 <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs text-violet-800">政策：{summary.policyBasis[0]}</span>
               )}
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
         <div className="rounded-xl border bg-white/70 p-4 shadow-sm">
           <div className="text-xs font-medium text-muted-foreground">补充判断</div>
           <div className="mt-2 space-y-3 text-sm">

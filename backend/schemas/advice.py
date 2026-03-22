@@ -25,6 +25,7 @@ class AdviceResponse(BaseModel):
     etf_name: Optional[str] = None
     advice_type: str  # buy/sell/hold/add/reduce
     main_judgment: str
+    summary: str = ""
     action: str
     why: List[str]
     news_basis: List[str]

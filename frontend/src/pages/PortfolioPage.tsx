@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { portfolioApi, marketApi, type PortfolioWithMarket, type PortfolioSummary } from '@/services/api'
+import {
+  portfolioApi,
+  marketApi,
+  adviceApi,
+  type PortfolioWithMarket,
+  type PortfolioSummary,
+} from '@/services/api'
 import { PortfolioTable } from '@/components/PortfolioTable'
 import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { RefreshCw, TrendingUp } from 'lucide-react'
@@ -12,6 +18,7 @@ export function PortfolioPage() {
   const [accountBalance, setAccountBalance] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [analyzingAll, setAnalyzingAll] = useState(false)
 
   const latestMarketRefreshAt = portfolios
     .map((portfolio) => portfolio.market_refreshed_at)
@@ -55,6 +62,25 @@ export function PortfolioPage() {
     }
   }
 
+  const handleAnalyzeAll = async () => {
+    if (portfolios.length === 0) {
+      alert('当前没有可分析的持仓')
+      return
+    }
+    setAnalyzingAll(true)
+    try {
+      const codes = portfolios.map((p) => p.etf_code)
+      await adviceApi.generate(codes)
+      alert('一键分析任务已完成，最新建议已缓存，可前往决策历史查看')
+      await fetchData()
+    } catch (error) {
+      console.error('Failed to analyze all portfolios:', error)
+      alert('一键分析失败，请稍后重试')
+    } finally {
+      setAnalyzingAll(false)
+    }
+  }
+
   const handleRefreshMarket = async () => {
     setRefreshing(true)
     try {
@@ -93,6 +119,10 @@ export function PortfolioPage() {
           <Button variant="outline" onClick={handleRefreshMarket} disabled={refreshing}>
             <TrendingUp className="h-4 w-4 mr-2" />
             {refreshing ? '刷新中...' : '刷新行情'}
+          </Button>
+          <Button variant="secondary" onClick={handleAnalyzeAll} disabled={analyzingAll}>
+            <TrendingUp className="h-4 w-4 mr-2" />
+            {analyzingAll ? '分析中...' : '一键分析'}
           </Button>
         </div>
       </div>

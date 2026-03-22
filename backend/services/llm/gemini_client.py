@@ -1,4 +1,5 @@
 """Google Gemini API客户端（使用官方google-genai SDK）"""
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -39,7 +40,8 @@ class GeminiClient(BaseLLMClient):
         )
 
         try:
-            response = self.client.models.generate_content(
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
                 model=self.model_name,
                 contents=prompt,
                 config=config,
@@ -70,19 +72,30 @@ class GeminiClient(BaseLLMClient):
             max_output_tokens=8192,
             tools=tools,
         )
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        try:
-            for chunk in self.client.models.generate_content_stream(
-                model=self.model_name,
-                contents=prompt,
-                config=config,
-            ):
-                text = getattr(chunk, "text", None)
-                if text:
-                    yield text
-        except Exception as e:
-            print(f"[GeminiClient] 流式响应失败: {e}")
-            raise
+        def _sync_stream():
+            try:
+                for chunk in self.client.models.generate_content_stream(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                ):
+                    text = getattr(chunk, "text", None)
+                    if text:
+                        queue.put_nowait(text)
+            except Exception as e:
+                print(f"[GeminiClient] 流式响应失败: {e}")
+            finally:
+                queue.put_nowait(None)
+
+        task = asyncio.get_event_loop().run_in_executor(None, _sync_stream)
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+        await task
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
@@ -94,11 +107,13 @@ class GeminiClient(BaseLLMClient):
                 response_mime_type="application/json",
                 tools=tools,
             )
-            response = self.client.models.generate_content(
+            raw_response = await asyncio.to_thread(
+                self.client.models.generate_content,
                 model=self.model_name,
                 contents=prompt,
                 config=config,
-            ).text
+            )
+            response = raw_response.text
             
             # 清理markdown代码块标记
             text = response.strip()
@@ -147,7 +162,8 @@ class GeminiClient(BaseLLMClient):
         )
         
         try:
-            response = self.client.models.generate_content(
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
                 model=self.model_name,
                 contents=prompt,
                 config=config,

@@ -1,4 +1,5 @@
 """通义千问 LLM 客户端（使用官方dashscope SDK）"""
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Dict, Any, Optional
 import json
@@ -27,7 +28,8 @@ class QwenClient(BaseLLMClient):
         """发送prompt并获取响应"""
         messages = [{"role": "user", "content": prompt}]
         
-        response = Generation.call(
+        response = await asyncio.to_thread(
+            Generation.call,
             model=self.model,
             messages=messages,
             temperature=0.0,
@@ -44,37 +46,47 @@ class QwenClient(BaseLLMClient):
     async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
         """通义千问原生流式输出"""
         messages = [{"role": "user", "content": prompt}]
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        responses = Generation.call(
-            model=self.model,
-            messages=messages,
-            temperature=0.0,
-            result_format="message",
-            enable_search=self.enable_search,
-            stream=True,
-            incremental_output=True,
-        )
+        def _sync_stream():
+            responses = Generation.call(
+                model=self.model,
+                messages=messages,
+                temperature=0.0,
+                result_format="message",
+                enable_search=self.enable_search,
+                stream=True,
+                incremental_output=True,
+            )
+            for response in responses:
+                if response.status_code != 200:
+                    print(f"[QwenClient] 流式错误: {response.code} - {response.message}")
+                    queue.put_nowait(None)
+                    raise RuntimeError(f"{response.code}: {response.message}")
 
-        for response in responses:
-            if response.status_code != 200:
-                print(f"[QwenClient] 流式错误: {response.code} - {response.message}")
-                raise RuntimeError(f"{response.code}: {response.message}")
+                text = getattr(response.output, "text", None)
+                if text:
+                    queue.put_nowait(text)
+                    continue
 
-            if getattr(response.output, "text", None):
-                yield response.output.text
-                continue
+                choices = getattr(response.output, "choices", None) or []
+                if not choices:
+                    continue
+                message = getattr(choices[0], "message", None)
+                if not message:
+                    continue
+                content = getattr(message, "content", None)
+                if isinstance(content, str) and content:
+                    queue.put_nowait(content)
+            queue.put_nowait(None)
 
-            choices = getattr(response.output, "choices", None) or []
-            if not choices:
-                continue
-
-            message = getattr(choices[0], "message", None)
-            if not message:
-                continue
-
-            content = getattr(message, "content", None)
-            if isinstance(content, str) and content:
-                yield content
+        task = asyncio.get_event_loop().run_in_executor(None, _sync_stream)
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+        await task
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
@@ -84,7 +96,8 @@ class QwenClient(BaseLLMClient):
         ]
         
         try:
-            response = Generation.call(
+            response = await asyncio.to_thread(
+                Generation.call,
                 model=self.model,
                 messages=messages,
                 result_format="message",

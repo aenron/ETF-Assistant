@@ -18,6 +18,7 @@ export function LLMSelector() {
   const [selected, setSelected] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
+  const [fetchError, setFetchError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
@@ -30,8 +31,10 @@ export function LLMSelector() {
       const res = await llmApi.getProviders()
       setConfig(res.data)
       setSelected(res.data.current_provider)
+      setFetchError(null)
     } catch (error) {
       console.error('Failed to fetch LLM config:', error)
+      setFetchError('模型列表加载失败，请稍后重试')
     }
   }
 
@@ -126,7 +129,17 @@ export function LLMSelector() {
               </div>
             </>
           ) : (
-            <div className="text-center text-muted-foreground">加载中...</div>
+            <div className="space-y-4 text-center text-sm text-muted-foreground">
+              <div>{fetchError || '加载中...'}</div>
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <Button variant="outline" onClick={() => setOpen(false)}>
+                  关闭
+                </Button>
+                <Button variant="secondary" onClick={fetchConfig}>
+                  重试
+                </Button>
+              </div>
+            </div>
           )}
         </div>
       </DialogContent>

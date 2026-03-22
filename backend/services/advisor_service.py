@@ -99,15 +99,16 @@ class AdvisorService:
 输出要求：
 1. 给出一个顶层主决策，格式上必须包含:
    - main_judgment: 一句话主判断，建议写成“中期继续持有，短期不追高”这类可执行结论，50字以内
+   - summary: 综合决策说明，80-120字，需涵盖当前决策原因、短期操作节奏和长期配置逻辑，形成完整的决策叙述
    - action: 最终执行动作，必须是 "buy" / "sell" / "hold" / "add" / "reduce" 之一
-   - why: 2到3条最关键依据，必须体现“因为哪些技术面/位置/波动信号，所以给出这个动作”
+   - why: 2到3条最关键依据，必须体现“因为哪些技术面/位置/波动信号/政策新闻，所以给出这个动作”，每条25字以内
    - news_basis: 0到2条和 ETF 相关的新闻依据，没有就返回空数组
    - policy_basis: 0到2条和政策相关的依据，没有就返回空数组
 2. 同时给出 short_term、medium_term、long_term 三个周期的建议
 3. 每个周期都包含:
    - advice_type: 必须是 "buy" / "sell" / "hold" / "add" / "reduce" 之一
    - action: 对应周期下的具体动作描述，20字以内，例如“观望等待回踩”“继续持有”“分批加仓”
-   - conclusion: 一句话结论，60字以内
+   - conclusion: 一句话结论，30字以内
    - signals: 2到4条核心依据，优先引用均线、RSI、MACD、区间位置、回撤、波动率等已提供指标
    - risks: 1到2条主要风险，避免空泛表述
    - confidence: 0-100之间的整数
@@ -122,6 +123,7 @@ class AdvisorService:
 请直接输出JSON对象，不要添加任何markdown标记或代码块符号:
 {{
   "main_judgment": "一句话主判断",
+  "summary": "综合决策说明，80-120字",
   "action": "hold",
   "why": ["关键依据1", "关键依据2"],
   "news_basis": ["相关新闻依据"],
@@ -220,6 +222,7 @@ class AdvisorService:
     @staticmethod
     def format_multi_horizon_reason(
         main_judgment: str,
+        summary: str,
         action: str,
         why: List[str],
         news_basis: List[str],
@@ -228,11 +231,12 @@ class AdvisorService:
         medium_term: PeriodAdvice,
         long_term: PeriodAdvice,
     ) -> str:
-        why_text = "；".join(why) or "暂无"
-        news_text = "；".join(news_basis) or "暂无"
-        policy_text = "；".join(policy_basis) or "暂无"
+        why_text = ";".join(why) or "暂无"
+        news_text = ";".join(news_basis) or "暂无"
+        policy_text = ";".join(policy_basis) or "暂无"
         return (
             f"主判断：{main_judgment}\n"
+            f"综合说明：{summary}\n"
             f"执行动作：{action}\n"
             f"关键依据：{why_text}\n"
             f"新闻依据：{news_text}\n"
@@ -478,6 +482,7 @@ class AdvisorService:
                 medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
                 long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
                 main_judgment = raw_reason
+                summary = ""
                 action = "hold"
                 why = ["模型返回格式异常，未能提炼出稳定依据"]
                 news_basis = []
@@ -487,6 +492,7 @@ class AdvisorService:
                 medium_term = cls.parse_period_advice(result_json, "medium_term")
                 long_term = cls.parse_period_advice(result_json, "long_term")
                 main_judgment = str(result_json.get("main_judgment", medium_term.conclusion)).strip() or medium_term.conclusion
+                summary = str(result_json.get("summary", "")).strip()
                 action = str(result_json.get("action", medium_term.advice_type)).strip() or medium_term.advice_type
                 why = cls.parse_basis_items(result_json, "why", limit=3)
                 news_basis = cls.parse_basis_items(result_json, "news_basis", limit=2)
@@ -496,6 +502,7 @@ class AdvisorService:
             medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
             long_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
             main_judgment = medium_term.conclusion
+            summary = ""
             action = medium_term.advice_type
             why = ["模型调用失败，暂时无法生成关键依据"]
             news_basis = []
@@ -503,7 +510,7 @@ class AdvisorService:
 
         advice_type = medium_term.advice_type
         reason = cls.format_multi_horizon_reason(
-            main_judgment, action, why, news_basis, policy_basis, short_term, medium_term, long_term
+            main_judgment, summary, action, why, news_basis, policy_basis, short_term, medium_term, long_term
         )
         confidence = Decimal(str(medium_term.confidence))
 
@@ -512,6 +519,7 @@ class AdvisorService:
             "quote": quote,
             "advice_type": advice_type,
             "main_judgment": main_judgment,
+            "summary": summary,
             "action": action,
             "why": why,
             "news_basis": news_basis,
@@ -588,6 +596,7 @@ class AdvisorService:
                 etf_name=quote.name,
                 advice_type=payload["advice_type"],
                 main_judgment=payload["main_judgment"],
+                summary=payload["summary"],
                 action=payload["action"],
                 why=payload["why"],
                 news_basis=payload["news_basis"],
@@ -653,6 +662,7 @@ class AdvisorService:
             etf_name=quote.name,
             advice_type=payload["advice_type"],
             main_judgment=payload["main_judgment"],
+            summary=payload["summary"],
             action=payload["action"],
             why=payload["why"],
             news_basis=payload["news_basis"],

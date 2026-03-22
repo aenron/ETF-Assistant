@@ -120,6 +120,7 @@ export interface AdviceResponse {
   etf_name: string | null
   advice_type: string
   main_judgment: string
+  summary: string
   action: string
   why: string[]
   news_basis: string[]

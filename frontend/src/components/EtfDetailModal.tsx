@@ -516,14 +516,13 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                             <p className="mt-2 text-sm leading-relaxed">
                               {displayAdvice.main_judgment || `中期以${displayConfig?.label || displayAdvice.advice_type}为主，${displayAdvice.medium_term.conclusion}`}
                             </p>
-                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                              执行动作：{displayAdvice.action || displayAdvice.advice_type}。短期偏{displayAdvice.short_term.conclusion}；长期看{displayAdvice.long_term.conclusion}
-                            </p>
-                          </div>
-                          {(displayAdvice.why.length > 0 || displayAdvice.news_basis.length > 0 || displayAdvice.policy_basis.length > 0) && (
-                            <div className="rounded-xl border bg-background/60 p-4">
-                              <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
-                              <div className="mt-2 flex flex-wrap gap-2">
+                            {displayAdvice.summary && (
+                              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                {displayAdvice.summary}
+                              </p>
+                            )}
+                            {(displayAdvice.why.length > 0 || displayAdvice.news_basis.length > 0 || displayAdvice.policy_basis.length > 0) && (
+                              <div className="mt-3 flex flex-wrap gap-2">
                                 {displayAdvice.why.slice(0, 3).map((item, index) => (
                                   <span key={`why-${index}`} className="rounded-full border bg-white/70 px-2 py-0.5 text-xs text-foreground/70">
                                     {item}
@@ -540,8 +539,8 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                                   </span>
                                 )}
                               </div>
-                            </div>
-                          )}
+                            )}
+                          </div>
                           <div className="rounded-xl border bg-background/60 p-4">
                             <div className="text-xs font-medium text-muted-foreground">补充判断</div>
                             <div className="mt-2 space-y-3 text-sm">
