@@ -362,8 +362,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
 
         {/* 建议弹窗 */}
         {showAdviceModal && currentAdvice && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-background rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-background rounded-lg p-6 max-w-3xl w-full mx-4 shadow-xl">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold">投资建议</h3>
                 <Button size="icon" variant="ghost" onClick={() => setShowAdviceModal(false)}>
@@ -390,8 +390,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </div>
                 </div>
                 
-                <div className="space-y-3">
-                  <div className="rounded-xl border bg-primary/5 p-4">
+                <div className="space-y-3 lg:grid lg:grid-cols-[1.1fr,0.9fr] lg:gap-4">
+                  <div className="rounded-xl border bg-primary/5 p-4 lg:shadow-sm">
                     <div className="text-xs font-medium text-muted-foreground">主建议</div>
                     <p className="mt-2 text-sm leading-relaxed">
                       {currentAdvice.main_judgment || `中期以${getAdviceTypeLabel(currentAdvice.advice_type)}为主，${currentAdvice.medium_term.conclusion}`}
@@ -401,7 +401,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     </p>
                   </div>
                   {(currentAdvice.why.length > 0 || currentAdvice.news_basis.length > 0 || currentAdvice.policy_basis.length > 0) && (
-                    <div className="rounded-xl border bg-background/60 p-4">
+                    <div className="rounded-xl border bg-background/60 p-4 lg:self-start">
                       <div className="text-xs font-medium text-muted-foreground">依据摘要</div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         {currentAdvice.why.slice(0, 3).map((item, index) => (

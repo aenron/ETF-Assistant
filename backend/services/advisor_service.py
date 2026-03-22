@@ -11,7 +11,6 @@ from schemas.portfolio import PortfolioWithMarket
 from config import settings
 from services.market_service import MarketService
 from services.portfolio_service import PortfolioService
-from services.news_service import NewsService
 from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, GeminiClient, QwenClient
 
 
@@ -67,8 +66,6 @@ class AdvisorService:
         holding_days: Optional[int],
         kline_summary: str,
         indicators: dict,
-        news_summary: str = "暂无相关新闻",
-        policy_news: str = "暂无政策新闻",
     ) -> str:
         """构造LLM Prompt"""
         return f"""你是一名专业的ETF投资顾问。请根据以下信息给出投资建议。
@@ -95,13 +92,7 @@ class AdvisorService:
 - 距60日高点回撤={indicators.get('drawdown_60', 'N/A')}%, 距250日高点回撤={indicators.get('drawdown_250', 'N/A')}%
 - 20日波动率={indicators.get('volatility_20', 'N/A')}%, 60日波动率={indicators.get('volatility_60', 'N/A')}%
 
-## 相关新闻
-{news_summary}
-
-## 近期政策
-{policy_news}
-
-请综合考虑技术面、基本面、政策面和市场情绪，同时搜索最新的相关新闻和政策消息，给出投资建议。
+请综合考虑技术面、基本面、政策面和市场情绪，并通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息，给出投资建议。
 
 输出要求：
 1. 给出一个顶层主决策，格式上必须包含:
@@ -123,7 +114,7 @@ class AdvisorService:
 6. long_term 更关注 3 个月以上趋势、回撤和配置价值
 7. 三个周期的结论必须体现时间维度差异，不要重复同一句话
 8. 顶层 main_judgment / action / why 必须和 medium_term 保持一致，形成“结论 -> 依据 -> 动作”的闭环
-9. news_basis 和 policy_basis 只允许引用输入中已经提供的新闻/政策，不要编造
+9. news_basis 和 policy_basis 必须来自模型联网搜索到的真实最新信息；如果当前模型不支持联网搜索或未检索到可靠结果，就返回空数组，不要编造
 10. 输出要直接、结构化，不要写额外解释文字
 
 请直接输出JSON对象，不要添加任何markdown标记或代码块符号:
@@ -497,11 +488,6 @@ class AdvisorService:
             indicators = MarketService.calculate_technical_indicators(kline_data)
             indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
             
-            etf_news = NewsService.get_etf_related_news(quote.name, limit=5)
-            news_summary = NewsService.format_news_summary(etf_news)
-            policy_news_list = NewsService.get_policy_news(limit=5)
-            policy_news = NewsService.format_news_summary(policy_news_list)
-
             # 构造Prompt
             prompt = cls.build_prompt(
                 etf_code=p.etf_code,
@@ -513,8 +499,6 @@ class AdvisorService:
                 holding_days=holding_days,
                 kline_summary=kline_summary,
                 indicators=indicators_dict,
-                news_summary=news_summary,
-                policy_news=policy_news,
             )
             
             # 调用LLM
@@ -629,14 +613,6 @@ class AdvisorService:
         indicators = MarketService.calculate_technical_indicators(kline_data)
         indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
         
-        # 获取相关新闻和政策
-        print(f"[AdvisorService] 获取 {quote.name} 相关新闻...")
-        etf_news = NewsService.get_etf_related_news(quote.name, limit=5)
-        news_summary = NewsService.format_news_summary(etf_news)
-        
-        policy_news_list = NewsService.get_policy_news(limit=5)
-        policy_news = NewsService.format_news_summary(policy_news_list)
-        
         # 构造Prompt
         llm = cls.get_llm_client()
         prompt = cls.build_prompt(
@@ -649,8 +625,6 @@ class AdvisorService:
             holding_days=holding_days,
             kline_summary=kline_summary,
             indicators=indicators_dict,
-            news_summary=news_summary,
-            policy_news=policy_news,
         )
         
         # 调用LLM
