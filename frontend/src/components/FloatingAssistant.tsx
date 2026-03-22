@@ -3,6 +3,7 @@ import { Bot, Loader2, MemoryStick, MessageCircle, Plus, Send, Trash2, X } from 
 
 import { assistantApi, type AssistantMessage, type AssistantSession } from '@/services/api'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from './ConfirmDialog'
 
 type AssistantSegment =
   | { type: 'markdown'; content: string }
@@ -146,6 +147,8 @@ export function FloatingAssistant() {
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null)
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState('')
+  const [sessionToDelete, setSessionToDelete] = useState<AssistantSession | null>(null)
+  const [deletingSession, setDeletingSession] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
   const waitForPaint = () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
@@ -221,20 +224,25 @@ export function FloatingAssistant() {
     }
   }
 
-  const handleDeleteSession = async (sessionId: number) => {
-    if (!confirm('确定删除当前会话？')) return
+  const handleDeleteSession = async () => {
+    if (!sessionToDelete || deletingSession) return
+
+    setDeletingSession(true)
     try {
-      await assistantApi.deleteSession(sessionId)
-      const nextSessions = sessions.filter((item) => item.id !== sessionId)
+      await assistantApi.deleteSession(sessionToDelete.id)
+      const nextSessions = sessions.filter((item) => item.id !== sessionToDelete.id)
       setSessions(nextSessions)
-      if (activeSessionId === sessionId) {
+      if (activeSessionId === sessionToDelete.id) {
         const nextId = nextSessions[0]?.id ?? null
         setActiveSessionId(nextId)
         if (!nextId) setMessages([])
       }
+      setSessionToDelete(null)
     } catch (error) {
       console.error('Failed to delete assistant session:', error)
       alert('删除会话失败')
+    } finally {
+      setDeletingSession(false)
     }
   }
 
@@ -397,7 +405,15 @@ export function FloatingAssistant() {
                 <div className="mt-1 text-xs text-muted-foreground">回答会参考当前持仓、账户概况和该会话上下文</div>
               </div>
               {activeSessionId && (
-                <button className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onClick={() => handleDeleteSession(activeSessionId)}>
+                <button
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    const activeSession = sessions.find((item) => item.id === activeSessionId)
+                    if (activeSession) {
+                      setSessionToDelete(activeSession)
+                    }
+                  }}
+                >
                   <Trash2 className="h-3.5 w-3.5" />
                   删除会话
                 </button>
@@ -464,6 +480,21 @@ export function FloatingAssistant() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!sessionToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingSession) {
+            setSessionToDelete(null)
+          }
+        }}
+        title="删除当前会话"
+        description={sessionToDelete ? `确认删除会话“${sessionToDelete.title}”吗？该会话的历史消息将一并删除。` : ''}
+        confirmText="确认删除"
+        onConfirm={handleDeleteSession}
+        loading={deletingSession}
+        variant="destructive"
+      />
 
       <button
         onClick={() => setOpen((value) => !value)}

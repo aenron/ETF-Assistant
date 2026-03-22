@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type AdviceLogResponse } from '@/services/api'
 import { Plus, Pencil, Trash2, Search, TrendingUp, TrendingDown, Lightbulb, X, RefreshCw, Eye, Clock } from 'lucide-react'
 import { EtfDetailModal } from './EtfDetailModal'
+import { ConfirmDialog } from './ConfirmDialog'
 
 interface PortfolioTableProps {
   portfolios: PortfolioWithMarket[]
@@ -30,6 +31,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [refreshingCode, setRefreshingCode] = useState<string | null>(null)
   const [detailPortfolio, setDetailPortfolio] = useState<PortfolioWithMarket | null>(null)
   const [latestAdvices, setLatestAdvices] = useState<Record<string, AdviceLogResponse>>({})
+  const [deleteTarget, setDeleteTarget] = useState<PortfolioWithMarket | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     fetchLatestAdvices()
@@ -90,10 +93,16 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     setShowForm(true)
   }
 
-  const handleDelete = async (id: number) => {
-    if (confirm('确定删除该持仓？')) {
-      await portfolioApi.delete(id)
+  const handleDelete = async () => {
+    if (!deleteTarget || deleting) return
+
+    setDeleting(true)
+    try {
+      await portfolioApi.delete(deleteTarget.id)
+      setDeleteTarget(null)
       onRefresh()
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -351,7 +360,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     <Button size="icon" variant="ghost" onClick={() => handleEdit(p)}>
                       <Pencil className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" variant="ghost" onClick={() => handleDelete(p.id)}>
+                    <Button size="icon" variant="ghost" onClick={() => setDeleteTarget(p)}>
                       <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </td>
@@ -520,6 +529,21 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
             onClose={() => setDetailPortfolio(null)}
           />
         )}
+
+        <ConfirmDialog
+          open={!!deleteTarget}
+          onOpenChange={(open) => {
+            if (!open && !deleting) {
+              setDeleteTarget(null)
+            }
+          }}
+          title="删除持仓"
+          description={deleteTarget ? `确认删除 ${deleteTarget.etf_name || deleteTarget.etf_code} 持仓记录吗？此操作不可撤销。` : ''}
+          confirmText="确认删除"
+          onConfirm={handleDelete}
+          loading={deleting}
+          variant="destructive"
+        />
       </CardContent>
     </Card>
   )
