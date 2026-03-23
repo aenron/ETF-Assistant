@@ -83,14 +83,14 @@ export function PortfolioSummaryCard({
       : `前两大类占比 ${topTwoRatio.toFixed(1)}%，持仓分布相对均衡。`
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">总市值</CardTitle>
           <Wallet className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">¥{summary.total_market_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+          <div className="break-all text-xl font-bold sm:text-2xl">¥{summary.total_market_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
         </CardContent>
       </Card>
 
@@ -100,7 +100,7 @@ export function PortfolioSummaryCard({
           <Wallet className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="text-2xl font-bold">
+          <div className="break-all text-xl font-bold sm:text-2xl">
             {accountBalance !== null && accountBalance !== undefined
               ? `¥${accountBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
               : '-'}
@@ -119,7 +119,7 @@ export function PortfolioSummaryCard({
           <PieChart className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">
+          <div className="break-all text-xl font-bold sm:text-2xl">
             ¥{((summary?.total_market_value ?? 0) + (accountBalance ?? 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </div>
           <p className="text-xs text-muted-foreground mt-1">
@@ -134,7 +134,7 @@ export function PortfolioSummaryCard({
           {summary.total_pnl >= 0 ? <TrendingUp className="h-4 w-4 text-red-500" /> : <TrendingDown className="h-4 w-4 text-green-500" />}
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${summary.total_pnl >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+          <div className={`break-words text-xl font-bold sm:text-2xl ${summary.total_pnl >= 0 ? 'text-red-500' : 'text-green-500'}`}>
             {summary.total_pnl >= 0 ? '+' : ''}{summary.total_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })} ({summary.total_pnl_pct.toFixed(2)}%)
           </div>
         </CardContent>
@@ -146,7 +146,7 @@ export function PortfolioSummaryCard({
           {(summary.today_pnl ?? 0) >= 0 ? <TrendingUp className="h-4 w-4 text-red-500" /> : <TrendingDown className="h-4 w-4 text-green-500" />}
         </CardHeader>
         <CardContent>
-          <div className={`text-2xl font-bold ${(summary.today_pnl ?? 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+          <div className={`break-words text-xl font-bold sm:text-2xl ${(summary.today_pnl ?? 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
             {summary.today_pnl !== null ? `${summary.today_pnl >= 0 ? '+' : ''}${summary.today_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
           </div>
         </CardContent>

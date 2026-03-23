@@ -32,7 +32,7 @@ export function AccountAnalysisCard({ analysis }: AccountAnalysisCardProps) {
   return (
     <Card>
       <CardHeader className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <Sparkles className="h-5 w-5 text-primary" />

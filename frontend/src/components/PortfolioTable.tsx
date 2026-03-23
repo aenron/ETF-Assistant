@@ -186,9 +186,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <CardTitle>持仓列表</CardTitle>
-        <Button onClick={() => { setShowForm(true); setEditingId(null); setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '' }); }}>
+        <Button className="w-full sm:w-auto" onClick={() => { setShowForm(true); setEditingId(null); setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '' }); }}>
           <Plus className="h-4 w-4 mr-2" />
           新增持仓
         </Button>
@@ -196,7 +196,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       <CardContent>
         {showForm && (
           <div className="mb-6 p-4 border rounded-lg bg-muted/50">
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               <div className="relative">
                 <label className="text-sm font-medium">ETF代码</label>
                 <div className="flex gap-2">
@@ -260,14 +260,107 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 />
               </div>
             </div>
-            <div className="mt-4 flex gap-2">
-              <Button onClick={handleSubmit}>{editingId ? '更新' : '创建'}</Button>
-              <Button variant="outline" onClick={() => { setShowForm(false); setEditingId(null); }}>取消</Button>
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <Button className="w-full sm:w-auto" onClick={handleSubmit}>{editingId ? '更新' : '创建'}</Button>
+              <Button className="w-full sm:w-auto" variant="outline" onClick={() => { setShowForm(false); setEditingId(null); }}>取消</Button>
             </div>
           </div>
         )}
 
-        <div className="overflow-x-auto">
+        <div className="space-y-3 md:hidden">
+          {portfolios.map((p) => {
+            const latestAdvice = latestAdvices[p.etf_code]
+            return (
+              <div key={p.id} className="rounded-xl border bg-background p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-mono text-base font-semibold">{p.etf_code}</div>
+                    <div className="mt-1 text-sm text-muted-foreground">{p.etf_name || '-'}</div>
+                  </div>
+                  {latestAdvice ? (
+                    <Badge
+                      variant="outline"
+                      className={`shrink-0 text-xs ${getAdviceTypeColor(latestAdvice.advice_type || 'hold')} border-current`}
+                    >
+                      {getAdviceTypeLabel(latestAdvice.advice_type || 'hold')}
+                    </Badge>
+                  ) : (
+                    <span className="shrink-0 text-xs text-muted-foreground">暂无建议</span>
+                  )}
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-lg bg-muted/40 p-3">
+                    <div className="text-xs text-muted-foreground">持有份额</div>
+                    <div className="mt-1 font-medium">{p.shares.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-lg bg-muted/40 p-3">
+                    <div className="text-xs text-muted-foreground">当前价格</div>
+                    <div className="mt-1 font-medium">{p.current_price?.toFixed(3) || '-'}</div>
+                  </div>
+                  <div className="rounded-lg bg-muted/40 p-3">
+                    <div className="text-xs text-muted-foreground">市值</div>
+                    <div className="mt-1 font-medium">{p.market_value?.toFixed(2) || '-'}</div>
+                  </div>
+                  <div className="rounded-lg bg-muted/40 p-3">
+                    <div className="text-xs text-muted-foreground">盈亏</div>
+                    <div className={`${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''} mt-1 font-medium`}>
+                      {p.pnl_pct ? `${p.pnl_pct.toFixed(2)}%` : '-'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span>行情时间</span>
+                  <span>{formatMarketRefreshedAt(p.market_refreshed_at)}</span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-5 gap-2">
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    onClick={() => setDetailPortfolio(p)}
+                    title="查看详情"
+                  >
+                    <Eye className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    onClick={() => handleGetAdvice(p.id)}
+                    disabled={adviceLoading === p.id}
+                    title="生成AI建议"
+                  >
+                    <Lightbulb className={`h-4 w-4 ${adviceLoading === p.id ? 'animate-pulse text-yellow-500' : ''}`} />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    onClick={() => handleRefreshQuote(p.etf_code)}
+                    disabled={refreshingCode === p.etf_code}
+                    title="刷新行情"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
+                  </Button>
+                  <Button size="icon" variant="outline" onClick={() => handleEdit(p)}>
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                  <Button size="icon" variant="outline" onClick={() => setDeleteTarget(p)}>
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
+              </div>
+            )
+          })}
+
+          {portfolios.length === 0 && (
+            <div className="rounded-xl border border-dashed py-8 text-center text-sm text-muted-foreground">
+              暂无持仓数据，点击“新增持仓”开始添加
+            </div>
+          )}
+        </div>
+
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b">

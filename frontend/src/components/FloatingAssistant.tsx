@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Loader2, MemoryStick, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react'
+import { Bot, ChevronLeft, Loader2, MemoryStick, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react'
 
 import { assistantApi, type AssistantMessage, type AssistantSession } from '@/services/api'
 import { Button } from '@/components/ui/button'
@@ -140,6 +140,8 @@ function renderAssistantContent(content: string) {
 
 export function FloatingAssistant() {
   const [open, setOpen] = useState(false)
+  const [isMobile, setIsMobile] = useState(false)
+  const [showMobileSessions, setShowMobileSessions] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [sending, setSending] = useState(false)
@@ -195,10 +197,33 @@ export function FloatingAssistant() {
   }
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px)')
+    const syncViewport = (event?: MediaQueryListEvent) => {
+      const matches = event ? event.matches : mediaQuery.matches
+      setIsMobile(matches)
+      if (!matches) {
+        setShowMobileSessions(false)
+      }
+    }
+
+    syncViewport()
+    mediaQuery.addEventListener('change', syncViewport)
+    return () => mediaQuery.removeEventListener('change', syncViewport)
+  }, [])
+
+  useEffect(() => {
     if (open) {
       fetchSessions()
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open) {
+      setShowMobileSessions(false)
+    } else if (isMobile) {
+      setShowMobileSessions(true)
+    }
+  }, [open, isMobile])
 
   useEffect(() => {
     if (open && activeSessionId) {
@@ -358,8 +383,8 @@ export function FloatingAssistant() {
   return (
     <>
       {open && (
-        <div className="fixed bottom-24 right-6 z-50 flex h-[620px] w-[780px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">
-          <div className="flex w-[240px] flex-col border-r bg-slate-50">
+        <div className={`${isMobile ? 'fixed inset-0 z-50 flex flex-col bg-white' : 'fixed bottom-24 right-6 z-50 flex h-[620px] w-[780px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15'}`}>
+          <div className={`${isMobile ? `${showMobileSessions ? 'flex' : 'hidden'} min-h-0 flex-1 flex-col bg-slate-50` : 'flex w-[240px] flex-col border-r bg-slate-50'}`}>
             <div className="bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-700 px-4 py-4 text-white">
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -385,7 +410,12 @@ export function FloatingAssistant() {
               {sessions.map((session) => (
                 <button
                   key={session.id}
-                  onClick={() => setActiveSessionId(session.id)}
+                  onClick={() => {
+                    setActiveSessionId(session.id)
+                    if (isMobile) {
+                      setShowMobileSessions(false)
+                    }
+                  }}
                   className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${activeSessionId === session.id ? 'border-emerald-300 bg-emerald-50' : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-100'}`}
                 >
                   <div className="truncate text-sm font-medium text-slate-900">{session.title}</div>
@@ -396,9 +426,18 @@ export function FloatingAssistant() {
             </div>
           </div>
 
-          <div className="flex flex-1 flex-col">
+          <div className={`${isMobile && showMobileSessions ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
             <div className="flex items-center justify-between border-b px-4 py-3">
-              <div>
+              <div className="min-w-0">
+                {isMobile && (
+                  <button
+                    className="mb-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setShowMobileSessions(true)}
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5 rotate-180" />
+                    会话列表
+                  </button>
+                )}
                 <div className="text-sm font-semibold text-slate-900">
                   {sessions.find((item) => item.id === activeSessionId)?.title || '当前会话'}
                 </div>
@@ -433,7 +472,7 @@ export function FloatingAssistant() {
               )}
               {!loadingHistory && messages.map((message) => (
                 <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm ${message.role === 'user' ? 'bg-slate-900 text-white' : 'border border-slate-200 bg-white text-slate-800'}`}>
+                  <div className={`max-w-[92%] md:max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm ${message.role === 'user' ? 'bg-slate-900 text-white' : 'border border-slate-200 bg-white text-slate-800'}`}>
                     <div className={`space-y-3 ${message.role === 'assistant' ? 'text-[13px]' : 'whitespace-pre-wrap leading-relaxed'}`}>
                       {message.role === 'assistant' ? renderAssistantContent(message.content) : message.content}
                     </div>
@@ -454,7 +493,7 @@ export function FloatingAssistant() {
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="border-t bg-white p-3">
+            <div className="border-t bg-white p-3 pb-[max(12px,env(safe-area-inset-bottom))]">
               <div className="rounded-2xl border bg-slate-50 p-2">
                 <textarea
                   value={draft}
@@ -468,7 +507,7 @@ export function FloatingAssistant() {
                   placeholder="询问持仓、仓位、调仓思路或风险点..."
                   className="min-h-[84px] w-full resize-none border-0 bg-transparent p-1 text-sm outline-none placeholder:text-slate-400"
                 />
-                <div className="mt-2 flex items-center justify-between">
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-[11px] text-muted-foreground">Enter 发送，Shift+Enter 换行</span>
                   <Button size="sm" onClick={handleSend} disabled={sending || !draft.trim()}>
                     {sending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
@@ -498,14 +537,14 @@ export function FloatingAssistant() {
 
       <button
         onClick={() => setOpen((value) => !value)}
-        className="fixed bottom-6 right-6 z-50 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-600 text-white shadow-2xl shadow-slate-900/25 transition-transform hover:scale-105"
+        className="fixed bottom-4 right-4 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-600 text-white shadow-2xl shadow-slate-900/25 transition-transform hover:scale-105 md:bottom-6 md:right-6 md:h-16 md:w-16"
         title="打开智能体助手"
       >
-        {open ? <X className="h-7 w-7" /> : <MessageCircle className="h-7 w-7" />}
+        {open ? <X className="h-6 w-6 md:h-7 md:w-7" /> : <MessageCircle className="h-6 w-6 md:h-7 md:w-7" />}
       </button>
 
       {!open && (
-        <div className="fixed bottom-7 right-24 z-40 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-xs text-slate-600 shadow-lg backdrop-blur">
+        <div className="fixed bottom-7 right-24 z-40 hidden rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-xs text-slate-600 shadow-lg backdrop-blur md:block">
           <span className="flex items-center gap-1.5">
             <Bot className="h-3.5 w-3.5 text-emerald-600" />
             智能体助手

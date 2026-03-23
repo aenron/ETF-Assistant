@@ -313,9 +313,9 @@ export function AdvicePage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">决策历史</h1>
-        <Button variant="outline" size="icon" onClick={fetchLogs} disabled={loading}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-2xl font-bold sm:text-3xl">决策历史</h1>
+        <Button variant="outline" size="icon" onClick={fetchLogs} disabled={loading} className="w-full sm:w-10">
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </Button>
       </div>
@@ -327,7 +327,7 @@ export function AdvicePage() {
           return (
             <Card key={log.id} className={`border ${config.bgColor} transition-shadow hover:shadow-md`}>
               <CardContent className="space-y-4 py-4">
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex flex-wrap items-center gap-3">
                     <span className="font-mono text-lg font-semibold">
                       {log.advice_type === 'account' ? 'ACCOUNT' : (log.etf_code || '-')}

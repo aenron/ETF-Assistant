@@ -114,22 +114,22 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-3xl font-bold">投资仪表盘</h1>
+          <h1 className="text-2xl font-bold sm:text-3xl">投资仪表盘</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             当前使用行情时间：{formatMarketRefreshAt(marketRefreshAt)}
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="icon" onClick={fetchData} disabled={loading}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[auto,1fr,1fr] lg:flex">
+          <Button variant="outline" size="icon" onClick={fetchData} disabled={loading} className="w-full sm:w-10">
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </Button>
-          <Button variant="outline" onClick={handleRefreshMarket} disabled={refreshing}>
+          <Button variant="outline" onClick={handleRefreshMarket} disabled={refreshing} className="w-full">
             <TrendingUp className="h-4 w-4 mr-2" />
             {refreshing ? '刷新中...' : '刷新行情'}
           </Button>
-          <Button variant="outline" onClick={handleAnalyzeAccount} disabled={analyzingAccount}>
+          <Button variant="outline" onClick={handleAnalyzeAccount} disabled={analyzingAccount} className="w-full">
             <Sparkles className="h-4 w-4 mr-2" />
             {analyzingAccount ? '分析中...' : '分析账户'}
           </Button>
