@@ -87,13 +87,14 @@ class AssistantService:
         cls,
         llm,
         prompt: str,
+        context: str = "assistant_stream",
     ) -> AsyncIterator[tuple[str, str | None]]:
         """优先使用原生流式，必要时降级或缓冲清洗"""
         raw_parts: list[str] = []
         buffered_prefix = ""
         mode = "pending"
 
-        async for raw_chunk in llm.chat_stream(prompt):
+        async for raw_chunk in AdvisorService.chat_stream_with_logging(llm, prompt, context):
             if not raw_chunk:
                 continue
 
@@ -238,20 +239,46 @@ class AssistantService:
             conversation.title = cls.build_session_title(message)
 
     @classmethod
-    async def chat(
+    async def prepare_user_message(
         cls,
         session: AsyncSession,
         user_id: int,
         session_id: int | None,
         message: str,
-    ) -> AssistantChatResponse:
+        retry_message_id: int | None = None,
+    ) -> tuple[AssistantSession, AssistantSessionMessage, str]:
         clean_message = message.strip()
         if not clean_message:
             raise ValueError("message cannot be empty")
 
         conversation = await cls.get_or_create_session(session, user_id, session_id)
-        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
-        llm = AdvisorService.get_llm_client()
+        if retry_message_id is not None:
+            user_message = await session.get(AssistantSessionMessage, retry_message_id)
+            if (
+                not user_message
+                or user_message.user_id != user_id
+                or user_message.session_id != conversation.id
+                or user_message.role != "user"
+            ):
+                raise ValueError("retry message not found")
+
+            clean_message = user_message.content.strip()
+            await session.execute(
+                delete(AssistantSessionMessage).where(
+                    AssistantSessionMessage.user_id == user_id,
+                    AssistantSessionMessage.session_id == conversation.id,
+                    AssistantSessionMessage.id > user_message.id,
+                )
+            )
+            prompt = await cls.build_prompt(
+                session,
+                user_id,
+                conversation.id,
+                clean_message,
+                before_message_id=user_message.id,
+            )
+            await cls.touch_session(conversation, clean_message, set_title=False)
+            return conversation, user_message, prompt
 
         user_message = AssistantSessionMessage(
             session_id=conversation.id,
@@ -262,9 +289,35 @@ class AssistantService:
         session.add(user_message)
         await session.flush()
         await cls.touch_session(conversation, clean_message, set_title=True)
+        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
+        return conversation, user_message, prompt
+
+    @classmethod
+    async def chat(
+        cls,
+        session: AsyncSession,
+        user_id: int,
+        session_id: int | None,
+        message: str,
+        retry_message_id: int | None = None,
+    ) -> AssistantChatResponse:
+        conversation, user_message, prompt = await cls.prepare_user_message(
+            session,
+            user_id,
+            session_id,
+            message,
+            retry_message_id=retry_message_id,
+        )
+        llm = AdvisorService.get_llm_client()
 
         try:
-            reply_text = cls.normalize_response(await llm.chat(prompt))
+            reply_text = cls.normalize_response(
+                await AdvisorService.chat_with_logging(
+                    llm,
+                    prompt,
+                    context=f"assistant_chat:session:{conversation.id}",
+                )
+            )
         except Exception as exc:
             reply_text = f"当前智能体暂时不可用，请稍后重试。错误信息：{exc}"
 
@@ -291,31 +344,27 @@ class AssistantService:
         user_id: int,
         session_id: int | None,
         message: str,
+        retry_message_id: int | None = None,
     ) -> tuple[None, AsyncIterator[str]]:
-        clean_message = message.strip()
-        if not clean_message:
-            raise ValueError("message cannot be empty")
-
-        conversation = await cls.get_or_create_session(session, user_id, session_id)
-        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
-        llm = AdvisorService.get_llm_client()
-
-        user_message = AssistantSessionMessage(
-            session_id=conversation.id,
-            user_id=user_id,
-            role="user",
-            content=clean_message,
+        conversation, user_message, prompt = await cls.prepare_user_message(
+            session,
+            user_id,
+            session_id,
+            message,
+            retry_message_id=retry_message_id,
         )
-        session.add(user_message)
-        await session.flush()
-        await cls.touch_session(conversation, clean_message, set_title=True)
+        llm = AdvisorService.get_llm_client()
 
         async def event_stream() -> AsyncIterator[str]:
             yield f"event: meta\ndata: {json.dumps({'session': AssistantSessionResponse.model_validate(conversation).model_dump(mode='json'), 'user_message': AssistantMessageResponse.model_validate(user_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
 
             final_text = ""
             try:
-                async for event_type, payload in cls.stream_and_collect_response(llm, prompt):
+                async for event_type, payload in cls.stream_and_collect_response(
+                    llm,
+                    prompt,
+                    context=f"assistant_stream:session:{conversation.id}",
+                ):
                     if event_type == "chunk" and payload:
                         yield f"event: chunk\ndata: {json.dumps({'content': payload}, ensure_ascii=False)}\n\n"
                     if event_type == "done" and payload is not None:
@@ -347,6 +396,7 @@ class AssistantService:
         user_id: int,
         session_id: int,
         latest_user_message: str,
+        before_message_id: int | None = None,
     ) -> str:
         user = await session.get(User, user_id)
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
@@ -354,7 +404,15 @@ class AssistantService:
 
         history_result = await session.execute(
             select(AssistantSessionMessage)
-            .where(AssistantSessionMessage.user_id == user_id, AssistantSessionMessage.session_id == session_id)
+            .where(
+                AssistantSessionMessage.user_id == user_id,
+                AssistantSessionMessage.session_id == session_id,
+                *(
+                    [AssistantSessionMessage.id < before_message_id]
+                    if before_message_id is not None
+                    else []
+                ),
+            )
             .order_by(AssistantSessionMessage.created_at.desc(), AssistantSessionMessage.id.desc())
             .limit(cls.MEMORY_WINDOW)
         )

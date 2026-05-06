@@ -125,6 +125,7 @@ export interface AdviceResponse {
   why: string[]
   news_basis: string[]
   policy_basis: string[]
+  event_context: EventContext
   reason: string
   confidence: number
   short_term: PeriodAdvice
@@ -141,6 +142,25 @@ export interface PeriodAdvice {
   signals: string[]
   risks: string[]
   confidence: number
+}
+
+export interface EventItem {
+  title: string
+  date: string | null
+  source: string
+  relevance: string
+  impact: string
+  priced_in_risk: string
+  summary: string
+}
+
+export interface EventContext {
+  search_status: string
+  source_quality: string
+  policy_signal: string
+  macro_signal: string
+  news_signal: string
+  events: EventItem[]
 }
 
 export interface AccountAnalysisResponse {
@@ -215,6 +235,79 @@ export interface AssistantSessionListResponse {
   sessions: AssistantSession[]
 }
 
+export interface NotificationConfigResponse {
+  id: number | null
+  provider: string
+  enabled: boolean
+  configured: boolean
+  device_key_masked: string | null
+  chat_id_masked: string | null
+  base_url: string
+  last_test_at: string | null
+  last_test_success: boolean | null
+  last_error: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface NotificationConfigListResponse {
+  configs: NotificationConfigResponse[]
+}
+
+export interface BarkNotificationConfigUpdate {
+  enabled: boolean
+  device_key: string
+  base_url: string
+}
+
+export interface TelegramNotificationConfigUpdate {
+  enabled: boolean
+  bot_token: string
+  chat_id: string
+  base_url: string
+}
+
+export interface NotificationTestResponse {
+  success: boolean
+  message: string
+  config: NotificationConfigResponse
+}
+
+export interface AdminUser {
+  id: number
+  username: string
+  email: string | null
+  is_active: boolean
+  is_admin: boolean
+  account_balance: number | null
+  created_at: string
+}
+
+export interface AdminUserUpdate {
+  is_active?: boolean
+  is_admin?: boolean
+  account_balance?: number
+}
+
+export interface SchedulerJob {
+  id: string
+  name: string
+  trigger: string
+  next_run_time: string | null
+  enabled: boolean
+}
+
+export interface SchedulerJobsResponse {
+  running: boolean
+  jobs: SchedulerJob[]
+}
+
+export interface SchedulerActionResponse {
+  success: boolean
+  message: string
+  job_id?: string
+}
+
 // API 服务
 export const portfolioApi = {
   getList: () => api.get<PortfolioWithMarket[]>('/portfolio'),
@@ -253,13 +346,33 @@ export const assistantApi = {
   getHistory: (sessionId?: number) => api.get<AssistantHistoryResponse>('/assistant/history', { params: { session_id: sessionId } }),
   chat: (message: string, sessionId?: number) => api.post<AssistantChatResponse>('/assistant/chat', { message, session_id: sessionId }),
   deleteSession: (sessionId: number) => api.delete(`/assistant/sessions/${sessionId}`),
-  streamChat: async (message: string, sessionId?: number) =>
+  streamChat: async (message: string, sessionId?: number, retryMessageId?: number) =>
     fetch('/api/assistant/chat/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
       },
-      body: JSON.stringify({ message, session_id: sessionId }),
+      body: JSON.stringify({ message, session_id: sessionId, retry_message_id: retryMessageId }),
     }),
+}
+
+export const notificationConfigApi = {
+  list: () => api.get<NotificationConfigListResponse>('/notification-configs'),
+  updateBark: (data: BarkNotificationConfigUpdate) => api.put<NotificationConfigResponse>('/notification-configs/bark', data),
+  updateTelegram: (data: TelegramNotificationConfigUpdate) => api.put<NotificationConfigResponse>('/notification-configs/telegram', data),
+  testBark: () => api.post<NotificationTestResponse>('/notification-configs/bark/test'),
+  testTelegram: () => api.post<NotificationTestResponse>('/notification-configs/telegram/test'),
+}
+
+export const adminApi = {
+  listUsers: () => api.get<AdminUser[]>('/admin/users'),
+  updateUser: (userId: number, data: AdminUserUpdate) => api.patch<AdminUser>(`/admin/users/${userId}`, data),
+}
+
+export const schedulerApi = {
+  listJobs: () => api.get<SchedulerJobsResponse>('/admin/scheduler/jobs'),
+  runJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/run`),
+  pauseJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/pause`),
+  resumeJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/resume`),
 }

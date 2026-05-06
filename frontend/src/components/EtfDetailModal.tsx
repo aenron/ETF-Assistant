@@ -7,6 +7,7 @@ import {
   marketApi, adviceApi,
   type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse
 } from '@/services/api'
+import { AdviceEventContextPanel, parseEventContextFromReason } from '@/components/AdviceEventContextPanel'
 import {
   ResponsiveContainer, ComposedChart, Line, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, Area, ReferenceLine
@@ -94,6 +95,7 @@ function parseDecisionSummary(reason: string | null): ParsedDecisionSummary | nu
 function LegacyAdviceContent({ reason }: { reason: string | null }) {
   const periods = parseMultiHorizonReason(reason)
   const summary = parseDecisionSummary(reason)
+  const eventContext = parseEventContextFromReason(reason)
   if (periods.length > 0) {
     const medium = periods.find((period) => period.label === '中期')
     const short = periods.find((period) => period.label === '短期')
@@ -131,6 +133,7 @@ function LegacyAdviceContent({ reason }: { reason: string | null }) {
             </div>
           </div>
         ) : null}
+        <AdviceEventContextPanel eventContext={eventContext} compact />
         <div className="rounded-xl border bg-background/60 p-4">
           <div className="text-xs font-medium text-muted-foreground">补充判断</div>
           <div className="mt-2 space-y-3 text-sm">
@@ -533,16 +536,17 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                                     新闻：{displayAdvice.news_basis[0]}
                                   </span>
                                 )}
-                                {displayAdvice.policy_basis[0] && (
-                                  <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
-                                    政策：{displayAdvice.policy_basis[0]}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          <div className="rounded-xl border bg-background/60 p-4">
-                            <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+                          {displayAdvice.policy_basis[0] && (
+                            <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
+                              政策：{displayAdvice.policy_basis[0]}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <AdviceEventContextPanel eventContext={displayAdvice.event_context} />
+                    <div className="rounded-xl border bg-background/60 p-4">
+                      <div className="text-xs font-medium text-muted-foreground">补充判断</div>
                             <div className="mt-2 space-y-3 text-sm">
                               <div>
                                 <span className="font-medium">短期：</span>

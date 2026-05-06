@@ -21,6 +21,7 @@ export interface User {
   username: string
   email?: string
   is_active: boolean
+  is_admin: boolean
   account_balance?: number
   created_at: string
 }

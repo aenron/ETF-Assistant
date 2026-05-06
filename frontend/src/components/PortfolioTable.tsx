@@ -7,6 +7,7 @@ import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfS
 import { Plus, Pencil, Trash2, Search, TrendingUp, TrendingDown, Lightbulb, X, RefreshCw, Eye, Clock } from 'lucide-react'
 import { EtfDetailModal } from './EtfDetailModal'
 import { ConfirmDialog } from './ConfirmDialog'
+import { AdviceEventContextPanel } from './AdviceEventContextPanel'
 
 interface PortfolioTableProps {
   portfolios: PortfolioWithMarket[]
@@ -173,15 +174,36 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     return colors[type] || 'text-gray-500'
   }
 
-  const formatMarketRefreshedAt = (value: string | null) => {
-    if (!value) return '未缓存'
-    return new Date(value).toLocaleString('zh-CN', {
+  const formatBeijingTime = (
+    value: string | null,
+    options?: Intl.DateTimeFormatOptions,
+    emptyText = '未缓存',
+  ) => {
+    if (!value) return emptyText
+    const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+      ? value
+      : `${value.replace(' ', 'T')}Z`
+
+    return new Date(normalized).toLocaleString('zh-CN', {
       timeZone: 'Asia/Shanghai',
+      ...options,
+    })
+  }
+
+  const formatMarketRefreshedAt = (value: string | null) => {
+    return formatBeijingTime(value, {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
     })
+  }
+
+  const formatPnl = (pnl: number | null, pnlPct: number | null) => {
+    if (pnl === null || pnl === undefined || pnlPct === null || pnlPct === undefined) {
+      return '-'
+    }
+    return `${pnl.toFixed(2)}（${pnlPct.toFixed(2)}%）`
   }
 
   return (
@@ -305,7 +327,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   <div className="rounded-lg bg-muted/40 p-3">
                     <div className="text-xs text-muted-foreground">盈亏</div>
                     <div className={`${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''} mt-1 font-medium`}>
-                      {p.pnl_pct ? `${p.pnl_pct.toFixed(2)}%` : '-'}
+                      {formatPnl(p.pnl, p.pnl_pct)}
                     </div>
                   </div>
                 </div>
@@ -395,7 +417,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </td>
                   <td className="py-3 px-2 text-right">{p.market_value?.toFixed(2) || '-'}</td>
                   <td className={`py-3 px-2 text-right ${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''}`}>
-                    {p.pnl_pct ? `${p.pnl_pct.toFixed(2)}%` : '-'}
+                    {formatPnl(p.pnl, p.pnl_pct)}
                   </td>
                   <td className={`py-3 px-2 text-right ${p.change_pct && p.change_pct > 0 ? 'text-red-500' : p.change_pct && p.change_pct < 0 ? 'text-green-500' : ''}`}>
                     {p.change_pct ? (
@@ -416,7 +438,12 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                           <span className="ml-1 opacity-70">{latestAdvice.confidence?.toFixed(0)}%</span>
                         </Badge>
                         <span className="text-[10px] text-muted-foreground">
-                          {new Date(latestAdvice.created_at).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          {formatBeijingTime(latestAdvice.created_at, {
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          }, '-')}
                         </span>
                       </div>
                     ) : (
@@ -559,6 +586,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                         </div>
                       )}
                     </div>
+                    <AdviceEventContextPanel eventContext={currentAdvice.event_context} />
 
                     {/* 补充判断区块 */}
                     <div className="rounded-xl border bg-background/60 p-4">

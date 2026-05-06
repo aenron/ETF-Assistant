@@ -1,7 +1,7 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 
 class PeriodAdvice(BaseModel):
@@ -12,6 +12,27 @@ class PeriodAdvice(BaseModel):
     signals: List[str]
     risks: List[str]
     confidence: float
+
+
+class EventItem(BaseModel):
+    """新闻/政策/宏观事件依据"""
+    title: str = ""
+    date: Optional[str] = None
+    source: str = ""
+    relevance: Literal["direct", "indirect", "weak", "unknown"] = "unknown"
+    impact: Literal["positive", "neutral", "negative", "unknown"] = "unknown"
+    priced_in_risk: Literal["low", "medium", "high", "unknown"] = "unknown"
+    summary: str = ""
+
+
+class EventContext(BaseModel):
+    """模型搜索得到的事件上下文"""
+    search_status: Literal["success", "partial", "unavailable"] = "unavailable"
+    source_quality: Literal["high", "medium", "low", "unknown"] = "unknown"
+    policy_signal: Literal["positive", "neutral", "negative", "unknown"] = "unknown"
+    macro_signal: Literal["positive", "neutral", "negative", "unknown"] = "unknown"
+    news_signal: Literal["positive", "neutral", "negative", "unknown"] = "unknown"
+    events: List[EventItem] = Field(default_factory=list)
 
 
 class AdviceGenerateRequest(BaseModel):
@@ -30,6 +51,7 @@ class AdviceResponse(BaseModel):
     why: List[str]
     news_basis: List[str]
     policy_basis: List[str]
+    event_context: EventContext = Field(default_factory=EventContext)
     reason: str
     confidence: float
     short_term: PeriodAdvice

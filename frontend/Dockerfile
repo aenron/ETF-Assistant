@@ -1,26 +1,30 @@
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1.7
+
+FROM node:20-alpine AS deps
+
+ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+ENV NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}
 
 WORKDIR /app
 
-# 复制依赖文件
-COPY package*.json ./
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
 
-# 安装依赖
-RUN npm install
+FROM node:20-alpine AS builder
 
-# 复制源代码
+ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+ENV NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}
+
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json ./
 COPY . .
-
-# 构建
 RUN npm run build
 
-# 生产阶段
-FROM nginx:alpine
+FROM nginx:alpine AS runtime
 
-# 复制构建产物
 COPY --from=builder /app/dist /usr/share/nginx/html
-
-# 复制nginx配置
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80

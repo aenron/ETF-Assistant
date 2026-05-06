@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { type AdviceResponse } from '@/services/api'
 import { TrendingUp, TrendingDown, Minus, Plus, ArrowDownRight, Lightbulb } from 'lucide-react'
+import { AdviceEventContextPanel } from '@/components/AdviceEventContextPanel'
 
 interface AdviceCardProps {
   advice: AdviceResponse
@@ -118,6 +119,9 @@ export function AdviceCard({ advice, accountBalance = 0 }: AdviceCardProps) {
                       )}
                     </div>
                   )}
+                  <div className="mt-3">
+                    <AdviceEventContextPanel eventContext={advice.event_context} compact />
+                  </div>
                 </div>
                 <div className="rounded-xl border bg-background/60 p-4">
                   <div className="text-xs font-medium text-muted-foreground">补充判断</div>

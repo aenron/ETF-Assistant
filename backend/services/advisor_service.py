@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
@@ -7,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Portfolio, AdviceLog, EtfInfo
-from schemas.advice import AdviceResponse, AdviceLogResponse, AccountAnalysisResponse, PeriodAdvice
+from schemas.advice import AdviceResponse, AdviceLogResponse, AccountAnalysisResponse, EventContext, EventItem, PeriodAdvice
 from schemas.portfolio import PortfolioWithMarket
 from config import settings
 from services.market_service import MarketService
@@ -56,6 +57,80 @@ class AdvisorService:
             else:
                 raise ValueError(f"不支持的LLM提供商: {settings.llm_provider}")
         return cls._llm_client
+
+    @classmethod
+    def _llm_label(cls, llm: BaseLLMClient) -> str:
+        provider = settings.llm_provider
+        model = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "unknown"
+        return f"{provider}/{model}"
+
+    @classmethod
+    def _log_llm_prompt(cls, llm: BaseLLMClient, prompt: str, context: str) -> None:
+        print(
+            f"\n[LLM][{context}][{cls._llm_label(llm)}] >>> PROMPT START\n"
+            f"{prompt}\n"
+            f"[LLM][{context}][{cls._llm_label(llm)}] <<< PROMPT END\n",
+            flush=True,
+        )
+
+    @classmethod
+    def _log_llm_result(cls, llm: BaseLLMClient, result, context: str) -> None:
+        if isinstance(result, (dict, list)):
+            result_text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+        else:
+            result_text = str(result)
+        print(
+            f"\n[LLM][{context}][{cls._llm_label(llm)}] >>> RESULT START\n"
+            f"{result_text}\n"
+            f"[LLM][{context}][{cls._llm_label(llm)}] <<< RESULT END\n",
+            flush=True,
+        )
+
+    @classmethod
+    def _log_llm_error(cls, llm: BaseLLMClient, error: Exception, context: str) -> None:
+        print(
+            f"\n[LLM][{context}][{cls._llm_label(llm)}] !!! ERROR\n"
+            f"{type(error).__name__}: {error}\n",
+            flush=True,
+        )
+
+    @classmethod
+    async def chat_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> str:
+        cls._log_llm_prompt(llm, prompt, context)
+        try:
+            result = await llm.chat(prompt)
+            cls._log_llm_result(llm, result, context)
+            return result
+        except Exception as e:
+            cls._log_llm_error(llm, e, context)
+            raise
+
+    @classmethod
+    async def chat_json_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> dict:
+        cls._log_llm_prompt(llm, prompt, context)
+        try:
+            result = await llm.chat_json(prompt)
+            cls._log_llm_result(llm, result, context)
+            return result
+        except Exception as e:
+            cls._log_llm_error(llm, e, context)
+            raise
+
+    @classmethod
+    async def chat_stream_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str):
+        cls._log_llm_prompt(llm, prompt, context)
+        chunks: list[str] = []
+        try:
+            async for chunk in llm.chat_stream(prompt):
+                chunks.append(chunk)
+                yield chunk
+            cls._log_llm_result(llm, "".join(chunks), context)
+        except Exception as e:
+            partial = "".join(chunks)
+            if partial:
+                cls._log_llm_result(llm, f"[partial stream before error]\n{partial}", context)
+            cls._log_llm_error(llm, e, context)
+            raise
     
     @staticmethod
     def build_prompt(
@@ -118,16 +193,117 @@ class AdvisorService:
 7. 三个周期的结论必须体现时间维度差异，不要重复同一句话
 8. 顶层 main_judgment / action / why 必须和 medium_term 保持一致，形成“结论 -> 依据 -> 动作”的闭环
 9. news_basis 和 policy_basis 必须来自模型联网搜索到的真实最新信息；如果当前模型不支持联网搜索或未检索到可靠结果，就返回空数组，不要编造
-10. 输出要直接、结构化，不要写额外解释文字
+10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
+11. 如果 event_context.search_status 不是 "success"，不能因为新闻政策给出 buy/add/sell；如果事件 relevance 是 "weak"，不能作为主要依据；如果利好但 priced_in_risk 是 "high"，短期不能追高，只能 hold 或等待回踩
+12. 输出要直接、结构化，不要写额外解释文字
 
 请直接输出JSON对象，不要添加任何markdown标记或代码块符号:
 {{
   "main_judgment": "一句话主判断",
   "summary": "综合决策说明，80-120字",
-  "action": "hold",
+  "action": "buy/add/hold/reduce/sell 中的一项",
   "why": ["关键依据1", "关键依据2"],
   "news_basis": ["相关新闻依据"],
   "policy_basis": ["政策依据"],
+  "event_context": {{
+    "search_status": "success/partial/unavailable",
+    "source_quality": "high/medium/low/unknown",
+    "policy_signal": "positive/neutral/negative/unknown",
+    "macro_signal": "positive/neutral/negative/unknown",
+    "news_signal": "positive/neutral/negative/unknown",
+    "events": [{{"title": "事件标题", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}]
+  }},
+  "short_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
+  "medium_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
+  "long_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}}
+}}"""
+
+    @staticmethod
+    def build_scheduled_prompt(
+        etf_code: str,
+        etf_name: str,
+        shares: Decimal,
+        cost_price: Decimal,
+        current_price: Decimal,
+        pnl_pct: Decimal,
+        holding_days: Optional[int],
+        kline_summary: str,
+        indicators: dict,
+    ) -> str:
+        """构造定时任务使用的收盘分析 Prompt"""
+        return f"""你是一名专业的ETF投资顾问。请基于今日收盘后数据和最新可核实信息，对该ETF持仓给出投资建议。
+
+## 品种信息
+- 代码: {etf_code}, 名称: {etf_name}
+
+## 持仓状态
+- 份额: {shares}, 成本价: {cost_price:.4f}
+- 最新收盘价/最新可用收盘价: {current_price:.4f}, 浮动盈亏: {pnl_pct:.2f}%
+- 持仓天数: {holding_days or '未知'}
+
+## 近期行情 (截至今日收盘的最近10个交易日)
+{kline_summary}
+
+## 技术指标 (基于截至今日收盘的历史数据计算)
+- MA5={indicators.get('ma5', 'N/A')}, MA10={indicators.get('ma10', 'N/A')}, MA20={indicators.get('ma20', 'N/A')}
+- MA60={indicators.get('ma60', 'N/A')}, MA120={indicators.get('ma120', 'N/A')}, MA250={indicators.get('ma250', 'N/A')}
+- RSI(14)={indicators.get('rsi', 'N/A')}
+- MACD: DIF={indicators.get('dif', 'N/A')}, DEA={indicators.get('dea', 'N/A')}, 柱={indicators.get('macd_bar', 'N/A')}
+- 20日区间: 高点={indicators.get('high_20', 'N/A')}, 低点={indicators.get('low_20', 'N/A')}
+- 60日区间: 高点={indicators.get('high_60', 'N/A')}, 低点={indicators.get('low_60', 'N/A')}
+- 120日高点={indicators.get('high_120', 'N/A')}, 250日高点={indicators.get('high_250', 'N/A')}
+- 距60日高点回撤={indicators.get('drawdown_60', 'N/A')}%, 距250日高点回撤={indicators.get('drawdown_250', 'N/A')}%
+- 20日波动率={indicators.get('volatility_20', 'N/A')}%, 60日波动率={indicators.get('volatility_60', 'N/A')}%
+
+分析要求：
+1. 本次分析默认基于今日收盘后数据，不按盘中波动口径给出判断
+2. 请综合考虑技术面、基本面、政策面和市场情绪
+3. 通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息
+4. 结论要更偏向“收盘后的复盘判断”和“下一交易日到未来数周的执行策略”
+5. 如果行情源暂未更新到今日，则按“最新可用交易日收盘数据”理解，不要假设存在盘中实时价格
+
+输出要求：
+1. 给出一个顶层主决策，格式上必须包含:
+   - main_judgment: 一句话主判断，建议写成“收盘后继续持有，等待回踩再加仓”这类可执行结论，50字以内
+   - summary: 综合决策说明，80-120字，需明确这是基于今日收盘后的综合判断，并涵盖短期操作节奏和长期配置逻辑
+   - action: 最终执行动作，必须是 "buy" / "sell" / "hold" / "add" / "reduce" 之一
+   - why: 2到3条最关键依据，必须体现“因为哪些技术面/位置/波动信号/政策新闻，所以给出这个动作”，每条25字以内
+   - news_basis: 0到2条和 ETF 相关的新闻依据，没有就返回空数组
+   - policy_basis: 0到2条和政策相关的依据，没有就返回空数组
+2. 同时给出 short_term、medium_term、long_term 三个周期的建议
+3. 每个周期都包含:
+   - advice_type: 必须是 "buy" / "sell" / "hold" / "add" / "reduce" 之一
+   - action: 对应周期下的具体动作描述，20字以内，例如“观望等待回踩”“继续持有”“分批加仓”
+   - conclusion: 一句话结论，30字以内
+   - signals: 2到4条核心依据，优先引用均线、RSI、MACD、区间位置、回撤、波动率等已提供指标
+   - risks: 1到2条主要风险，避免空泛表述
+   - confidence: 0-100之间的整数
+4. short_term 更关注下一交易日到 1-10 个交易日的节奏和短线波动
+5. medium_term 更关注未来 1-3 个月趋势，作为收盘后主决策
+6. long_term 更关注 3 个月以上趋势、回撤和配置价值
+7. 三个周期的结论必须体现时间维度差异，不要重复同一句话
+8. 顶层 main_judgment / action / why 必须和 medium_term 保持一致，形成“结论 -> 依据 -> 动作”的闭环
+9. news_basis 和 policy_basis 必须来自模型联网搜索到的真实最新信息；如果当前模型不支持联网搜索或未检索到可靠结果，就返回空数组，不要编造
+10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
+11. 如果 event_context.search_status 不是 "success"，不能因为新闻政策给出 buy/add/sell；如果事件 relevance 是 "weak"，不能作为主要依据；如果利好但 priced_in_risk 是 "high"，短期不能追高，只能 hold 或等待回踩
+12. 输出要直接、结构化，不要写额外解释文字
+
+请直接输出JSON对象，不要添加任何markdown标记或代码块符号:
+{{
+  "main_judgment": "一句话主判断",
+  "summary": "综合决策说明，80-120字",
+  "action": "buy/add/hold/reduce/sell 中的一项",
+  "why": ["关键依据1", "关键依据2"],
+  "news_basis": ["相关新闻依据"],
+  "policy_basis": ["政策依据"],
+  "event_context": {{
+    "search_status": "success/partial/unavailable",
+    "source_quality": "high/medium/low/unknown",
+    "policy_signal": "positive/neutral/negative/unknown",
+    "macro_signal": "positive/neutral/negative/unknown",
+    "news_signal": "positive/neutral/negative/unknown",
+    "events": [{{"title": "事件标题", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}]
+  }},
   "short_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
   "medium_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
   "long_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}}
@@ -220,6 +396,60 @@ class AdvisorService:
         return []
 
     @staticmethod
+    def parse_event_context(result_json: dict) -> EventContext:
+        """解析模型搜索得到的事件上下文"""
+        raw = result_json.get("event_context") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+
+        def one_of(value, allowed: set[str], default: str):
+            value = str(value or "").strip().lower()
+            return value if value in allowed else default
+
+        events = []
+        raw_events = raw.get("events", [])
+        if not isinstance(raw_events, list):
+            raw_events = []
+        for item in raw_events[:5]:
+            if not isinstance(item, dict):
+                continue
+            events.append(EventItem(
+                title=str(item.get("title") or "").strip()[:120],
+                date=str(item.get("date") or "").strip()[:30] or None,
+                source=str(item.get("source") or "").strip()[:80],
+                relevance=one_of(item.get("relevance"), {"direct", "indirect", "weak", "unknown"}, "unknown"),
+                impact=one_of(item.get("impact"), {"positive", "neutral", "negative", "unknown"}, "unknown"),
+                priced_in_risk=one_of(item.get("priced_in_risk"), {"low", "medium", "high", "unknown"}, "unknown"),
+                summary=str(item.get("summary") or "").strip()[:180],
+            ))
+
+        return EventContext(
+            search_status=one_of(raw.get("search_status"), {"success", "partial", "unavailable"}, "unavailable"),
+            source_quality=one_of(raw.get("source_quality"), {"high", "medium", "low", "unknown"}, "unknown"),
+            policy_signal=one_of(raw.get("policy_signal"), {"positive", "neutral", "negative", "unknown"}, "unknown"),
+            macro_signal=one_of(raw.get("macro_signal"), {"positive", "neutral", "negative", "unknown"}, "unknown"),
+            news_signal=one_of(raw.get("news_signal"), {"positive", "neutral", "negative", "unknown"}, "unknown"),
+            events=events,
+        )
+
+    @staticmethod
+    def unavailable_event_context(reason: str = "") -> EventContext:
+        return EventContext(
+            search_status="unavailable",
+            source_quality="low",
+            policy_signal="unknown",
+            macro_signal="unknown",
+            news_signal="unknown",
+            events=[EventItem(
+                title="搜索或模型输出不可用",
+                relevance="unknown",
+                impact="unknown",
+                priced_in_risk="unknown",
+                summary=reason[:180],
+            )] if reason else [],
+        )
+
+    @staticmethod
     def format_multi_horizon_reason(
         main_judgment: str,
         summary: str,
@@ -227,6 +457,7 @@ class AdvisorService:
         why: List[str],
         news_basis: List[str],
         policy_basis: List[str],
+        event_context: EventContext,
         short_term: PeriodAdvice,
         medium_term: PeriodAdvice,
         long_term: PeriodAdvice,
@@ -234,6 +465,22 @@ class AdvisorService:
         why_text = ";".join(why) or "暂无"
         news_text = ";".join(news_basis) or "暂无"
         policy_text = ";".join(policy_basis) or "暂无"
+        event_lines = [
+            f"搜索状态：{event_context.search_status}",
+            f"来源质量：{event_context.source_quality}",
+            f"政策信号：{event_context.policy_signal}",
+            f"宏观信号：{event_context.macro_signal}",
+            f"新闻信号：{event_context.news_signal}",
+        ]
+        if event_context.events:
+            event_lines.append("事件列表：")
+            for index, event in enumerate(event_context.events[:5], start=1):
+                event_lines.append(
+                    f"{index}. {event.date or '日期未知'} {event.source or '来源未知'} "
+                    f"[{event.relevance}/{event.impact}/priced_in={event.priced_in_risk}] "
+                    f"{event.title or '未命名事件'} - {event.summary or '暂无摘要'}"
+                )
+        event_text = "\n".join(event_lines)
         return (
             f"主判断：{main_judgment}\n"
             f"综合说明：{summary}\n"
@@ -241,6 +488,7 @@ class AdvisorService:
             f"关键依据：{why_text}\n"
             f"新闻依据：{news_text}\n"
             f"政策依据：{policy_text}\n\n"
+            f"事件上下文：\n{event_text}\n\n"
             f"【短期】{short_term.advice_type}（{short_term.confidence:.0f}%）\n"
             f"动作：{short_term.action}\n"
             f"结论：{short_term.conclusion}\n"
@@ -288,6 +536,42 @@ class AdvisorService:
 3. rebalance_advice: 对结构调整/分散配置的建议，120字以内
 4. risk_level: 风险等级，必须是 "low" / "medium" / "high" 之一
 5. key_actions: 1到3条具体行动建议的字符串数组
+6. confidence: 0-100之间的整数
+
+请直接输出JSON对象，不要添加markdown标记或代码块:
+{{"summary":"...","position_advice":"...","rebalance_advice":"...","risk_level":"medium","key_actions":["..."],"confidence":75}}"""
+
+    @staticmethod
+    def build_scheduled_account_analysis_prompt(
+        portfolio_summary_text: str,
+        holdings_text: str,
+        account_balance: float,
+    ) -> str:
+        """构造定时任务使用的账户级分析 Prompt"""
+        return f"""你是一名专业的ETF投资顾问。请基于今日收盘后数据，对当前账户整体情况给出本周分析结论和后续投资建议。
+
+## 账户概览 (基于今日收盘后账户快照)
+{portfolio_summary_text}
+
+## 持仓明细 (基于今日收盘后持仓快照)
+{holdings_text}
+
+## 可用资金
+- Cash (liquid funds available after close): {account_balance:.2f} 元
+
+请重点分析：
+1. 基于今日收盘后的账户状态，判断本周整体仓位是否偏高、偏低或合理
+2. 判断当前持仓在本周视角下是否过于集中，是否需要分散或再平衡
+3. 哪些方向本周应继续持有，哪些方向本周应减仓或观察
+4. 给出接下来一周最重要的 1-3 条账户操作建议
+5. 如果行情源未完全更新到今日，则按最新可用交易日收盘后的账户快照理解，不要按盘中口径推断
+
+输出要求：
+1. summary: 对当前账户状态的本周总体判断，120字以内，明确体现“本周分析结论”
+2. position_advice: 对整体仓位的本周建议，80字以内
+3. rebalance_advice: 对结构调整/分散配置的本周建议，120字以内
+4. risk_level: 风险等级，必须是 "low" / "medium" / "high" 之一
+5. key_actions: 1到3条本周内可执行的具体行动建议字符串数组
 6. confidence: 0-100之间的整数
 
 请直接输出JSON对象，不要添加markdown标记或代码块:
@@ -446,6 +730,7 @@ class AdvisorService:
         p: Portfolio,
         quote,
         llm: BaseLLMClient,
+        analysis_mode: str = "manual",
     ) -> dict:
         """构建单个持仓建议结果，不在并发任务中访问数据库会话。"""
         market_value = float(p.shares) * quote.price
@@ -462,7 +747,8 @@ class AdvisorService:
         indicators = MarketService.calculate_technical_indicators(kline_data)
         indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
 
-        prompt = cls.build_prompt(
+        prompt_builder = cls.build_scheduled_prompt if analysis_mode == "scheduled" else cls.build_prompt
+        prompt = prompt_builder(
             etf_code=p.etf_code,
             etf_name=quote.name,
             shares=p.shares,
@@ -475,7 +761,11 @@ class AdvisorService:
         )
 
         try:
-            result_json = await llm.chat_json(prompt)
+            result_json = await cls.chat_json_with_logging(
+                llm,
+                prompt,
+                context=f"portfolio_advice:{p.etf_code}:{analysis_mode}",
+            )
             if "error" in result_json:
                 raw_reason = f"AI分析结果（JSON解析失败）:\n{result_json.get('raw', '无响应内容')}"
                 short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=raw_reason, signals=[], risks=["返回格式异常"], confidence=30)
@@ -487,6 +777,7 @@ class AdvisorService:
                 why = ["模型返回格式异常，未能提炼出稳定依据"]
                 news_basis = []
                 policy_basis = []
+                event_context = cls.unavailable_event_context("模型返回格式异常，未能解析结构化搜索结果")
             else:
                 short_term = cls.parse_period_advice(result_json, "short_term")
                 medium_term = cls.parse_period_advice(result_json, "medium_term")
@@ -497,6 +788,7 @@ class AdvisorService:
                 why = cls.parse_basis_items(result_json, "why", limit=3)
                 news_basis = cls.parse_basis_items(result_json, "news_basis", limit=2)
                 policy_basis = cls.parse_basis_items(result_json, "policy_basis", limit=2)
+                event_context = cls.parse_event_context(result_json)
         except Exception as e:
             short_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
             medium_term = PeriodAdvice(advice_type="hold", action="继续观察", conclusion=f"LLM调用失败: {str(e)}", signals=[], risks=["模型调用失败"], confidence=0)
@@ -507,10 +799,11 @@ class AdvisorService:
             why = ["模型调用失败，暂时无法生成关键依据"]
             news_basis = []
             policy_basis = []
+            event_context = cls.unavailable_event_context(f"模型调用失败: {str(e)}")
 
         advice_type = medium_term.advice_type
         reason = cls.format_multi_horizon_reason(
-            main_judgment, summary, action, why, news_basis, policy_basis, short_term, medium_term, long_term
+            main_judgment, summary, action, why, news_basis, policy_basis, event_context, short_term, medium_term, long_term
         )
         confidence = Decimal(str(medium_term.confidence))
 
@@ -524,6 +817,7 @@ class AdvisorService:
             "why": why,
             "news_basis": news_basis,
             "policy_basis": policy_basis,
+            "event_context": event_context,
             "reason": reason,
             "confidence": confidence,
             "short_term": short_term,
@@ -538,6 +832,7 @@ class AdvisorService:
         session: AsyncSession,
         etf_codes: Optional[List[str]] = None,
         user_id: Optional[int] = None,
+        analysis_mode: str = "manual",
     ) -> List[AdviceResponse]:
         """生成投资建议"""
         if user_id is None:
@@ -568,7 +863,7 @@ class AdvisorService:
             if not quote:
                 return None
             async with semaphore:
-                return await cls._build_advice_payload(p, quote, llm)
+                return await cls._build_advice_payload(p, quote, llm, analysis_mode=analysis_mode)
 
         advice_payloads = [
             payload
@@ -601,6 +896,7 @@ class AdvisorService:
                 why=payload["why"],
                 news_basis=payload["news_basis"],
                 policy_basis=payload["policy_basis"],
+                event_context=payload["event_context"],
                 reason=payload["reason"],
                 confidence=payload["confidence"],
                 short_term=payload["short_term"],
@@ -642,7 +938,7 @@ class AdvisorService:
             return None
         
         llm = cls.get_llm_client()
-        payload = await cls._build_advice_payload(p, quote, llm)
+        payload = await cls._build_advice_payload(p, quote, llm, analysis_mode="manual")
         
         # 保存日志
         log = AdviceLog(
@@ -667,6 +963,7 @@ class AdvisorService:
             why=payload["why"],
             news_basis=payload["news_basis"],
             policy_basis=payload["policy_basis"],
+            event_context=payload["event_context"],
             reason=payload["reason"],
             confidence=payload["confidence"],
             short_term=payload["short_term"],
@@ -735,6 +1032,7 @@ class AdvisorService:
         session: AsyncSession,
         user_id: int,
         account_balance: Optional[Decimal] = None,
+        analysis_mode: str = "manual",
     ) -> AccountAnalysisResponse:
         """生成账户级投资建议"""
         portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
@@ -776,7 +1074,12 @@ class AdvisorService:
             category_distribution=summary.category_distribution,
         )
         holdings_text = cls.format_account_holdings(portfolios, summary.total_market_value)
-        prompt = cls.build_account_analysis_prompt(
+        prompt_builder = (
+            cls.build_scheduled_account_analysis_prompt
+            if analysis_mode == "scheduled"
+            else cls.build_account_analysis_prompt
+        )
+        prompt = prompt_builder(
             portfolio_summary_text=portfolio_summary_text,
             holdings_text=holdings_text,
             account_balance=available_cash,
@@ -784,7 +1087,11 @@ class AdvisorService:
 
         llm = cls.get_llm_client()
         try:
-            result_json = await llm.chat_json(prompt)
+            result_json = await cls.chat_json_with_logging(
+                llm,
+                prompt,
+                context=f"account_analysis:{analysis_mode}",
+            )
             key_actions = result_json.get("key_actions", [])
             if not isinstance(key_actions, list):
                 key_actions = []

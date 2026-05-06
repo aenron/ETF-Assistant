@@ -9,6 +9,7 @@ class AssistantMessageCreate(BaseModel):
 
     message: str = Field(min_length=1, max_length=4000)
     session_id: Optional[int] = None
+    retry_message_id: Optional[int] = None
 
 
 class AssistantSessionCreate(BaseModel):

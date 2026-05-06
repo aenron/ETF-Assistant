@@ -15,6 +15,7 @@ import {
   BarChart3,
   WalletCards,
 } from 'lucide-react'
+import { AdviceEventContextPanel, parseEventContextFromReason } from '@/components/AdviceEventContextPanel'
 
 const adviceTypeConfig: Record<string, { label: string; color: string; bgColor: string; icon: typeof TrendingUp }> = {
   buy: { label: '买入', color: 'text-red-600', bgColor: 'bg-red-50 border-red-200', icon: TrendingUp },
@@ -223,6 +224,7 @@ function HistoryReasonContent({ log }: { log: AdviceLogResponse }) {
 
   const periods = parseMultiHorizonReason(log.reason)
   const summary = parseDecisionSummary(log.reason)
+  const eventContext = parseEventContextFromReason(log.reason)
   if (periods.length > 0) {
     const short = periods.find((item) => item.label === '短期')
     const long = periods.find((item) => item.label === '长期')
@@ -257,6 +259,7 @@ function HistoryReasonContent({ log }: { log: AdviceLogResponse }) {
             </div>
           ) : null}
         </div>
+        <AdviceEventContextPanel eventContext={eventContext} compact />
         <div className="rounded-xl border bg-white/70 p-4 shadow-sm">
           <div className="text-xs font-medium text-muted-foreground">补充判断</div>
           <div className="mt-2 space-y-3 text-sm">

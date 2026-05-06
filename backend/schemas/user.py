@@ -34,6 +34,7 @@ class UserResponse(BaseModel):
     username: str
     email: Optional[str] = None
     is_active: bool
+    is_admin: bool = False
     account_balance: Optional[float] = None
     created_at: datetime
 
@@ -44,6 +45,13 @@ class UserResponse(BaseModel):
 class AccountBalanceUpdate(BaseModel):
     """账户金额更新"""
     account_balance: float = Field(..., gt=0, description="账户金额")
+
+
+class AdminUserUpdate(BaseModel):
+    """管理员更新用户信息"""
+    is_active: Optional[bool] = None
+    is_admin: Optional[bool] = None
+    account_balance: Optional[float] = Field(default=None, ge=0)
 
 
 class Token(BaseModel):

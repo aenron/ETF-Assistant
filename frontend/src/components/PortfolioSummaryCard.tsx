@@ -1,13 +1,16 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { type PortfolioSummary } from '@/services/api'
+import { type PortfolioSummary, type PortfolioWithMarket } from '@/services/api'
 import { TrendingUp, TrendingDown, Wallet, PieChart } from 'lucide-react'
 import { PieChart as RechartsPie, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 import { AccountBalanceEditor } from '@/components/AccountBalanceEditor'
 
 interface PortfolioSummaryCardProps {
   summary: PortfolioSummary | null
+  portfolios?: PortfolioWithMarket[]
   accountBalance?: number | null
   onAccountBalanceChange?: (balance: number) => void
+  showPnlAttribution?: boolean
+  showDistribution?: boolean
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -30,10 +33,176 @@ const CATEGORY_COLORS: Record<string, string> = {
   未分类: '#94a3b8',
 }
 
+const PNL_COLORS = ['#2563eb', '#16a34a', '#ea580c', '#7c3aed', '#0891b2', '#dc2626', '#ca8a04', '#0f766e']
+
+function formatCurrency(value: number) {
+  return `¥${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function buildPnlAttributionData(
+  portfolios: PortfolioWithMarket[],
+  mode: 'total' | 'today',
+) {
+  const rawItems = portfolios
+    .map((portfolio) => {
+      const actualValue =
+        mode === 'total'
+          ? Number(portfolio.pnl ?? 0)
+          : portfolio.market_value && portfolio.change_pct !== null && portfolio.change_pct !== undefined
+            ? portfolio.market_value - portfolio.market_value / (1 + portfolio.change_pct / 100)
+            : 0
+      return {
+        key: `${portfolio.etf_code}-${mode}`,
+        name: portfolio.etf_name || portfolio.etf_code,
+        code: portfolio.etf_code,
+        actualValue,
+        value: Math.abs(actualValue),
+      }
+    })
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value)
+
+  if (rawItems.length === 0) {
+    return []
+  }
+
+  const totalAbsValue = rawItems.reduce((sum, item) => sum + item.value, 0)
+  const topItems = rawItems.slice(0, 5)
+  const otherItems = rawItems.slice(5)
+  const result = topItems.map((item, index) => ({
+    ...item,
+    color: PNL_COLORS[index % PNL_COLORS.length],
+    ratio: totalAbsValue > 0 ? item.value / totalAbsValue * 100 : 0,
+  }))
+
+  if (otherItems.length > 0) {
+    const otherActual = otherItems.reduce((sum, item) => sum + item.actualValue, 0)
+    const otherAbs = otherItems.reduce((sum, item) => sum + item.value, 0)
+    result.push({
+      key: `other-${mode}`,
+      name: '其他持仓',
+      code: 'OTHER',
+      actualValue: otherActual,
+      value: otherAbs,
+      color: '#94a3b8',
+      ratio: totalAbsValue > 0 ? otherAbs / totalAbsValue * 100 : 0,
+    })
+  }
+
+  return result
+}
+
+function PnlAttributionChart({
+  title,
+  subtitle,
+  emptyText,
+  data,
+}: {
+  title: string
+  subtitle: string
+  emptyText: string
+  data: Array<{
+    key: string
+    name: string
+    code: string
+    actualValue: number
+    value: number
+    color: string
+    ratio: number
+  }>
+}) {
+  const totalAbsolute = data.reduce((sum, item) => sum + item.value, 0)
+
+  return (
+    <Card className="border-slate-200 shadow-sm">
+      <CardHeader className="space-y-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        <p className="text-xs text-muted-foreground">{subtitle}</p>
+      </CardHeader>
+      <CardContent>
+        {data.length === 0 ? (
+          <div className="flex h-72 items-center justify-center rounded-xl border border-dashed text-sm text-muted-foreground">
+            {emptyText}
+          </div>
+        ) : (
+          <div className="grid gap-6 lg:grid-cols-[minmax(220px,280px)_1fr] lg:items-center">
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsPie>
+                  <Pie
+                    data={data}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={64}
+                    outerRadius={100}
+                    paddingAngle={2}
+                    strokeWidth={0}
+                    dataKey="value"
+                    nameKey="name"
+                  >
+                    {data.map((entry) => (
+                      <Cell key={entry.key} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    formatter={(value: number, _name, payload) => {
+                      const item = payload?.payload
+                      return [`${formatCurrency(item.actualValue)} | 绝对值 ${formatCurrency(value)}`, item?.name]
+                    }}
+                  />
+                </RechartsPie>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-lg border bg-muted/20 p-4">
+                <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">图注说明</div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  饼图按各持仓盈亏贡献的绝对值切分，面积越大表示对整体盈亏影响越明显；右侧图注显示持仓名称、实际盈亏金额和占比。
+                </p>
+                <div className="mt-3 text-sm font-medium">绝对值合计 {formatCurrency(totalAbsolute)}</div>
+              </div>
+
+              <div className="space-y-3">
+                {data.map((item) => (
+                  <div key={item.key} className="space-y-2 rounded-xl border border-slate-200 p-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                        <span>{item.name}</span>
+                        {item.code !== 'OTHER' && <span className="text-xs text-muted-foreground">({item.code})</span>}
+                      </div>
+                      <div className="text-right">
+                        <div className={`text-sm font-medium ${item.actualValue >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                          {item.actualValue >= 0 ? '+' : ''}{formatCurrency(item.actualValue).replace('¥', '')}
+                        </div>
+                        <div className="text-xs text-muted-foreground">{item.ratio.toFixed(1)}%</div>
+                      </div>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{ width: `${item.ratio}%`, backgroundColor: item.color }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export function PortfolioSummaryCard({
   summary,
+  portfolios = [],
   accountBalance,
   onAccountBalanceChange,
+  showPnlAttribution = false,
+  showDistribution = true,
 }: PortfolioSummaryCardProps) {
   if (!summary) {
     return (
@@ -81,6 +250,8 @@ export function PortfolioSummaryCard({
     : topTwoRatio >= 40
       ? `前两大类占比 ${topTwoRatio.toFixed(1)}%，集中度中等，结构仍有优化空间。`
       : `前两大类占比 ${topTwoRatio.toFixed(1)}%，持仓分布相对均衡。`
+  const totalPnlAttribution = buildPnlAttributionData(portfolios, 'total')
+  const todayPnlAttribution = buildPnlAttributionData(portfolios, 'today')
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -161,7 +332,7 @@ export function PortfolioSummaryCard({
         </Card>
       ) : null}
 
-      {distributionData.length > 0 && (
+      {showDistribution && distributionData.length > 0 && (
         <Card className="md:col-span-2 lg:col-span-5">
           <CardHeader>
             <CardTitle className="text-sm font-medium">持仓分布</CardTitle>
@@ -235,6 +406,23 @@ export function PortfolioSummaryCard({
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {showPnlAttribution && (
+        <div className="md:col-span-2 lg:col-span-5 grid gap-4 xl:grid-cols-2">
+          <PnlAttributionChart
+            title="总盈亏归因"
+            subtitle="下方饼图展示当前总盈亏主要由哪些持仓贡献。"
+            emptyText="暂无可展示的总盈亏归因数据"
+            data={totalPnlAttribution}
+          />
+          <PnlAttributionChart
+            title="今日盈亏归因"
+            subtitle="下方饼图展示今日涨跌主要来自哪些持仓。"
+            emptyText="暂无可展示的今日盈亏归因数据"
+            data={todayPnlAttribution}
+          />
+        </div>
       )}
     </div>
   )

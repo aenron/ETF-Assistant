@@ -19,6 +19,7 @@ class GeminiClient(BaseLLMClient):
         enable_grounding: bool = True,
     ):
         self.api_key = api_key
+        self.model = model
         self.model_name = model
         self.enable_grounding = enable_grounding
         # 创建客户端

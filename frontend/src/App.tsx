@@ -1,9 +1,17 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
-import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User } from 'lucide-react'
-import { isAuthenticated, getCurrentUser, removeToken } from '@/services/authApi'
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users } from 'lucide-react'
+import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 
 const DashboardPage = lazy(() =>
   import('@/pages/DashboardPage').then((module) => ({ default: module.DashboardPage })),
@@ -14,6 +22,15 @@ const PortfolioPage = lazy(() =>
 const AdvicePage = lazy(() =>
   import('@/pages/AdvicePage').then((module) => ({ default: module.AdvicePage })),
 )
+const NotificationSettingsPage = lazy(() =>
+  import('@/pages/NotificationSettingsPage').then((module) => ({ default: module.NotificationSettingsPage })),
+)
+const AdminUsersPage = lazy(() =>
+  import('@/pages/AdminUsersPage').then((module) => ({ default: module.AdminUsersPage })),
+)
+const AdminSchedulerPage = lazy(() =>
+  import('@/pages/AdminSchedulerPage').then((module) => ({ default: module.AdminSchedulerPage })),
+)
 const LoginPage = lazy(() => import('@/pages/LoginPage'))
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -22,6 +39,7 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 
 function AppContent() {
   const location = useLocation()
+  const navigate = useNavigate()
   const [user, setUser] = useState(getCurrentUser())
   const [authed, setAuthed] = useState(isAuthenticated())
   const navItems = [
@@ -34,6 +52,19 @@ function AppContent() {
     setAuthed(isAuthenticated())
     setUser(getCurrentUser())
   }, [location])
+
+  useEffect(() => {
+    if (!authed) return
+
+    authApi.getMe()
+      .then((nextUser) => {
+        setCurrentUser(nextUser)
+        setUser(nextUser)
+      })
+      .catch(() => {
+        // 401 is handled globally by the auth API interceptor.
+      })
+  }, [authed])
 
   const handleLogout = () => {
     removeToken()
@@ -80,17 +111,45 @@ function AppContent() {
                   <div className="hidden lg:block">
                     <LLMSelector />
                   </div>
-                  <span className="flex items-center gap-1 text-sm text-muted-foreground">
-                    <User className="h-4 w-4" />
-                    <span className="max-w-28 truncate sm:max-w-none">{user?.username}</span>
-                  </span>
-                  <button
-                    onClick={handleLogout}
-                    className="flex items-center gap-1 text-sm text-muted-foreground hover:text-primary"
-                  >
-                    <LogOut className="h-4 w-4" />
-                    退出
-                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:border-primary/30 hover:text-primary">
+                        <User className="h-4 w-4" />
+                        <span className="max-w-28 truncate sm:max-w-none">{user?.username}</span>
+                        <ChevronDown className="h-4 w-4 text-slate-400" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-56">
+                      <DropdownMenuLabel>
+                        <div className="flex flex-col">
+                          <span className="text-sm font-semibold">{user?.username}</span>
+                          <span className="text-xs font-normal text-muted-foreground">个人设置与账户操作</span>
+                        </div>
+                      </DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onSelect={() => navigate('/notifications')}>
+                        <Bell className="h-4 w-4" />
+                        通知设置
+                      </DropdownMenuItem>
+                      {user?.is_admin && (
+                        <>
+                          <DropdownMenuItem onSelect={() => navigate('/admin/users')}>
+                            <Users className="h-4 w-4" />
+                            账号管理
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => navigate('/admin/scheduler')}>
+                            <CalendarClock className="h-4 w-4" />
+                            定时任务
+                          </DropdownMenuItem>
+                        </>
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={handleLogout} className="text-red-600 focus:text-red-600">
+                        <LogOut className="h-4 w-4" />
+                        退出登录
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               </div>
             </div>
@@ -104,6 +163,9 @@ function AppContent() {
             <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
             <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
             <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
+            <Route path="/notifications" element={<PrivateRoute><NotificationSettingsPage /></PrivateRoute>} />
+            <Route path="/admin/users" element={<PrivateRoute><AdminUsersPage /></PrivateRoute>} />
+            <Route path="/admin/scheduler" element={<PrivateRoute><AdminSchedulerPage /></PrivateRoute>} />
           </Routes>
         </Suspense>
       </main>

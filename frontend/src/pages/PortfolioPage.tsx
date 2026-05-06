@@ -131,6 +131,8 @@ export function PortfolioPage() {
         summary={summary}
         accountBalance={accountBalance}
         onAccountBalanceChange={setAccountBalance}
+        showPnlAttribution={false}
+        showDistribution={false}
       />
       <PortfolioTable portfolios={portfolios} onRefresh={fetchData} />
     </div>

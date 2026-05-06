@@ -53,7 +53,13 @@ async def chat_with_assistant(
     current_user: User = Depends(get_current_user),
 ):
     """发送消息给智能体助手"""
-    return await AssistantService.chat(db, user_id=current_user.id, session_id=data.session_id, message=data.message)
+    return await AssistantService.chat(
+        db,
+        user_id=current_user.id,
+        session_id=data.session_id,
+        message=data.message,
+        retry_message_id=data.retry_message_id,
+    )
 
 
 @router.post("/chat/stream")
@@ -63,7 +69,13 @@ async def stream_chat_with_assistant(
     current_user: User = Depends(get_current_user),
 ):
     """流式发送消息给智能体助手"""
-    _, stream = await AssistantService.chat_stream(db, user_id=current_user.id, session_id=data.session_id, message=data.message)
+    _, stream = await AssistantService.chat_stream(
+        db,
+        user_id=current_user.id,
+        session_id=data.session_id,
+        message=data.message,
+        retry_message_id=data.retry_message_id,
+    )
     return StreamingResponse(
         stream,
         media_type="text/event-stream",

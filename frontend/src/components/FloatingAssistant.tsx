@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, ChevronLeft, Loader2, MemoryStick, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react'
+import { Bot, ChevronLeft, Loader2, MemoryStick, MessageCircle, Plus, RotateCcw, Send, Trash2, X } from 'lucide-react'
 
 import { assistantApi, type AssistantMessage, type AssistantSession } from '@/services/api'
 import { Button } from '@/components/ui/button'
@@ -271,8 +271,8 @@ export function FloatingAssistant() {
     }
   }
 
-  const handleSend = async () => {
-    const message = draft.trim()
+  const sendMessage = async (content: string, clearDraft = false, retryMessage?: AssistantMessage) => {
+    const message = content.trim()
     if (!message || sending) return
 
     let sessionId = activeSessionId
@@ -290,18 +290,31 @@ export function FloatingAssistant() {
     }
 
     setSending(true)
-    const tempUserId = Date.now()
-    const tempAssistantId = tempUserId + 1
+    const tempUserId = retryMessage ? null : Date.now()
+    const tempAssistantId = Date.now() + 1
     const now = new Date().toISOString()
-    setMessages((prev) => [
-      ...prev,
-      { id: tempUserId, role: 'user', content: message, created_at: now },
-      { id: tempAssistantId, role: 'assistant', content: '', created_at: now },
-    ])
-    setDraft('')
+    setMessages((prev) => {
+      if (!retryMessage) {
+        return [
+          ...prev,
+          { id: tempUserId as number, role: 'user', content: message, created_at: now },
+          { id: tempAssistantId, role: 'assistant', content: '', created_at: now },
+        ]
+      }
+
+      const retryIndex = prev.findIndex((item) => item.id === retryMessage.id)
+      const keptMessages = retryIndex >= 0 ? prev.slice(0, retryIndex + 1) : prev
+      return [
+        ...keptMessages,
+        { id: tempAssistantId, role: 'assistant', content: '', created_at: now },
+      ]
+    })
+    if (clearDraft) {
+      setDraft('')
+    }
 
     try {
-      const response = await assistantApi.streamChat(message, sessionId)
+      const response = await assistantApi.streamChat(message, sessionId, retryMessage?.id)
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -335,7 +348,7 @@ export function FloatingAssistant() {
             setActiveSessionId(payload.session.id)
             setMessages((prev) => {
               const next = [...prev]
-              const userIndex = next.findIndex((item) => item.id === tempUserId)
+              const userIndex = next.findIndex((item) => item.id === (retryMessage?.id ?? tempUserId))
               if (userIndex >= 0) next[userIndex] = payload.user_message
               return next
             })
@@ -364,11 +377,23 @@ export function FloatingAssistant() {
       }
     } catch (error) {
       console.error('Failed to send assistant message:', error)
-      setMessages((prev) => prev.filter((item) => item.id !== tempUserId && item.id !== tempAssistantId))
+      if (retryMessage && sessionId) {
+        fetchHistory(sessionId)
+      } else {
+        setMessages((prev) => prev.filter((item) => item.id !== tempUserId && item.id !== tempAssistantId))
+      }
       alert('发送消息失败，请稍后重试')
     } finally {
       setSending(false)
     }
+  }
+
+  const handleSend = async () => {
+    await sendMessage(draft, true)
+  }
+
+  const handleResend = async (message: AssistantMessage) => {
+    await sendMessage(message.content, false, message)
   }
 
   const formatTime = (value: string) =>
@@ -472,11 +497,25 @@ export function FloatingAssistant() {
               )}
               {!loadingHistory && messages.map((message) => (
                 <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[92%] md:max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm ${message.role === 'user' ? 'bg-slate-900 text-white' : 'border border-slate-200 bg-white text-slate-800'}`}>
-                    <div className={`space-y-3 ${message.role === 'assistant' ? 'text-[13px]' : 'whitespace-pre-wrap leading-relaxed'}`}>
-                      {message.role === 'assistant' ? renderAssistantContent(message.content) : message.content}
+                  <div className={`flex max-w-[92%] flex-col ${message.role === 'user' ? 'items-end' : 'items-start'} md:max-w-[85%]`}>
+                    <div className={`rounded-2xl px-3 py-2 text-sm shadow-sm ${message.role === 'user' ? 'bg-slate-900 text-white' : 'border border-slate-200 bg-white text-slate-800'}`}>
+                      <div className={`space-y-3 ${message.role === 'assistant' ? 'text-[13px]' : 'whitespace-pre-wrap leading-relaxed'}`}>
+                        {message.role === 'assistant' ? renderAssistantContent(message.content) : message.content}
+                      </div>
+                      <div className={`mt-1 text-[10px] ${message.role === 'user' ? 'text-slate-300' : 'text-slate-400'}`}>{formatTime(message.created_at)}</div>
                     </div>
-                    <div className={`mt-1 text-[10px] ${message.role === 'user' ? 'text-slate-300' : 'text-slate-400'}`}>{formatTime(message.created_at)}</div>
+                    {message.role === 'user' && (
+                      <button
+                        type="button"
+                        onClick={() => handleResend(message)}
+                        disabled={sending}
+                        title="重发这条消息"
+                        className="mt-1.5 inline-flex h-6 items-center gap-1 rounded-md px-2 text-[11px] text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        重发
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}

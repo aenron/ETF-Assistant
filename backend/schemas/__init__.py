@@ -5,11 +5,12 @@ from schemas.portfolio import (
 from schemas.market import MarketQuote, MarketDailyResponse, KLineItem
 from schemas.advice import AdviceGenerateRequest, AdviceResponse, AdviceLogResponse
 from schemas.etf import EtfSearchResult
+from schemas.notification import NotificationConfigResponse, NotificationConfigListResponse, NotificationTestResponse
 
 __all__ = [
     "PortfolioCreate", "PortfolioUpdate", "PortfolioResponse",
     "PortfolioWithMarket", "PortfolioSummary",
     "MarketQuote", "MarketDailyResponse", "KLineItem",
     "AdviceGenerateRequest", "AdviceResponse", "AdviceLogResponse",
-    "EtfSearchResult",
+    "EtfSearchResult", "NotificationConfigResponse", "NotificationConfigListResponse", "NotificationTestResponse",
 ]

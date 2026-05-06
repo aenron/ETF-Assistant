@@ -15,6 +15,7 @@ import { authApi } from '@/services/authApi'
 
 export function DashboardPage() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null)
+  const [portfolios, setPortfolios] = useState<PortfolioWithMarket[]>([])
   const [accountAnalysis, setAccountAnalysis] = useState<AccountAnalysisResponse | null>(null)
   const [accountBalance, setAccountBalance] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(true)
@@ -37,24 +38,15 @@ export function DashboardPage() {
   const fetchData = async () => {
     setLoading(true)
     try {
-      const [summaryRes, balanceRes] = await Promise.all([
+      const [summaryRes, balanceRes, portfolioRes] = await Promise.all([
         portfolioApi.getSummary(),
         authApi.getAccountBalance(),
+        portfolioApi.getList(),
       ])
       setSummary(summaryRes.data)
       setAccountBalance(balanceRes.account_balance ?? undefined)
-    } catch (error) {
-      console.error('Failed to fetch data:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // 获取缓存的最新建议
-  const fetchMarketRefreshAt = async () => {
-    try {
-      const quotesRes = await portfolioApi.getList()
-      const latestRefreshAt = quotesRes.data
+      setPortfolios(portfolioRes.data)
+      const latestRefreshAt = portfolioRes.data
         .map((portfolio: PortfolioWithMarket) => portfolio.market_refreshed_at)
         .filter((value): value is string => Boolean(value))
         .sort()
@@ -79,8 +71,7 @@ export function DashboardPage() {
     try {
       const res = await marketApi.refreshAll()
       if (res.data.success) {
-        // 刷新后重新获取数据
-        await Promise.all([fetchData(), fetchMarketRefreshAt()])
+        await fetchData()
         alert(res.data.message || '行情刷新成功')
       } else {
         alert(res.data.message || '刷新失败')
@@ -108,7 +99,6 @@ export function DashboardPage() {
 
   useEffect(() => {
     fetchData()
-    fetchMarketRefreshAt()
     fetchLatestAccountAnalysis()
   }, [])
 
@@ -138,8 +128,10 @@ export function DashboardPage() {
 
       <PortfolioSummaryCard
         summary={summary}
+        portfolios={portfolios}
         accountBalance={accountBalance}
         onAccountBalanceChange={setAccountBalance}
+        showPnlAttribution
       />
 
       {accountAnalysis && <AccountAnalysisCard analysis={accountAnalysis} />}
