@@ -27,10 +27,35 @@ class GeminiClient(BaseLLMClient):
 
     def _build_tools(self):
         return [types.Tool(google_search=types.GoogleSearch())] if self.enable_grounding else None
-    
+
+    def _update_search_usage_from_response(self, response) -> None:
+        if not self.enable_grounding or not getattr(response, "candidates", None):
+            if not self.enable_grounding:
+                self.update_search_usage(used=False)
+            return
+
+        candidate = response.candidates[0]
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if metadata:
+            queries = list(getattr(metadata, "web_search_queries", None) or [])
+            chunks = getattr(metadata, "grounding_chunks", None) or []
+            self.update_search_usage(
+                used=bool(queries or chunks),
+                queries=queries,
+                result_count=len(chunks),
+            )
+            print(f"[GeminiClient] Grounding元数据:")
+            if hasattr(metadata, 'web_search_queries'):
+                print(f"  - 搜索查询: {metadata.web_search_queries}")
+            if hasattr(metadata, 'grounding_chunks'):
+                print(f"  - 来源数量: {len(metadata.grounding_chunks or [])}")
+        else:
+            self.update_search_usage(used=None)
+
     async def chat(self, prompt: str) -> str:
         """发送prompt并获取响应"""
         tools = self._build_tools()
+        self.reset_search_usage(provider="gemini", enabled=bool(tools), source="google_grounding")
         if tools:
             print(f"[GeminiClient] 已启用 Google Search Grounding")
 
@@ -47,17 +72,7 @@ class GeminiClient(BaseLLMClient):
                 contents=prompt,
                 config=config,
             )
-            
-            # 打印Grounding元数据
-            if self.enable_grounding and response.candidates:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                    metadata = candidate.grounding_metadata
-                    print(f"[GeminiClient] Grounding元数据:")
-                    if hasattr(metadata, 'web_search_queries'):
-                        print(f"  - 搜索查询: {metadata.web_search_queries}")
-                    if hasattr(metadata, 'grounding_chunks'):
-                        print(f"  - 来源数量: {len(metadata.grounding_chunks or [])}")
+            self._update_search_usage_from_response(response)
             
             return response.text
             
@@ -68,12 +83,16 @@ class GeminiClient(BaseLLMClient):
     async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
         """Gemini 原生流式输出"""
         tools = self._build_tools()
+        self.reset_search_usage(provider="gemini", enabled=bool(tools), source="google_grounding")
+        if not tools:
+            self.update_search_usage(used=False)
         config = types.GenerateContentConfig(
             temperature=0.0,
             max_output_tokens=8192,
             tools=tools,
         )
         queue: asyncio.Queue[str | None] = asyncio.Queue()
+        error_holder: list[Exception | None] = [None]
 
         def _sync_stream():
             try:
@@ -87,6 +106,7 @@ class GeminiClient(BaseLLMClient):
                         queue.put_nowait(text)
             except Exception as e:
                 print(f"[GeminiClient] 流式响应失败: {e}")
+                error_holder[0] = e
             finally:
                 queue.put_nowait(None)
 
@@ -97,11 +117,14 @@ class GeminiClient(BaseLLMClient):
                 break
             yield item
         await task
+        if error_holder[0] is not None:
+            raise error_holder[0]
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
         try:
             tools = self._build_tools()
+            self.reset_search_usage(provider="gemini", enabled=bool(tools), source="google_grounding")
             config = types.GenerateContentConfig(
                 temperature=0.0,
                 max_output_tokens=8192,
@@ -114,6 +137,7 @@ class GeminiClient(BaseLLMClient):
                 contents=prompt,
                 config=config,
             )
+            self._update_search_usage_from_response(raw_response)
             response = raw_response.text
             
             # 清理markdown代码块标记
@@ -155,6 +179,7 @@ class GeminiClient(BaseLLMClient):
     async def chat_with_grounding(self, prompt: str) -> Dict[str, Any]:
         """发送prompt并获取带Grounding信息的响应"""
         tools = self._build_tools()
+        self.reset_search_usage(provider="gemini", enabled=bool(tools), source="google_grounding")
         
         config = types.GenerateContentConfig(
             temperature=0.7,
@@ -179,11 +204,12 @@ class GeminiClient(BaseLLMClient):
             # 提取Grounding元数据
             if response.candidates:
                 candidate = response.candidates[0]
-                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                    metadata = candidate.grounding_metadata
+                metadata = getattr(candidate, 'grounding_metadata', None)
+                if metadata:
                     result["grounding_metadata"] = metadata
                     if hasattr(metadata, 'web_search_queries'):
                         result["search_queries"] = metadata.web_search_queries or []
+            self._update_search_usage_from_response(response)
             
             return result
             

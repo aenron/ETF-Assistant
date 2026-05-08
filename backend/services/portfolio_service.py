@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,12 +16,38 @@ from services.market_service import MarketService
 class PortfolioService:
     """持仓管理服务"""
 
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+    @classmethod
+    def _shanghai_now(cls) -> datetime:
+        return datetime.now(cls.SHANGHAI_TZ)
+
+    @classmethod
+    def _quote_refresh_date(cls, refreshed_at) -> Optional[date]:
+        if not refreshed_at:
+            return None
+        if refreshed_at.tzinfo is None:
+            return refreshed_at.date()
+        return refreshed_at.astimezone(cls.SHANGHAI_TZ).date()
+
+    @classmethod
+    def _is_today_market_quote(cls, refreshed_at) -> bool:
+        """Treat quote change_pct as today's move once the A-share call auction starts."""
+        now = cls._shanghai_now()
+        if now.weekday() >= 5:
+            return False
+        if now.time() < time(9, 15):
+            return False
+        return cls._quote_refresh_date(refreshed_at) == now.date()
+
     @staticmethod
     def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket], available_cash: float = 0.0) -> PortfolioSummary:
         """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
         total_market_value = 0.0
         total_cost = 0.0
         today_pnl = 0.0
+        today_previous_value = 0.0
+        has_today_pnl = False
         category_distribution = {}
 
         for p in portfolios:
@@ -29,9 +56,10 @@ class PortfolioService:
                 cost = float(p.shares) * float(p.cost_price)
                 total_cost += cost
 
-                if p.change_pct and p.market_value:
-                    yesterday_value = p.market_value / (1 + p.change_pct / 100)
-                    today_pnl += p.market_value - yesterday_value
+                if p.today_pnl is not None:
+                    today_pnl += p.today_pnl
+                    today_previous_value += p.market_value - p.today_pnl
+                    has_today_pnl = True
 
                 category = MarketService._guess_category(p.etf_name or "")
                 if category not in category_distribution:
@@ -40,7 +68,8 @@ class PortfolioService:
 
         total_pnl = total_market_value - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
-        today_pnl_pct = (today_pnl / (total_market_value - today_pnl) * 100) if total_market_value > today_pnl else 0.0
+        today_pnl_value = today_pnl if has_today_pnl else None
+        today_pnl_pct = (today_pnl / today_previous_value * 100) if has_today_pnl and today_previous_value > 0 else None
         total_assets = total_market_value + available_cash
 
         return PortfolioSummary(
@@ -48,7 +77,7 @@ class PortfolioService:
             total_cost=total_cost,
             total_pnl=total_pnl,
             total_pnl_pct=total_pnl_pct,
-            today_pnl=today_pnl,
+            today_pnl=today_pnl_value,
             today_pnl_pct=today_pnl_pct,
             category_distribution=category_distribution,
             total_assets=total_assets,
@@ -128,9 +157,9 @@ class PortfolioService:
         await session.delete(portfolio)
         return True
     
-    @staticmethod
+    @classmethod
     async def get_with_market(
-        session: AsyncSession, user_id: int
+        cls, session: AsyncSession, user_id: int
     ) -> List[PortfolioWithMarket]:
         """获取持仓列表（含实时行情）"""
         result = await session.execute(
@@ -153,10 +182,21 @@ class PortfolioService:
                 cost = float(p.shares) * float(p.cost_price)
                 pnl = market_value - cost
                 pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                today_pnl = None
+                today_pnl_pct = None
+                today = cls._shanghai_now().date()
+                if cls._is_today_market_quote(quote.refreshed_at):
+                    if p.buy_date == today:
+                        today_pnl = pnl
+                        today_pnl_pct = pnl_pct
+                    elif quote.change_pct is not None:
+                        previous_value = market_value / (1 + quote.change_pct / 100) if quote.change_pct != -100 else 0.0
+                        today_pnl = market_value - previous_value
+                        today_pnl_pct = quote.change_pct
                 
                 holding_days = None
                 if p.buy_date:
-                    holding_days = (date.today() - p.buy_date).days
+                    holding_days = (today - p.buy_date).days
                 
                 results.append(PortfolioWithMarket(
                     id=p.id,
@@ -174,6 +214,8 @@ class PortfolioService:
                     market_value=market_value,
                     pnl=pnl,
                     pnl_pct=pnl_pct,
+                    today_pnl=today_pnl,
+                    today_pnl_pct=today_pnl_pct,
                     holding_days=holding_days,
                 ))
             else:

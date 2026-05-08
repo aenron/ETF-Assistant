@@ -3,11 +3,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type AdviceLogResponse } from '@/services/api'
-import { Plus, Pencil, Trash2, Search, TrendingUp, TrendingDown, Lightbulb, X, RefreshCw, Eye, Clock } from 'lucide-react'
+import { Plus, Pencil, Trash2, Search, Lightbulb, RefreshCw, Eye, Clock } from 'lucide-react'
 import { EtfDetailModal } from './EtfDetailModal'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AdviceEventContextPanel } from './AdviceEventContextPanel'
+import { formatBeijingTime } from '@/utils/time'
 
 interface PortfolioTableProps {
   portfolios: PortfolioWithMarket[]
@@ -174,29 +176,13 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     return colors[type] || 'text-gray-500'
   }
 
-  const formatBeijingTime = (
-    value: string | null,
-    options?: Intl.DateTimeFormatOptions,
-    emptyText = '未缓存',
-  ) => {
-    if (!value) return emptyText
-    const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
-      ? value
-      : `${value.replace(' ', 'T')}Z`
-
-    return new Date(normalized).toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      ...options,
-    })
-  }
-
   const formatMarketRefreshedAt = (value: string | null) => {
     return formatBeijingTime(value, {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-    })
+    }, '未缓存')
   }
 
   const formatPnl = (pnl: number | null, pnlPct: number | null) => {
@@ -204,6 +190,10 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       return '-'
     }
     return `${pnl.toFixed(2)}（${pnlPct.toFixed(2)}%）`
+  }
+
+  const getPnlColorClass = (value: number | null | undefined) => {
+    return value && value > 0 ? 'text-red-500' : value && value < 0 ? 'text-green-500' : ''
   }
 
   return (
@@ -326,8 +316,14 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </div>
                   <div className="rounded-lg bg-muted/40 p-3">
                     <div className="text-xs text-muted-foreground">盈亏</div>
-                    <div className={`${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''} mt-1 font-medium`}>
+                    <div className={`${getPnlColorClass(p.pnl)} mt-1 font-medium`}>
                       {formatPnl(p.pnl, p.pnl_pct)}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-muted/40 p-3">
+                    <div className="text-xs text-muted-foreground">今日涨跌</div>
+                    <div className={`${getPnlColorClass(p.today_pnl)} mt-1 font-medium`}>
+                      {formatPnl(p.today_pnl, p.today_pnl_pct)}
                     </div>
                   </div>
                 </div>
@@ -393,7 +389,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 <th className="text-right py-3 px-2">现价</th>
                 <th className="text-right py-3 px-2">市值</th>
                 <th className="text-right py-3 px-2">盈亏</th>
-                <th className="text-right py-3 px-2">涨跌</th>
+                <th className="text-right py-3 px-2">今日涨跌</th>
                 <th className="text-center py-3 px-2">AI建议</th>
                 <th className="text-center py-3 px-2">操作</th>
               </tr>
@@ -416,16 +412,11 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     </div>
                   </td>
                   <td className="py-3 px-2 text-right">{p.market_value?.toFixed(2) || '-'}</td>
-                  <td className={`py-3 px-2 text-right ${p.pnl_pct && p.pnl_pct > 0 ? 'text-red-500' : p.pnl_pct && p.pnl_pct < 0 ? 'text-green-500' : ''}`}>
+                  <td className={`py-3 px-2 text-right ${getPnlColorClass(p.pnl)}`}>
                     {formatPnl(p.pnl, p.pnl_pct)}
                   </td>
-                  <td className={`py-3 px-2 text-right ${p.change_pct && p.change_pct > 0 ? 'text-red-500' : p.change_pct && p.change_pct < 0 ? 'text-green-500' : ''}`}>
-                    {p.change_pct ? (
-                      <span className="flex items-center justify-end">
-                        {p.change_pct > 0 ? <TrendingUp className="h-3 w-3 mr-1" /> : <TrendingDown className="h-3 w-3 mr-1" />}
-                        {p.change_pct.toFixed(2)}%
-                      </span>
-                    ) : '-'}
+                  <td className={`py-3 px-2 text-right ${getPnlColorClass(p.today_pnl)}`}>
+                    {formatPnl(p.today_pnl, p.today_pnl_pct)}
                   </td>
                   <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>
                     {latestAdvice ? (
@@ -499,149 +490,148 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
         </div>
 
         {/* 建议弹窗 */}
-        {showAdviceModal && currentAdvice && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-background rounded-lg p-6 max-w-3xl w-full mx-4 shadow-xl">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold">投资建议</h3>
-                <Button size="icon" variant="ghost" onClick={() => setShowAdviceModal(false)}>
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
+        <Dialog open={showAdviceModal && !!currentAdvice} onOpenChange={setShowAdviceModal}>
+          <DialogContent className="flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-4xl flex-col gap-0 overflow-hidden p-0">
+            {currentAdvice && (
+              <>
+                <DialogHeader className="border-b px-6 py-4 text-left">
+                  <DialogTitle>投资建议</DialogTitle>
+                </DialogHeader>
 
-              <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-lg">{currentAdvice.etf_code}</span>
-                  <span className="text-muted-foreground">{currentAdvice.etf_name}</span>
-                </div>
-
-                {/* 顶部操作栏 - 匹配 EtfDetailModal 样式 */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <Badge
-                      variant="outline"
-                      className={`text-sm ${getAdviceTypeColor(currentAdvice.advice_type)} border-current px-3 py-1`}
-                    >
-                      {getAdviceTypeLabel(currentAdvice.advice_type)}
-                    </Badge>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-muted-foreground">置信度</span>
-                      <div className="flex items-center gap-2">
-                        <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
-                          <div
-                            className={`h-full rounded-full transition-all ${
-                              currentAdvice.confidence >= 80
-                                ? 'bg-green-500'
-                                : currentAdvice.confidence >= 60
-                                  ? 'bg-blue-500'
-                                  : currentAdvice.confidence >= 40
-                                    ? 'bg-yellow-500'
-                                    : 'bg-red-500'
-                            }`}
-                            style={{ width: `${currentAdvice.confidence}%` }}
-                          />
-                        </div>
-                        <span className="text-sm font-semibold">{currentAdvice.confidence.toFixed(0)}%</span>
-                      </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-lg">{currentAdvice.etf_code}</span>
+                      <span className="text-muted-foreground">{currentAdvice.etf_name}</span>
                     </div>
-                  </div>
-                  <Button size="sm" variant="outline" onClick={handleRegenerateAdvice}>
-                    <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                    重新分析
-                  </Button>
-                </div>
 
-                {/* 多周期建议 */}
-                <div>
-                  <h4 className="text-sm font-medium text-muted-foreground mb-2">多周期建议</h4>
-                  <div className="space-y-3">
-                    {/* 主建议区块 */}
-                    <div className="rounded-xl border bg-primary/5 p-4">
-                      <div className="text-xs font-medium text-muted-foreground">主建议</div>
-                      <p className="mt-2 text-sm leading-relaxed">
-                        {currentAdvice.main_judgment || `中期以${getAdviceTypeLabel(currentAdvice.advice_type)}为主，${currentAdvice.medium_term.conclusion}`}
-                      </p>
-                      {currentAdvice.summary && (
-                        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                          {currentAdvice.summary}
-                        </p>
-                      )}
-                      {(currentAdvice.why.length > 0 || currentAdvice.news_basis.length > 0 || currentAdvice.policy_basis.length > 0) && (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {currentAdvice.why.slice(0, 3).map((item, index) => (
-                            <span key={`why-${index}`} className="rounded-full border bg-white/70 px-2 py-0.5 text-xs text-foreground/70">
-                              {item}
-                            </span>
-                          ))}
-                          {currentAdvice.news_basis[0] && (
-                            <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-800">
-                              新闻：{currentAdvice.news_basis[0]}
-                            </span>
-                          )}
-                          {currentAdvice.policy_basis[0] && (
-                            <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
-                              政策：{currentAdvice.policy_basis[0]}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <AdviceEventContextPanel eventContext={currentAdvice.event_context} />
-
-                    {/* 补充判断区块 */}
-                    <div className="rounded-xl border bg-background/60 p-4">
-                      <div className="text-xs font-medium text-muted-foreground">补充判断</div>
-                      <div className="mt-2 space-y-3 text-sm">
-                        <div>
-                          <span className="font-medium">短期：</span>
-                          <span>{currentAdvice.short_term.action}，{currentAdvice.short_term.conclusion}</span>
-                          {(currentAdvice.short_term.signals[0] || currentAdvice.short_term.risks[0]) && (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {currentAdvice.short_term.signals[0] ? `依据：${currentAdvice.short_term.signals[0]}` : ''}
-                              {currentAdvice.short_term.signals[0] && currentAdvice.short_term.risks[0] ? '；' : ''}
-                              {currentAdvice.short_term.risks[0] ? `风险：${currentAdvice.short_term.risks[0]}` : ''}
-                            </p>
-                          )}
-                        </div>
-                        <div>
-                          <span className="font-medium">长期：</span>
-                          <span>{currentAdvice.long_term.action}，{currentAdvice.long_term.conclusion}</span>
-                          {(currentAdvice.long_term.signals[0] || currentAdvice.long_term.risks[0]) && (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {currentAdvice.long_term.signals[0] ? `依据：${currentAdvice.long_term.signals[0]}` : ''}
-                              {currentAdvice.long_term.signals[0] && currentAdvice.long_term.risks[0] ? '；' : ''}
-                              {currentAdvice.long_term.risks[0] ? `风险：${currentAdvice.long_term.risks[0]}` : ''}
-                            </p>
-                          )}
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Badge
+                          variant="outline"
+                          className={`text-sm ${getAdviceTypeColor(currentAdvice.advice_type)} border-current px-3 py-1`}
+                        >
+                          {getAdviceTypeLabel(currentAdvice.advice_type)}
+                        </Badge>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-muted-foreground">置信度</span>
+                          <div className="flex items-center gap-2">
+                            <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
+                              <div
+                                className={`h-full rounded-full transition-all ${
+                                  currentAdvice.confidence >= 80
+                                    ? 'bg-green-500'
+                                    : currentAdvice.confidence >= 60
+                                      ? 'bg-blue-500'
+                                      : currentAdvice.confidence >= 40
+                                        ? 'bg-yellow-500'
+                                        : 'bg-red-500'
+                                }`}
+                                style={{ width: `${currentAdvice.confidence}%` }}
+                              />
+                            </div>
+                            <span className="text-sm font-semibold">{currentAdvice.confidence.toFixed(0)}%</span>
+                          </div>
                         </div>
                       </div>
+                      <Button size="sm" variant="outline" onClick={handleRegenerateAdvice}>
+                        <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                        重新分析
+                      </Button>
+                    </div>
+
+                    <div>
+                      <h4 className="mb-2 text-sm font-medium text-muted-foreground">多周期建议</h4>
+                      <div className="space-y-3">
+                        <div className="rounded-xl border bg-primary/5 p-4">
+                          <div className="text-xs font-medium text-muted-foreground">主建议</div>
+                          <p className="mt-2 text-sm leading-relaxed">
+                            {currentAdvice.main_judgment || `中期以${getAdviceTypeLabel(currentAdvice.advice_type)}为主，${currentAdvice.medium_term.conclusion}`}
+                          </p>
+                          {currentAdvice.summary && (
+                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                              {currentAdvice.summary}
+                            </p>
+                          )}
+                          {(currentAdvice.why.length > 0 || currentAdvice.news_basis.length > 0 || currentAdvice.policy_basis.length > 0) && (
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {currentAdvice.why.slice(0, 3).map((item, index) => (
+                                <span key={`why-${index}`} className="rounded-full border bg-white/70 px-2 py-0.5 text-xs text-foreground/70">
+                                  {item}
+                                </span>
+                              ))}
+                              {currentAdvice.news_basis[0] && (
+                                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-800">
+                                  新闻：{currentAdvice.news_basis[0]}
+                                </span>
+                              )}
+                              {currentAdvice.policy_basis[0] && (
+                                <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs text-violet-800">
+                                  政策：{currentAdvice.policy_basis[0]}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        <AdviceEventContextPanel eventContext={currentAdvice.event_context} />
+
+                        <div className="rounded-xl border bg-background/60 p-4">
+                          <div className="text-xs font-medium text-muted-foreground">补充判断</div>
+                          <div className="mt-2 space-y-3 text-sm">
+                            <div>
+                              <span className="font-medium">短期：</span>
+                              <span>{currentAdvice.short_term.action}，{currentAdvice.short_term.conclusion}</span>
+                              {(currentAdvice.short_term.signals[0] || currentAdvice.short_term.risks[0]) && (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {currentAdvice.short_term.signals[0] ? `依据：${currentAdvice.short_term.signals[0]}` : ''}
+                                  {currentAdvice.short_term.signals[0] && currentAdvice.short_term.risks[0] ? '；' : ''}
+                                  {currentAdvice.short_term.risks[0] ? `风险：${currentAdvice.short_term.risks[0]}` : ''}
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <span className="font-medium">长期：</span>
+                              <span>{currentAdvice.long_term.action}，{currentAdvice.long_term.conclusion}</span>
+                              {(currentAdvice.long_term.signals[0] || currentAdvice.long_term.risks[0]) && (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {currentAdvice.long_term.signals[0] ? `依据：${currentAdvice.long_term.signals[0]}` : ''}
+                                  {currentAdvice.long_term.signals[0] && currentAdvice.long_term.risks[0] ? '；' : ''}
+                                  {currentAdvice.long_term.risks[0] ? `风险：${currentAdvice.long_term.risks[0]}` : ''}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {currentAdvice.current_price && (
+                      <div className="text-sm text-muted-foreground">
+                        当前价格: {currentAdvice.current_price.toFixed(3)} | 盈亏: {currentAdvice.pnl_pct?.toFixed(2)}%
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-1.5 border-t pt-2 text-xs text-muted-foreground">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span>
+                        决策时间: {formatBeijingTime(currentAdvice.created_at, {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                {/* 价格和盈亏 */}
-                {currentAdvice.current_price && (
-                  <div className="text-sm text-muted-foreground">
-                    当前价格: {currentAdvice.current_price.toFixed(3)} |
-                    盈亏: {currentAdvice.pnl_pct?.toFixed(2)}%
-                  </div>
-                )}
-
-                {/* 决策时间 */}
-                <div className="flex items-center gap-1.5 pt-2 border-t text-xs text-muted-foreground">
-                  <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span>
-                    决策时间: {new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
-                  </span>
+                <div className="flex justify-end border-t px-6 py-4">
+                  <Button onClick={() => setShowAdviceModal(false)}>关闭</Button>
                 </div>
-              </div>
-
-              <div className="mt-6 flex justify-end">
-                <Button onClick={() => setShowAdviceModal(false)}>关闭</Button>
-              </div>
-            </div>
-          </div>
-        )}
+              </>
+            )}
+          </DialogContent>
+        </Dialog>
 
         {/* ETF详情弹窗 */}
         {detailPortfolio && (

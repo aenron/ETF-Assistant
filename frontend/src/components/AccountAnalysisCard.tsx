@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import type { AccountAnalysisResponse } from '@/services/api'
 import { AlertTriangle, Clock, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react'
+import { formatBeijingTime } from '@/utils/time'
 
 interface AccountAnalysisCardProps {
   analysis: AccountAnalysisResponse
@@ -40,7 +41,7 @@ export function AccountAnalysisCard({ analysis }: AccountAnalysisCardProps) {
             </div>
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <Clock className="h-3.5 w-3.5" />
-              决策时间 {new Date(analysis.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
+              决策时间 {formatBeijingTime(analysis.created_at)}
             </div>
           </div>
           <Badge variant="outline" className={config.className}>

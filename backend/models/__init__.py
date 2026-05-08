@@ -7,6 +7,19 @@ from models.assistant_session import AssistantSession
 from models.assistant_session_message import AssistantSessionMessage
 from models.user_notification_config import UserNotificationConfig
 from models.scheduler_job_config import SchedulerJobConfig
+from models.multi_agent_run import MultiAgentRun
 from models.user import User
 
-__all__ = ["EtfInfo", "Portfolio", "MarketDaily", "AdviceLog", "AssistantMessage", "AssistantSession", "AssistantSessionMessage", "UserNotificationConfig", "SchedulerJobConfig", "User"]
+__all__ = [
+    "EtfInfo",
+    "Portfolio",
+    "MarketDaily",
+    "AdviceLog",
+    "AssistantMessage",
+    "AssistantSession",
+    "AssistantSessionMessage",
+    "UserNotificationConfig",
+    "SchedulerJobConfig",
+    "MultiAgentRun",
+    "User",
+]

@@ -6,7 +6,7 @@ from sqlalchemy import func, select, text
 from database import init_db, engine
 from database import async_session_maker
 from models.user import User
-from routers import portfolio_router, market_router, advice_router, assistant_router, admin_router
+from routers import portfolio_router, market_router, advice_router, assistant_router, admin_router, multi_agent_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from routers.notification_config import router as notification_config_router
@@ -22,6 +22,8 @@ async def run_migrations():
         ("advice_log.llm_model", "ALTER TABLE advice_log ADD COLUMN llm_model VARCHAR(100)"),
         ("user_notification_config.chat_id", "ALTER TABLE user_notification_config ADD COLUMN chat_id VARCHAR(255)"),
         ("users.is_admin", "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL"),
+        ("multi_agent_run.max_debate_rounds", "ALTER TABLE multi_agent_run ADD COLUMN max_debate_rounds INTEGER DEFAULT 3 NOT NULL"),
+        ("multi_agent_run.collapse_debate_by_default", "ALTER TABLE multi_agent_run ADD COLUMN collapse_debate_by_default BOOLEAN DEFAULT TRUE NOT NULL"),
     ]
 
     for label, statement in migration_statements:
@@ -99,6 +101,7 @@ app.include_router(assistant_router)
 app.include_router(llm_config_router)
 app.include_router(notification_config_router)
 app.include_router(admin_router)
+app.include_router(multi_agent_router)
 
 
 @app.get("/")

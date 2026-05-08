@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, ChevronLeft, Loader2, MemoryStick, MessageCircle, Plus, RotateCcw, Send, Trash2, X } from 'lucide-react'
+import { Bot, ChevronLeft, Loader2, MemoryStick, MessageCircle, Plus, RotateCcw, Send, Trash2, UserRoundCheck, X } from 'lucide-react'
 
 import { assistantApi, type AssistantMessage, type AssistantSession } from '@/services/api'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from './ConfirmDialog'
+import { compareBeijingTimeDesc, formatBeijingTime } from '@/utils/time'
 
 type AssistantSegment =
   | { type: 'markdown'; content: string }
@@ -151,6 +152,7 @@ export function FloatingAssistant() {
   const [draft, setDraft] = useState('')
   const [sessionToDelete, setSessionToDelete] = useState<AssistantSession | null>(null)
   const [deletingSession, setDeletingSession] = useState(false)
+  const [includePortfolioContext, setIncludePortfolioContext] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
   const waitForPaint = () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
@@ -187,7 +189,7 @@ export function FloatingAssistant() {
       setSessions((prev) => {
         const exists = prev.some((item) => item.id === res.data.session.id)
         const next = exists ? prev.map((item) => item.id === res.data.session.id ? res.data.session : item) : [res.data.session, ...prev]
-        return next.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+        return next.sort((a, b) => compareBeijingTimeDesc(a.updated_at, b.updated_at))
       })
     } catch (error) {
       console.error('Failed to fetch assistant history:', error)
@@ -314,7 +316,7 @@ export function FloatingAssistant() {
     }
 
     try {
-      const response = await assistantApi.streamChat(message, sessionId, retryMessage?.id)
+      const response = await assistantApi.streamChat(message, sessionId, retryMessage?.id, includePortfolioContext)
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -343,7 +345,7 @@ export function FloatingAssistant() {
             setSessions((prev) => {
               const exists = prev.some((item) => item.id === payload.session.id)
               const next = exists ? prev.map((item) => item.id === payload.session.id ? payload.session : item) : [payload.session, ...prev]
-              return next.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+              return next.sort((a, b) => compareBeijingTimeDesc(a.updated_at, b.updated_at))
             })
             setActiveSessionId(payload.session.id)
             setMessages((prev) => {
@@ -364,7 +366,7 @@ export function FloatingAssistant() {
             setSessions((prev) => {
               const exists = prev.some((item) => item.id === payload.session.id)
               const next = exists ? prev.map((item) => item.id === payload.session.id ? payload.session : item) : [payload.session, ...prev]
-              return next.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+              return next.sort((a, b) => compareBeijingTimeDesc(a.updated_at, b.updated_at))
             })
             setMessages((prev) => {
               const next = [...prev]
@@ -395,15 +397,6 @@ export function FloatingAssistant() {
   const handleResend = async (message: AssistantMessage) => {
     await sendMessage(message.content, false, message)
   }
-
-  const formatTime = (value: string) =>
-    new Date(value).toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
 
   return (
     <>
@@ -445,7 +438,12 @@ export function FloatingAssistant() {
                 >
                   <div className="truncate text-sm font-medium text-slate-900">{session.title}</div>
                   <div className="mt-1 line-clamp-2 text-[11px] text-slate-500">{session.last_message_preview || '暂无消息'}</div>
-                  <div className="mt-2 text-[10px] text-slate-400">{formatTime(session.updated_at)}</div>
+                  <div className="mt-2 text-[10px] text-slate-400">{formatBeijingTime(session.updated_at, {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}</div>
                 </button>
               ))}
             </div>
@@ -466,7 +464,9 @@ export function FloatingAssistant() {
                 <div className="text-sm font-semibold text-slate-900">
                   {sessions.find((item) => item.id === activeSessionId)?.title || '当前会话'}
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">回答会参考当前持仓、账户概况和该会话上下文</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {includePortfolioContext ? '回答会参考当前持仓、账户概况和该会话上下文' : '回答仅参考问题和该会话上下文'}
+                </div>
               </div>
               {activeSessionId && (
                 <button
@@ -502,7 +502,12 @@ export function FloatingAssistant() {
                       <div className={`space-y-3 ${message.role === 'assistant' ? 'text-[13px]' : 'whitespace-pre-wrap leading-relaxed'}`}>
                         {message.role === 'assistant' ? renderAssistantContent(message.content) : message.content}
                       </div>
-                      <div className={`mt-1 text-[10px] ${message.role === 'user' ? 'text-slate-300' : 'text-slate-400'}`}>{formatTime(message.created_at)}</div>
+                      <div className={`mt-1 text-[10px] ${message.role === 'user' ? 'text-slate-300' : 'text-slate-400'}`}>{formatBeijingTime(message.created_at, {
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}</div>
                     </div>
                     {message.role === 'user' && (
                       <button
@@ -533,6 +538,22 @@ export function FloatingAssistant() {
             </div>
 
             <div className="border-t bg-white p-3 pb-[max(12px,env(safe-area-inset-bottom))]">
+              <div className="mb-2 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
+                  <UserRoundCheck className={`h-4 w-4 ${includePortfolioContext ? 'text-emerald-600' : 'text-slate-400'}`} />
+                  <span>{includePortfolioContext ? '引用持仓信息' : '不引用持仓信息'}</span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={includePortfolioContext}
+                  onClick={() => setIncludePortfolioContext((value) => !value)}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${includePortfolioContext ? 'bg-emerald-600' : 'bg-slate-300'}`}
+                  title="控制智能体是否引用当前持仓和账户概况"
+                >
+                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${includePortfolioContext ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
               <div className="rounded-2xl border bg-slate-50 p-2">
                 <textarea
                   value={draft}

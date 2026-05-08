@@ -1,6 +1,5 @@
 """定时任务服务"""
 import asyncio
-from datetime import datetime
 from inspect import iscoroutinefunction
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,6 +14,7 @@ from services.advisor_service import AdvisorService
 from services.market_service import MarketService
 from services.portfolio_service import PortfolioService
 from services.notification_service import NotificationService
+from utils.timezone import now_in_shanghai
 
 
 scheduler = AsyncIOScheduler()
@@ -219,7 +219,7 @@ async def analyze_user_account(user_id: int):
 
 async def analyze_all_portfolios():
     """执行所有活跃用户的收盘持仓分析"""
-    print(f"[Scheduler] {datetime.now()} 开始执行收盘持仓分析定时任务...")
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行收盘持仓分析定时任务...")
 
     async with async_session_maker() as db:
         try:
@@ -244,7 +244,7 @@ async def analyze_all_portfolios():
 
 async def analyze_all_accounts():
     """执行所有活跃用户的本周账户分析并推送摘要"""
-    print(f"[Scheduler] {datetime.now()} 开始执行本周账户分析定时任务...")
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行本周账户分析定时任务...")
 
     async with async_session_maker() as db:
         try:
@@ -269,7 +269,7 @@ async def analyze_all_accounts():
 
 async def refresh_market_quotes():
     """定时刷新活跃用户持仓涉及的行情缓存"""
-    print(f"[Scheduler] {datetime.now()} 开始执行行情刷新任务...")
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行行情刷新任务...")
 
     async with async_session_maker() as db:
         try:
@@ -295,13 +295,13 @@ async def refresh_market_quotes():
 
 def setup_scheduler():
     """配置定时任务"""
-    # 工作日收盘后 16:30 执行持仓分析
+    # 工作日收盘后 15:05 执行持仓分析
     scheduler.add_job(
         analyze_all_portfolios,
         trigger=CronTrigger(
             day_of_week='mon-fri',
-            hour=16,
-            minute=30,
+            hour=15,
+            minute=5,
             timezone='Asia/Shanghai'
         ),
         id='daily_analysis',
@@ -309,13 +309,13 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    # 每周五收盘后 16:30 执行账户分析并推送
+    # 每周五收盘后 15:10 执行账户分析并推送
     scheduler.add_job(
         analyze_all_accounts,
         trigger=CronTrigger(
             day_of_week='fri',
-            hour=16,
-            minute=30,
+            hour=15,
+            minute=10,
             timezone='Asia/Shanghai'
         ),
         id='weekly_account_analysis',
@@ -339,9 +339,9 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    print("[Scheduler] 定时任务已配置: 工作日 16:30 自动执行收盘持仓分析")
-    print("[Scheduler] 定时任务已配置: 每周五 16:30 自动执行本周账户分析并推送")
-    print("[Scheduler] 定时任务已配置: 开盘时段每30分钟自动刷新行情缓存")
+    print("[Scheduler] 定时任务已配置: 工作日 15:05 自动执行收盘持仓分析")
+    print("[Scheduler] 定时任务已配置: 每周五 15:10 自动执行本周账户分析并推送")
+    print("[Scheduler] 定时任务已配置: A股交易时段每5分钟自动刷新行情缓存，15:00收盘补刷一次")
 
 
 def start_scheduler():

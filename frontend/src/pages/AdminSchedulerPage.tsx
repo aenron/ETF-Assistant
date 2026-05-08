@@ -6,19 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
-
-function formatTime(value: string | null) {
-  if (!value) return '已暂停'
-  return new Date(value).toLocaleString('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
+import { formatBeijingTime } from '@/utils/time'
 
 function describeJob(job: SchedulerJob) {
   if (job.id === 'daily_analysis') return '工作日收盘后为所有活跃用户生成持仓分析，并按用户通知配置推送。'
@@ -210,7 +198,7 @@ export function AdminSchedulerPage() {
 
                       <div className="rounded-lg border bg-slate-50 px-3 py-2">
                         <div className="text-xs text-muted-foreground">下次执行</div>
-                        <div className="mt-1 text-sm font-medium">{formatTime(job.next_run_time)}</div>
+                        <div className="mt-1 text-sm font-medium">{formatBeijingTime(job.next_run_time, {}, '已暂停')}</div>
                       </div>
 
                       <div className="flex flex-col gap-2 sm:flex-row xl:justify-end">

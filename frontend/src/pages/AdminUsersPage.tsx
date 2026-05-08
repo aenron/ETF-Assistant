@@ -8,10 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-
-function formatTime(value: string) {
-  return new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-}
+import { formatBeijingTime } from '@/utils/time'
 
 export function AdminUsersPage() {
   const currentUser = getCurrentUser()
@@ -183,7 +180,7 @@ export function AdminUsersPage() {
                             </Button>
                           </div>
                         </td>
-                        <td className="px-2 py-3 text-xs text-muted-foreground">{formatTime(user.created_at)}</td>
+                        <td className="px-2 py-3 text-xs text-muted-foreground">{formatBeijingTime(user.created_at)}</td>
                         <td className="px-2 py-3">
                           <div className="flex min-w-56 flex-col gap-3">
                             <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">

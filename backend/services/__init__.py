@@ -1,5 +1,1 @@
-from services.market_service import MarketService
-from services.portfolio_service import PortfolioService
-from services.advisor_service import AdvisorService
-
-__all__ = ["MarketService", "PortfolioService", "AdvisorService"]
+"""Service package exports are intentionally lazy to avoid heavy import cascades."""

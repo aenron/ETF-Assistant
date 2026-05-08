@@ -26,6 +26,7 @@ class QwenClient(BaseLLMClient):
     
     async def chat(self, prompt: str) -> str:
         """发送prompt并获取响应"""
+        self.reset_search_usage(provider="qwen", enabled=self.enable_search, source="dashscope_search")
         messages = [{"role": "user", "content": prompt}]
         
         response = await asyncio.to_thread(
@@ -38,6 +39,16 @@ class QwenClient(BaseLLMClient):
         )
         
         if response.status_code == 200:
+            plugins = getattr(response, "usage", None)
+            if plugins and "plugins" in plugins and "search" in plugins["plugins"]:
+                search_info = plugins["plugins"]["search"]
+                self.update_search_usage(
+                    used=True,
+                    result_count=search_info.get("count"),
+                    detail=f"strategy={search_info.get('strategy')}",
+                )
+            elif not self.enable_search:
+                self.update_search_usage(used=False)
             return response.output.text
         else:
             print(f"[QwenClient] 错误: {response.code} - {response.message}")
@@ -45,6 +56,7 @@ class QwenClient(BaseLLMClient):
 
     async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
         """通义千问原生流式输出"""
+        self.reset_search_usage(provider="qwen", enabled=self.enable_search, source="dashscope_search")
         messages = [{"role": "user", "content": prompt}]
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -90,6 +102,7 @@ class QwenClient(BaseLLMClient):
     
     async def chat_json(self, prompt: str) -> dict:
         """发送prompt并获取JSON响应"""
+        self.reset_search_usage(provider="qwen", enabled=self.enable_search, source="dashscope_search")
         messages = [
             {"role": "system", "content": "你是一个专业的ETF投资顾问，请严格按照JSON格式输出结果。"},
             {"role": "user", "content": prompt}
@@ -114,7 +127,14 @@ class QwenClient(BaseLLMClient):
                 plugins = usage.get("plugins", {})
                 if "search" in plugins:
                     search_info = plugins["search"]
+                    self.update_search_usage(
+                        used=True,
+                        result_count=search_info.get("count"),
+                        detail=f"strategy={search_info.get('strategy')}",
+                    )
                     print(f"[QwenClient] ✓ 网络搜索已启用: 搜索次数={search_info.get('count')}, 策略={search_info.get('strategy')}")
+                elif not self.enable_search:
+                    self.update_search_usage(used=False)
             
             # 获取内容
             content = response.output.choices[0].message.content

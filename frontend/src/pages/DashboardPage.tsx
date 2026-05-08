@@ -12,6 +12,7 @@ import { AccountAnalysisCard } from '@/components/AccountAnalysisCard'
 import { Button } from '@/components/ui/button'
 import { RefreshCw, Sparkles, TrendingUp } from 'lucide-react'
 import { authApi } from '@/services/authApi'
+import { compareBeijingTimeDesc, formatBeijingTime } from '@/utils/time'
 
 export function DashboardPage() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null)
@@ -23,17 +24,14 @@ export function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [marketRefreshAt, setMarketRefreshAt] = useState<string | null>(null)
 
-  const formatMarketRefreshAt = (value: string | null) => {
-    if (!value) return '暂无缓存行情'
-    return new Date(value).toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
+  const formatMarketRefreshAt = (value: string | null) =>
+    formatBeijingTime(value, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-    })
-  }
+    }, '暂无缓存行情')
 
   const fetchData = async () => {
     setLoading(true)
@@ -49,8 +47,8 @@ export function DashboardPage() {
       const latestRefreshAt = portfolioRes.data
         .map((portfolio: PortfolioWithMarket) => portfolio.market_refreshed_at)
         .filter((value): value is string => Boolean(value))
-        .sort()
-        .at(-1) ?? null
+        .sort(compareBeijingTimeDesc)
+        .at(0) ?? null
       setMarketRefreshAt(latestRefreshAt)
     } catch (error) {
       console.error('Failed to fetch market refresh time:', error)

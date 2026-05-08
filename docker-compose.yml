@@ -1,13 +1,17 @@
-version: '3.8'
-
 services:
   # 后端服务
   backend:
     build: ./backend
     image: etf-assistant-backend:latest
     container_name: etf-assistant-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - ./backend/.env:/app/.env:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     restart: unless-stopped
 
   # 前端服务
@@ -17,6 +21,11 @@ services:
     container_name: etf-assistant-frontend
     depends_on:
       - backend
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     ports:
       - "8123:80"
     restart: unless-stopped

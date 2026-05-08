@@ -10,11 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-
-function formatTime(value: string | null) {
-  if (!value) return '暂无'
-  return new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-}
+import { formatBeijingTime } from '@/utils/time'
 
 type ProviderMessageTone = 'success' | 'error' | 'neutral'
 
@@ -114,7 +110,7 @@ function NotificationProviderCard({
           </div>
           <div className="rounded-xl border bg-slate-50/70 p-4">
             <div className="text-xs font-medium text-muted-foreground">最近测试</div>
-            <p className="mt-2 text-sm">{formatTime(config?.last_test_at || null)}</p>
+            <p className="mt-2 text-sm">{formatBeijingTime(config?.last_test_at || null, {}, '暂无')}</p>
             <p className={`mt-2 text-xs ${
               config?.last_test_success === true
                 ? 'text-emerald-700'

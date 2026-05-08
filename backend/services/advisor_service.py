@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -13,7 +13,8 @@ from schemas.portfolio import PortfolioWithMarket
 from config import settings
 from services.market_service import MarketService
 from services.portfolio_service import PortfolioService
-from services.llm import BaseLLMClient, OpenAIClient, DeepSeekClient, GeminiClient, QwenClient
+from services.tavily_service import TavilySearchService
+from services.llm.base import BaseLLMClient
 
 
 class AdvisorService:
@@ -31,36 +32,57 @@ class AdvisorService:
         """获取LLM客户端（单例）"""
         if cls._llm_client is None:
             if settings.llm_provider == "openai":
+                from services.llm.openai_client import OpenAIClient
+
                 cls._llm_client = OpenAIClient(
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
                     model=settings.openai_model,
                 )
+                cls._llm_client.provider = "openai"
             elif settings.llm_provider == "deepseek":
+                from services.llm.deepseek_client import DeepSeekClient
+
                 cls._llm_client = DeepSeekClient(
                     api_key=settings.deepseek_api_key,
                     base_url=settings.deepseek_base_url,
                     model=settings.deepseek_model,
                 )
+                cls._llm_client.provider = "deepseek"
             elif settings.llm_provider == "gemini":
+                from services.llm.gemini_client import GeminiClient
+
                 cls._llm_client = GeminiClient(
                     api_key=settings.gemini_api_key,
                     model=settings.gemini_model,
                     enable_grounding=settings.gemini_enable_grounding,
                 )
+                cls._llm_client.provider = "gemini"
             elif settings.llm_provider == "qwen":
+                from services.llm.qwen_client import QwenClient
+
                 cls._llm_client = QwenClient(
                     api_key=settings.qwen_api_key,
                     model=settings.qwen_model,
                     enable_search=settings.qwen_enable_search,
                 )
+                cls._llm_client.provider = "qwen"
+            elif settings.llm_provider == "zhipu":
+                from services.llm.zhipu_client import ZhipuClient
+
+                cls._llm_client = ZhipuClient(
+                    api_key=settings.zhipu_api_key,
+                    model=settings.zhipu_model,
+                    enable_web_search=settings.zhipu_enable_web_search,
+                )
+                cls._llm_client.provider = "zhipu"
             else:
                 raise ValueError(f"不支持的LLM提供商: {settings.llm_provider}")
         return cls._llm_client
 
     @classmethod
     def _llm_label(cls, llm: BaseLLMClient) -> str:
-        provider = settings.llm_provider
+        provider = getattr(llm, "provider", None) or settings.llm_provider
         model = getattr(llm, "model", None) or getattr(llm, "model_name", None) or "unknown"
         return f"{provider}/{model}"
 
@@ -94,27 +116,61 @@ class AdvisorService:
             flush=True,
         )
 
+    @staticmethod
+    def _log_search_usage(llm: BaseLLMClient, context: str) -> None:
+        llm.log_search_usage(context=context)
+
     @classmethod
-    async def chat_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> str:
-        cls._log_llm_prompt(llm, prompt, context)
+    def _parse_json_response_text(cls, llm: BaseLLMClient, response_text: str) -> dict:
+        parser = getattr(llm, "_parse_json", None)
+        if callable(parser):
+            return parser(response_text)
+
+        text = response_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
         try:
-            result = await llm.chat(prompt)
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start != -1 and end > start:
+                return json.loads(text[start:end])
+            return {"error": "No JSON found", "raw": response_text}
+        except json.JSONDecodeError:
+            return {"error": "JSON decode failed", "raw": response_text}
+
+    @classmethod
+    async def collect_stream_text_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> str:
+        cls._log_llm_prompt(llm, prompt, context)
+        chunks: list[str] = []
+        try:
+            async for chunk in llm.chat_stream(prompt):
+                chunks.append(chunk)
+            result = "".join(chunks)
             cls._log_llm_result(llm, result, context)
+            cls._log_search_usage(llm, context)
             return result
         except Exception as e:
+            partial = "".join(chunks)
+            if partial:
+                cls._log_llm_result(llm, f"[partial stream before error]\n{partial}", context)
+            cls._log_search_usage(llm, context)
             cls._log_llm_error(llm, e, context)
             raise
 
     @classmethod
+    async def chat_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> str:
+        return await cls.collect_stream_text_with_logging(llm, prompt, context)
+
+    @classmethod
     async def chat_json_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str) -> dict:
-        cls._log_llm_prompt(llm, prompt, context)
-        try:
-            result = await llm.chat_json(prompt)
-            cls._log_llm_result(llm, result, context)
-            return result
-        except Exception as e:
-            cls._log_llm_error(llm, e, context)
-            raise
+        response_text = await cls.collect_stream_text_with_logging(llm, prompt, context)
+        return cls._parse_json_response_text(llm, response_text)
 
     @classmethod
     async def chat_stream_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str):
@@ -125,12 +181,147 @@ class AdvisorService:
                 chunks.append(chunk)
                 yield chunk
             cls._log_llm_result(llm, "".join(chunks), context)
+            cls._log_search_usage(llm, context)
         except Exception as e:
             partial = "".join(chunks)
             if partial:
                 cls._log_llm_result(llm, f"[partial stream before error]\n{partial}", context)
+            cls._log_search_usage(llm, context)
             cls._log_llm_error(llm, e, context)
             raise
+
+    @classmethod
+    def _parse_tavily_tool_calls(cls, payload: dict, max_calls: int) -> list[dict]:
+        raw_calls = payload.get("tool_calls") or payload.get("calls") or []
+        if not isinstance(raw_calls, list):
+            return []
+
+        calls: list[dict] = []
+        seen_queries: set[str] = set()
+        for item in raw_calls:
+            if not isinstance(item, dict):
+                continue
+
+            name = item.get("name") or item.get("tool") or item.get("function")
+            arguments = item.get("arguments") or item.get("args") or item
+            if name and name != "tavily_search":
+                continue
+            if not isinstance(arguments, dict):
+                continue
+
+            query = " ".join(str(arguments.get("query") or "").split())
+            if not query or query in seen_queries:
+                continue
+
+            calls.append({
+                "query": query[:240],
+                "topic": arguments.get("topic"),
+                "time_range": arguments.get("time_range"),
+                "max_results": arguments.get("max_results"),
+            })
+            seen_queries.add(query)
+            if len(calls) >= max_calls:
+                break
+
+        return calls
+
+    @classmethod
+    async def enrich_prompt_with_tavily_tools(
+        cls,
+        llm: BaseLLMClient,
+        prompt: str,
+        *,
+        context: str,
+        max_calls: int = 2,
+    ) -> str:
+        """Let the model decide whether to call Tavily, then append tool results."""
+        if not TavilySearchService.is_enabled():
+            print(
+                f"[Tavily] {context}: disabled "
+                f"(enabled={settings.tavily_enabled}, key_set={bool(settings.tavily_api_key.strip())})",
+                flush=True,
+            )
+            print(
+                f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': False, 'search_used': False, 'search_queries': [], 'search_result_count': 0, 'detail': 'disabled'}, ensure_ascii=False)}",
+                flush=True,
+            )
+            return prompt
+
+        planning_prompt = f"""你是后端工具调用规划器。请判断下面的任务是否需要调用 Tavily 联网搜索工具。
+
+可用工具:
+- tavily_search(query, topic, time_range, max_results)
+
+调用规则:
+1. 只有当最新新闻、政策、宏观或市场事件会影响答案时才调用工具
+2. 最多调用 {max_calls} 次 tavily_search
+3. query 必须具体，包含 ETF 名称/代码、行业方向、市场或宏观变量之一
+4. topic 只能是 "finance" / "news" / "general"，ETF和投资问题优先 finance
+5. time_range 优先 "week"
+6. max_results 取 3 到 5
+7. 如果不需要搜索，返回空数组
+
+请只输出 JSON，不要添加解释:
+{{"tool_calls":[{{"name":"tavily_search","arguments":{{"query":"...","topic":"finance","time_range":"week","max_results":5}}}}]}}
+
+原始任务:
+{prompt[:12000]}"""
+
+        try:
+            plan = await cls.chat_json_with_logging(
+                llm,
+                planning_prompt,
+                context=f"tavily_tool_plan:{context}",
+            )
+        except Exception as exc:
+            print(f"[Tavily] 工具规划失败，跳过搜索: {exc}", flush=True)
+            print(
+                f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': True, 'search_used': None, 'search_queries': [], 'search_result_count': 0, 'detail': f'planning_failed: {exc}'}, ensure_ascii=False)}",
+                flush=True,
+            )
+            return prompt
+
+        calls = cls._parse_tavily_tool_calls(plan, max_calls=max_calls)
+        if not calls:
+            print(f"[Tavily] {context}: 模型决定不调用 Tavily", flush=True)
+            print(
+                f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': True, 'search_used': False, 'search_queries': [], 'search_result_count': 0, 'detail': 'model_skipped'}, ensure_ascii=False)}",
+                flush=True,
+            )
+            return prompt
+
+        responses = []
+        for call in calls:
+            response = await TavilySearchService.search(
+                call["query"],
+                topic=call.get("topic"),
+                time_range=call.get("time_range"),
+                max_results=call.get("max_results"),
+            )
+            responses.append(response)
+            if response.error:
+                print(f"[Tavily] {context}: 搜索失败 query={call['query']}, error={response.error}", flush=True)
+            else:
+                print(f"[Tavily] {context}: 搜索完成 query={call['query']}, results={len(response.results)}", flush=True)
+
+        total_results = sum(len(response.results) for response in responses)
+        print(
+            f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': True, 'search_used': True, 'search_queries': [call['query'] for call in calls], 'search_result_count': total_results, 'detail': None}, ensure_ascii=False)}",
+            flush=True,
+        )
+
+        tool_context = TavilySearchService.format_for_prompt(responses)
+        if not tool_context:
+            return prompt
+
+        return (
+            f"{prompt}\n\n"
+            "## Tavily 工具搜索结果\n"
+            "以下内容是后端根据模型工具调用请求执行 tavily_search 得到的联网搜索结果。"
+            "请优先使用这些结果作为新闻、政策、宏观与事件依据；引用时必须判断相关性、时效性和是否可能已定价。"
+            "如果工具结果为空、报错或相关性弱，不要编造搜索依据。\n\n"
+            f"{tool_context}"
+        )
     
     @staticmethod
     def build_prompt(
@@ -647,14 +838,33 @@ class AdvisorService:
         """获取北京时间"""
         return datetime.now(cls.SHANGHAI_TZ)
 
+    @staticmethod
+    def now_in_utc_naive() -> datetime:
+        """获取用于写入无时区数据库列的 UTC naive 时间"""
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
     @classmethod
     def ensure_shanghai_datetime(cls, value: Optional[datetime]) -> datetime:
         """将时间统一为北京时间"""
         if value is None:
             return cls.now_in_shanghai()
         if value.tzinfo is None:
-            return value.replace(tzinfo=ZoneInfo("UTC")).astimezone(cls.SHANGHAI_TZ)
+            return value.replace(tzinfo=timezone.utc).astimezone(cls.SHANGHAI_TZ)
         return value.astimezone(cls.SHANGHAI_TZ)
+
+    @classmethod
+    def build_advice_log_response(
+        cls,
+        log: AdviceLog,
+        etf_name: Optional[str] = None,
+    ) -> AdviceLogResponse:
+        """将持久化的建议日志转换为前端可直接展示的响应"""
+        payload = {c.key: getattr(log, c.key) for c in AdviceLog.__table__.columns}
+        payload["created_at"] = cls.ensure_shanghai_datetime(log.created_at)
+        return AdviceLogResponse(
+            **payload,
+            etf_name=etf_name,
+        )
 
     @classmethod
     def parse_account_analysis_reason(
@@ -759,6 +969,12 @@ class AdvisorService:
             kline_summary=kline_summary,
             indicators=indicators_dict,
         )
+        prompt = await cls.enrich_prompt_with_tavily_tools(
+            llm,
+            prompt,
+            context=f"portfolio_advice:{p.etf_code}:{analysis_mode}",
+            max_calls=2,
+        )
 
         try:
             result_json = await cls.chat_json_with_logging(
@@ -824,6 +1040,7 @@ class AdvisorService:
             "medium_term": medium_term,
             "long_term": long_term,
             "pnl_pct": pnl_pct,
+            "created_at": cls.now_in_shanghai(),
         }
     
     @classmethod
@@ -883,6 +1100,7 @@ class AdvisorService:
                 confidence=payload["confidence"],
                 llm_provider=settings.llm_provider,
                 llm_model=llm.model if hasattr(llm, 'model') else None,
+                created_at=cls.now_in_utc_naive(),
             )
             session.add(log)
 
@@ -904,6 +1122,7 @@ class AdvisorService:
                 long_term=payload["long_term"],
                 current_price=quote.price,
                 pnl_pct=payload["pnl_pct"],
+                created_at=payload["created_at"],
             ))
         
         await session.flush()
@@ -949,6 +1168,7 @@ class AdvisorService:
             confidence=payload["confidence"],
             llm_provider=settings.llm_provider,
             llm_model=llm.model if hasattr(llm, 'model') else None,
+            created_at=cls.now_in_utc_naive(),
         )
         session.add(log)
         await session.flush()
@@ -971,6 +1191,7 @@ class AdvisorService:
             long_term=payload["long_term"],
             current_price=quote.price,
             pnl_pct=payload["pnl_pct"],
+            created_at=payload["created_at"],
         )
     
     @classmethod
@@ -1015,8 +1236,8 @@ class AdvisorService:
                 print(f"[AdvisorService] 从行情获取ETF名称失败: {e}")
         
         return [
-            AdviceLogResponse(
-                **{c.key: getattr(log, c.key) for c in AdviceLog.__table__.columns},
+            cls.build_advice_log_response(
+                log,
                 etf_name=(
                     cls.ACCOUNT_ANALYSIS_NAME
                     if log.etf_code == cls.ACCOUNT_ANALYSIS_CODE
@@ -1060,6 +1281,7 @@ class AdvisorService:
                 confidence=Decimal(str(analysis.confidence)),
                 llm_provider=settings.llm_provider,
                 llm_model=None,
+                created_at=cls.now_in_utc_naive(),
             ))
             await session.flush()
             return analysis
@@ -1086,6 +1308,12 @@ class AdvisorService:
         )
 
         llm = cls.get_llm_client()
+        prompt = await cls.enrich_prompt_with_tavily_tools(
+            llm,
+            prompt,
+            context=f"account_analysis:{analysis_mode}",
+            max_calls=3,
+        )
         try:
             result_json = await cls.chat_json_with_logging(
                 llm,
@@ -1113,6 +1341,7 @@ class AdvisorService:
                 confidence=Decimal(str(analysis.confidence)),
                 llm_provider=settings.llm_provider,
                 llm_model=llm.model if hasattr(llm, 'model') else None,
+                created_at=cls.now_in_utc_naive(),
             ))
             await session.flush()
             return analysis
@@ -1134,6 +1363,7 @@ class AdvisorService:
                 confidence=Decimal("0"),
                 llm_provider=settings.llm_provider,
                 llm_model=llm.model if hasattr(llm, 'model') else None,
+                created_at=cls.now_in_utc_naive(),
             ))
             await session.flush()
             return analysis

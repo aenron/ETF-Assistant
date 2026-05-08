@@ -1,9 +1,11 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
+
+from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
 
-class BarkNotificationConfigUpdate(BaseModel):
+class BarkNotificationConfigUpdate(ShanghaiBaseModel):
     enabled: bool = False
     device_key: str = Field(default="", max_length=255)
     base_url: str = Field(default="https://api.day.app", max_length=255)
@@ -20,7 +22,7 @@ class BarkNotificationConfigUpdate(BaseModel):
         return normalized.rstrip("/")
 
 
-class TelegramNotificationConfigUpdate(BaseModel):
+class TelegramNotificationConfigUpdate(ShanghaiBaseModel):
     enabled: bool = False
     bot_token: str = Field(default="", max_length=255)
     chat_id: str = Field(default="", max_length=255)
@@ -38,7 +40,7 @@ class TelegramNotificationConfigUpdate(BaseModel):
         return normalized.rstrip("/")
 
 
-class NotificationConfigResponse(BaseModel):
+class NotificationConfigResponse(ShanghaiOrmModel):
     id: int | None = None
     provider: str
     enabled: bool
@@ -53,11 +55,11 @@ class NotificationConfigResponse(BaseModel):
     updated_at: datetime | None = None
 
 
-class NotificationConfigListResponse(BaseModel):
+class NotificationConfigListResponse(ShanghaiBaseModel):
     configs: list[NotificationConfigResponse]
 
 
-class NotificationTestResponse(BaseModel):
+class NotificationTestResponse(ShanghaiBaseModel):
     success: bool
     message: str
     config: NotificationConfigResponse

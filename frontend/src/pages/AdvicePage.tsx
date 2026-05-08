@@ -16,6 +16,7 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { AdviceEventContextPanel, parseEventContextFromReason } from '@/components/AdviceEventContextPanel'
+import { formatBeijingTime } from '@/utils/time'
 
 const adviceTypeConfig: Record<string, { label: string; color: string; bgColor: string; icon: typeof TrendingUp }> = {
   buy: { label: '买入', color: 'text-red-600', bgColor: 'bg-red-50 border-red-200', icon: TrendingUp },
@@ -63,13 +64,6 @@ function ConfidenceBar({ value }: { value: number }) {
       <span className="font-mono text-xs text-muted-foreground">{value?.toFixed(0)}%</span>
     </div>
   )
-}
-
-function formatBeijingTime(value: string) {
-  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
-    ? value
-    : `${value.replace(' ', 'T')}Z`
-  return new Date(normalized).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
 }
 
 function splitItems(value: string) {

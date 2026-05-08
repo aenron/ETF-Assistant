@@ -1,16 +1,16 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-
-class DecimalModel(BaseModel):
-    model_config = ConfigDict(
-        json_encoders={Decimal: lambda v: float(v)},
-    )
+from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
 
-class PortfolioBase(BaseModel):
+class DecimalModel(ShanghaiBaseModel):
+    pass
+
+
+class PortfolioBase(ShanghaiBaseModel):
     etf_code: str
     shares: float
     cost_price: float
@@ -22,20 +22,17 @@ class PortfolioCreate(PortfolioBase):
     pass
 
 
-class PortfolioUpdate(BaseModel):
+class PortfolioUpdate(ShanghaiBaseModel):
     shares: Optional[float] = None
     cost_price: Optional[float] = None
     buy_date: Optional[date] = None
     note: Optional[str] = None
 
 
-class PortfolioResponse(PortfolioBase):
+class PortfolioResponse(PortfolioBase, ShanghaiOrmModel):
     id: int
     created_at: datetime
     updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
 
 class PortfolioWithMarket(PortfolioResponse):
     """持仓信息 + 实时行情"""
@@ -46,10 +43,12 @@ class PortfolioWithMarket(PortfolioResponse):
     market_value: Optional[float] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    today_pnl: Optional[float] = None
+    today_pnl_pct: Optional[float] = None
     holding_days: Optional[int] = None
 
 
-class PortfolioSummary(BaseModel):
+class PortfolioSummary(ShanghaiBaseModel):
     """持仓汇总"""
     total_market_value: float
     total_cost: float

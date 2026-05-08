@@ -63,6 +63,8 @@ export interface PortfolioWithMarket {
   market_value: number | null
   pnl: number | null
   pnl_pct: number | null
+  today_pnl: number | null
+  today_pnl_pct: number | null
   holding_days: number | null
 }
 
@@ -133,6 +135,7 @@ export interface AdviceResponse {
   long_term: PeriodAdvice
   current_price: number | null
   pnl_pct: number | null
+  created_at: string
 }
 
 export interface PeriodAdvice {
@@ -233,6 +236,104 @@ export interface AssistantChatResponse {
 
 export interface AssistantSessionListResponse {
   sessions: AssistantSession[]
+}
+
+export type MultiAgentScene = 'etf' | 'account' | 'general'
+
+export interface MultiAgentRunCreate {
+  scene: MultiAgentScene
+  question?: string | null
+  use_portfolio_context?: boolean
+  max_debate_rounds?: number
+  collapse_debate_by_default?: boolean
+}
+
+export interface MultiAgentContextSummary {
+  scenario: MultiAgentScene
+  title: string
+  question?: string | null
+  bullets: string[]
+  metrics: Record<string, string>
+}
+
+export interface MultiAgentRoleOpinion {
+  round_index: number
+  role_id: string
+  role_name: string
+  stance: 'bullish' | 'neutral' | 'bearish' | 'mixed'
+  action?: string
+  summary: string
+  evidence: string[]
+  risk_notes: string[]
+  confidence: number
+  rebuttals?: string[]
+}
+
+export interface MultiAgentDebateRound {
+  round_index: number
+  role_opinions: MultiAgentRoleOpinion[]
+  round_summary: string
+  open_disagreements: string[]
+  convergence_state: 'forming' | 'contested' | 'converged' | 'max_rounds' | 'failed'
+  arbiter_summary?: MultiAgentArbiterSummary | null
+}
+
+export interface MultiAgentArbiterSummary {
+  round_index: number
+  consensus_reached: boolean
+  why_stop: string
+  strong_opposition: string[]
+  confidence: number
+  final_recommendation: string
+  recommended_action?: string
+  conclusion: string
+  supporting_roles: string[]
+  disagreements: string[]
+  risk_notes: string[]
+  convergence_state: 'forming' | 'contested' | 'converged' | 'max_rounds' | 'failed'
+}
+
+export interface MultiAgentSearchMetadata {
+  provider: string
+  enabled: boolean
+  query: string
+  answer?: string | null
+  result_count: number
+  error?: string | null
+  results: Array<Record<string, unknown>>
+}
+
+export interface MultiAgentFinalConclusion {
+  recommended_action: string
+  action?: string
+  conclusion: string
+  confidence: number
+  supporting_roles: string[]
+  disagreements: string[]
+  risk_notes: string[]
+}
+
+export interface MultiAgentRunResponse {
+  run_id: number
+  scene: MultiAgentScene
+  question?: string | null
+  use_portfolio_context?: boolean
+  max_debate_rounds: number
+  collapse_debate_by_default: boolean
+  llm_provider: string
+  created_at: string
+  context_summary: MultiAgentContextSummary
+  initial_role_opinions: MultiAgentRoleOpinion[]
+  role_opinions: MultiAgentRoleOpinion[]
+  debate_rounds: MultiAgentDebateRound[]
+  search_metadata: MultiAgentSearchMetadata[]
+  arbiter_summary: MultiAgentArbiterSummary | null
+  final_conclusion: MultiAgentFinalConclusion
+  status: 'running' | 'success' | 'partial' | 'failed'
+}
+
+export interface MultiAgentRunListResponse {
+  runs: MultiAgentRunResponse[]
 }
 
 export interface NotificationConfigResponse {
@@ -344,16 +445,25 @@ export const assistantApi = {
   listSessions: () => api.get<AssistantSessionListResponse>('/assistant/sessions'),
   createSession: (title?: string) => api.post<AssistantSession>('/assistant/sessions', { title }),
   getHistory: (sessionId?: number) => api.get<AssistantHistoryResponse>('/assistant/history', { params: { session_id: sessionId } }),
-  chat: (message: string, sessionId?: number) => api.post<AssistantChatResponse>('/assistant/chat', { message, session_id: sessionId }),
+  chat: (message: string, sessionId?: number, includePortfolioContext = true) => api.post<AssistantChatResponse>('/assistant/chat', {
+    message,
+    session_id: sessionId,
+    include_portfolio_context: includePortfolioContext,
+  }),
   deleteSession: (sessionId: number) => api.delete(`/assistant/sessions/${sessionId}`),
-  streamChat: async (message: string, sessionId?: number, retryMessageId?: number) =>
+  streamChat: async (message: string, sessionId?: number, retryMessageId?: number, includePortfolioContext = true) =>
     fetch('/api/assistant/chat/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
       },
-      body: JSON.stringify({ message, session_id: sessionId, retry_message_id: retryMessageId }),
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+        retry_message_id: retryMessageId,
+        include_portfolio_context: includePortfolioContext,
+      }),
     }),
 }
 
@@ -375,4 +485,10 @@ export const schedulerApi = {
   runJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/run`),
   pauseJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/pause`),
   resumeJob: (jobId: string) => api.post<SchedulerActionResponse>(`/admin/scheduler/jobs/${jobId}/resume`),
+}
+
+export const multiAgentApi = {
+  createRun: (data: MultiAgentRunCreate) => api.post<MultiAgentRunResponse>('/multi-agent/runs', data),
+  listRuns: () => api.get<MultiAgentRunListResponse>('/multi-agent/runs'),
+  getRun: (runId: number) => api.get<MultiAgentRunResponse>(`/multi-agent/runs/${runId}`),
 }

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     redis_enabled: bool = True
     
     # LLM 配置
-    llm_provider: Literal["openai", "deepseek", "gemini", "qwen"] = "deepseek"
+    llm_provider: Literal["openai", "deepseek", "gemini", "qwen", "zhipu"] = "deepseek"
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = "deepseek-chat"
@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     qwen_api_key: str = ""
     qwen_model: str = "qwen-plus"
     qwen_enable_search: bool = True
+
+    # 智谱配置
+    zhipu_api_key: str = ""
+    zhipu_model: str = "glm-4.5-air"
+    zhipu_enable_web_search: bool = True
+
+    # Tavily 联网搜索配置
+    tavily_api_key: str = ""
+    tavily_enabled: bool = False
+    tavily_search_depth: Literal["advanced", "basic", "fast", "ultra-fast"] = "basic"
+    tavily_topic: Literal["general", "news", "finance"] = "news"
+    tavily_time_range: str = "week"
+    tavily_max_results: int = 5
+    tavily_timeout_seconds: float = 12.0
     
     # Bark 推送配置
     bark_key: str = ""

@@ -8,10 +8,7 @@ import {
   type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse
 } from '@/services/api'
 import { AdviceEventContextPanel, parseEventContextFromReason } from '@/components/AdviceEventContextPanel'
-import {
-  ResponsiveContainer, ComposedChart, Line, Bar, XAxis, YAxis,
-  CartesianGrid, Tooltip, Area, ReferenceLine
-} from 'recharts'
+import { formatBeijingTime } from '@/utils/time'
 
 interface EtfDetailModalProps {
   portfolio: PortfolioWithMarket
@@ -175,6 +172,185 @@ function LegacyAdviceContent({ reason }: { reason: string | null }) {
   )
 }
 
+type CandlePoint = {
+  date: string
+  fullDate: string
+  open: number
+  close: number
+  high: number
+  low: number
+  volume: number
+  change: number
+}
+
+function formatAxisValue(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-'
+  }
+  return value.toFixed(3)
+}
+
+function formatVolumeLabel(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0'
+  }
+  if (value >= 100000000) {
+    return `${(value / 100000000).toFixed(2)}亿`
+  }
+  if (value >= 10000) {
+    return `${(value / 10000).toFixed(0)}万`
+  }
+  return value.toFixed(0)
+}
+
+function CandlestickChart({
+  data,
+  costPrice,
+}: {
+  data: CandlePoint[]
+  costPrice?: number | null
+}) {
+  const width = 960
+  const height = 320
+  const padding = { top: 16, right: 56, bottom: 26, left: 56 }
+  const volumeHeight = 72
+  const volumeGap = 14
+  const priceHeight = height - padding.top - padding.bottom - volumeHeight - volumeGap
+  const priceBottom = padding.top + priceHeight
+  const volumeTop = priceBottom + volumeGap
+  const chartWidth = width - padding.left - padding.right
+  const candleStep = chartWidth / Math.max(data.length, 1)
+  const candleWidth = Math.max(4, Math.min(12, candleStep * 0.58))
+  const validPrices = data.flatMap((item) => [item.high, item.low])
+  const baseMin = Math.min(...validPrices)
+  const baseMax = Math.max(...validPrices)
+  const includeCostLine = costPrice != null && costPrice > 0
+  const spread = Math.max(baseMax - baseMin, baseMax * 0.02, 0.01)
+  const priceMin = Math.max(0, Math.min(baseMin, includeCostLine ? costPrice : baseMin) - spread * 0.08)
+  const priceMax = Math.max(baseMax, includeCostLine ? costPrice : baseMax) + spread * 0.08
+  const volumeMax = Math.max(...data.map((item) => item.volume), 1)
+  const priceTicks = Array.from({ length: 5 }, (_, index) => priceMin + ((priceMax - priceMin) / 4) * index)
+  const xTickIndexes = Array.from(
+    new Set([0, Math.floor(data.length * 0.25), Math.floor(data.length * 0.5), Math.floor(data.length * 0.75), data.length - 1].filter((index) => index >= 0 && index < data.length))
+  )
+
+  const getX = (index: number) => padding.left + candleStep * index + candleStep / 2
+  const getPriceY = (value: number) => priceBottom - ((value - priceMin) / Math.max(priceMax - priceMin, 0.0001)) * priceHeight
+  const getVolumeY = (value: number) => volumeTop + volumeHeight - (value / volumeMax) * volumeHeight
+  const costY = includeCostLine ? getPriceY(costPrice) : null
+
+  return (
+    <div className="h-80 rounded-lg border bg-background/40 p-2">
+      <div className="mb-2 flex items-center justify-between px-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-3">
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+            阳线
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
+            阴线
+          </span>
+          {includeCostLine ? (
+            <span className="inline-flex items-center gap-1">
+              <span className="h-0.5 w-4 bg-amber-500" />
+              成本线
+            </span>
+          ) : null}
+        </div>
+        <span>上方为价格，下方为成交量</span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-[calc(100%-24px)] w-full">
+        {priceTicks.map((tick) => {
+          const y = getPriceY(tick)
+          return (
+            <g key={`price-tick-${tick}`}>
+              <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} stroke="currentColor" strokeOpacity="0.12" />
+              <text x={padding.left - 10} y={y + 4} textAnchor="end" fontSize="11" fill="currentColor" opacity="0.6">
+                {formatAxisValue(tick)}
+              </text>
+            </g>
+          )
+        })}
+
+        <line x1={padding.left} x2={width - padding.right} y1={priceBottom} y2={priceBottom} stroke="currentColor" strokeOpacity="0.2" />
+        <line x1={padding.left} x2={width - padding.right} y1={volumeTop} y2={volumeTop} stroke="currentColor" strokeOpacity="0.16" />
+        <text x={padding.left - 10} y={volumeTop + 4} textAnchor="end" fontSize="11" fill="currentColor" opacity="0.6">
+          {formatVolumeLabel(volumeMax)}
+        </text>
+        <text x={padding.left - 10} y={volumeTop + volumeHeight + 4} textAnchor="end" fontSize="11" fill="currentColor" opacity="0.4">
+          0
+        </text>
+
+        {costY != null ? (
+          <g>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={costY}
+              y2={costY}
+              stroke="#f59e0b"
+              strokeWidth="1.2"
+              strokeDasharray="5 4"
+            />
+            <text x={width - padding.right + 6} y={costY + 4} fontSize="11" fill="#f59e0b">
+              成本 {costPrice?.toFixed(3)}
+            </text>
+          </g>
+        ) : null}
+
+        {data.map((item, index) => {
+          const x = getX(index)
+          const wickTop = getPriceY(item.high)
+          const wickBottom = getPriceY(item.low)
+          const openY = getPriceY(item.open)
+          const closeY = getPriceY(item.close)
+          const bodyTop = Math.min(openY, closeY)
+          const bodyHeight = Math.max(Math.abs(closeY - openY), 1.5)
+          const bodyY = bodyHeight <= 1.5 ? bodyTop - 0.75 : bodyTop
+          const isUp = item.close >= item.open
+          const candleColor = isUp ? '#ef4444' : '#10b981'
+          const volumeY = getVolumeY(item.volume)
+          const volumeHeightValue = volumeTop + volumeHeight - volumeY
+          return (
+            <g key={item.fullDate}>
+              <line x1={x} x2={x} y1={wickTop} y2={wickBottom} stroke={candleColor} strokeWidth="1.2" />
+              <rect
+                x={x - candleWidth / 2}
+                y={bodyY}
+                width={candleWidth}
+                height={bodyHeight}
+                rx="1"
+                fill={candleColor}
+                fillOpacity={isUp ? 0.88 : 0.82}
+              />
+              <rect
+                x={x - candleWidth / 2}
+                y={volumeY}
+                width={candleWidth}
+                height={Math.max(volumeHeightValue, 1)}
+                rx="1"
+                fill={candleColor}
+                fillOpacity="0.24"
+              />
+              {xTickIndexes.includes(index) ? (
+                <text x={x} y={height - 6} textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">
+                  {item.date}
+                </text>
+              ) : null}
+              <title>
+                {`${item.fullDate}
+开 ${item.open.toFixed(3)} / 高 ${item.high.toFixed(3)} / 低 ${item.low.toFixed(3)} / 收 ${item.close.toFixed(3)}
+涨跌 ${item.change >= 0 ? '+' : ''}${item.change.toFixed(2)}% / 量 ${formatVolumeLabel(item.volume)}`}
+              </title>
+            </g>
+          )
+        })}
+      </svg>
+    </div>
+  )
+}
+
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice'>('chart')
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
@@ -237,6 +413,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   // K线图数据
   const chartData = klines.map(k => ({
     date: k.trade_date.slice(5), // MM-DD
+    fullDate: k.trade_date,
     open: k.open_price,
     close: k.close_price,
     high: k.high_price,
@@ -248,7 +425,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const displayAdvice = advice || latestAdvice
   const displayConfig = displayAdvice ? (adviceTypeConfig[displayAdvice.advice_type || 'hold'] || adviceTypeConfig.hold) : null
   const displayConfidence = displayAdvice ? (displayAdvice.confidence || 0) : 0
-  const displayTime = advice ? null : (latestAdvice?.created_at || null)
+  const displayTime = displayAdvice?.created_at || null
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -347,33 +524,8 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                       加载中...
                     </div>
                   ) : chartData.length > 0 ? (
-                    <div className="h-64">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <ComposedChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
-                          <XAxis dataKey="date" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
-                          <YAxis
-                            yAxisId="price"
-                            domain={['auto', 'auto']}
-                            tick={{ fontSize: 11 }}
-                            width={55}
-                          />
-                          <YAxis yAxisId="volume" orientation="right" hide />
-                          <Tooltip
-                            contentStyle={{ fontSize: 12 }}
-                            formatter={(value: number, name: string) => {
-                              const labels: Record<string, string> = { close: '收盘', open: '开盘', high: '最高', low: '最低' }
-                              return [value.toFixed(3), labels[name] || name]
-                            }}
-                          />
-                          <Bar yAxisId="volume" dataKey="volume" fill="#e0e7ff" opacity={0.5} />
-                          <Area yAxisId="price" type="monotone" dataKey="low" stroke="none" fill="#dcfce7" opacity={0.3} />
-                          <Line yAxisId="price" type="monotone" dataKey="close" stroke="#2563eb" strokeWidth={1.5} dot={false} />
-                          {p.cost_price > 0 && (
-                            <ReferenceLine yAxisId="price" y={p.cost_price} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: `成本 ${p.cost_price.toFixed(3)}`, position: 'right', fontSize: 10, fill: '#f59e0b' }} />
-                          )}
-                        </ComposedChart>
-                      </ResponsiveContainer>
+                    <div className="h-80">
+                      <CandlestickChart data={chartData} costPrice={p.cost_price} />
                     </div>
                   ) : (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
@@ -581,10 +733,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                     <div className="flex items-center gap-1.5 pt-2 border-t border-border/50">
                       <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                       <span className="text-xs text-muted-foreground">
-                        决策时间: {displayTime
-                          ? new Date(displayTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-                          : new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-                        }
+                        决策时间: {formatBeijingTime(displayTime)}
                       </span>
                     </div>
                   </CardContent>

@@ -1,24 +1,27 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
+
+from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
 
-class AssistantMessageCreate(BaseModel):
+class AssistantMessageCreate(ShanghaiBaseModel):
     """发送给助手的消息"""
 
     message: str = Field(min_length=1, max_length=4000)
     session_id: Optional[int] = None
     retry_message_id: Optional[int] = None
+    include_portfolio_context: bool = True
 
 
-class AssistantSessionCreate(BaseModel):
+class AssistantSessionCreate(ShanghaiBaseModel):
     """创建助手会话"""
 
     title: Optional[str] = Field(default=None, max_length=120)
 
 
-class AssistantSessionResponse(BaseModel):
+class AssistantSessionResponse(ShanghaiOrmModel):
     """助手会话响应"""
 
     id: int
@@ -27,10 +30,7 @@ class AssistantSessionResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
-
-
-class AssistantMessageResponse(BaseModel):
+class AssistantMessageResponse(ShanghaiOrmModel):
     """助手消息响应"""
 
     id: int
@@ -38,10 +38,7 @@ class AssistantMessageResponse(BaseModel):
     content: str
     created_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
-
-
-class AssistantChatResponse(BaseModel):
+class AssistantChatResponse(ShanghaiBaseModel):
     """助手聊天响应"""
 
     session: AssistantSessionResponse
@@ -49,14 +46,14 @@ class AssistantChatResponse(BaseModel):
     assistant_message: AssistantMessageResponse
 
 
-class AssistantHistoryResponse(BaseModel):
+class AssistantHistoryResponse(ShanghaiBaseModel):
     """助手历史消息"""
 
     session: AssistantSessionResponse
     messages: List[AssistantMessageResponse]
 
 
-class AssistantSessionListResponse(BaseModel):
+class AssistantSessionListResponse(ShanghaiBaseModel):
     """助手会话列表"""
 
     sessions: List[AssistantSessionResponse]

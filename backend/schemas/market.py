@@ -1,10 +1,12 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, List
 
+from schemas.base import ShanghaiBaseModel
 
-class MarketQuote(BaseModel):
+
+class MarketQuote(ShanghaiBaseModel):
     """实时行情"""
     code: str
     name: str
@@ -18,7 +20,7 @@ class MarketQuote(BaseModel):
     refreshed_at: Optional[datetime] = None
 
 
-class KLineItem(BaseModel):
+class KLineItem(ShanghaiBaseModel):
     """K线数据项"""
     trade_date: date
     open_price: float
@@ -29,7 +31,7 @@ class KLineItem(BaseModel):
     change_pct: float
 
 
-class TechnicalIndicators(BaseModel):
+class TechnicalIndicators(ShanghaiBaseModel):
     """技术指标"""
     ma5: Optional[float] = None
     ma10: Optional[float] = None
@@ -40,7 +42,7 @@ class TechnicalIndicators(BaseModel):
     macd_histogram: Optional[float] = None
 
 
-class MarketDailyResponse(BaseModel):
+class MarketDailyResponse(ShanghaiBaseModel):
     """历史行情响应"""
     code: str
     name: str
@@ -48,7 +50,7 @@ class MarketDailyResponse(BaseModel):
     indicators: Optional[TechnicalIndicators] = None
 
 
-class EtfSearchResult(BaseModel):
+class EtfSearchResult(ShanghaiBaseModel):
     """ETF搜索结果"""
     code: str
     name: str

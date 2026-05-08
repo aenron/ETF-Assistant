@@ -28,37 +28,61 @@ class LLMConfigResponse(BaseModel):
     providers: List[LLMProvider]
 
 
-# 支持的LLM提供商
-PROVIDERS = {
-    "openai": LLMProvider(
-        id="openai",
-        name="OpenAI GPT",
-        description="OpenAI GPT系列模型",
-        enabled=bool(settings.openai_api_key),
-        supports_search=False,
-    ),
-    "deepseek": LLMProvider(
-        id="deepseek",
-        name="DeepSeek",
-        description="DeepSeek深度求索大模型",
-        enabled=bool(settings.deepseek_api_key),
-        supports_search=False,
-    ),
-    "qwen": LLMProvider(
-        id="qwen",
-        name="通义千问",
-        description="阿里云通义千问大模型，支持网络搜索",
-        enabled=bool(settings.qwen_api_key),
-        supports_search=True,
-    ),
-    "gemini": LLMProvider(
-        id="gemini",
-        name="Google Gemini",
-        description="Google Gemini模型，支持Google搜索",
-        enabled=bool(settings.gemini_api_key),
-        supports_search=True,
-    ),
-}
+def tavily_search_enabled() -> bool:
+    return bool(settings.tavily_enabled and settings.tavily_api_key.strip())
+
+
+def provider_supports_search(provider: str) -> bool:
+    if tavily_search_enabled():
+        return True
+    if provider == "gemini":
+        return settings.gemini_enable_grounding
+    if provider == "qwen":
+        return settings.qwen_enable_search
+    if provider == "zhipu":
+        return settings.zhipu_enable_web_search
+    return False
+
+
+def build_providers() -> dict[str, LLMProvider]:
+    tavily_suffix = "；已配置 Tavily 工具搜索" if tavily_search_enabled() else ""
+    return {
+        "openai": LLMProvider(
+            id="openai",
+            name="OpenAI GPT",
+            description=f"OpenAI GPT系列模型{tavily_suffix}",
+            enabled=bool(settings.openai_api_key),
+            supports_search=provider_supports_search("openai"),
+        ),
+        "deepseek": LLMProvider(
+            id="deepseek",
+            name="DeepSeek",
+            description=f"DeepSeek深度求索大模型{tavily_suffix}",
+            enabled=bool(settings.deepseek_api_key),
+            supports_search=provider_supports_search("deepseek"),
+        ),
+        "qwen": LLMProvider(
+            id="qwen",
+            name="通义千问",
+            description=f"阿里云通义千问大模型，支持网络搜索{tavily_suffix}",
+            enabled=bool(settings.qwen_api_key),
+            supports_search=provider_supports_search("qwen"),
+        ),
+        "gemini": LLMProvider(
+            id="gemini",
+            name="Google Gemini",
+            description=f"Google Gemini模型，支持Google搜索{tavily_suffix}",
+            enabled=bool(settings.gemini_api_key),
+            supports_search=provider_supports_search("gemini"),
+        ),
+        "zhipu": LLMProvider(
+            id="zhipu",
+            name="智谱 GLM",
+            description=f"智谱 GLM 模型，支持内置 Web Search{tavily_suffix}",
+            enabled=bool(settings.zhipu_api_key),
+            supports_search=provider_supports_search("zhipu"),
+        ),
+    }
 
 
 @router.get("/providers", response_model=LLMConfigResponse)
@@ -66,9 +90,10 @@ async def get_llm_providers(
     current_user: User = Depends(get_current_user),
 ):
     """获取可用的LLM提供商列表"""
+    providers = build_providers()
     return LLMConfigResponse(
         current_provider=settings.llm_provider,
-        providers=list(PROVIDERS.values()),
+        providers=list(providers.values()),
     )
 
 
@@ -78,10 +103,11 @@ async def switch_llm_provider(
     current_user: User = Depends(get_current_user),
 ):
     """切换LLM提供商"""
-    if provider not in PROVIDERS:
+    providers = build_providers()
+    if provider not in providers:
         return {"success": False, "message": f"不支持的LLM提供商: {provider}"}
     
-    provider_info = PROVIDERS[provider]
+    provider_info = providers[provider]
     if not provider_info.enabled:
         return {"success": False, "message": f"LLM提供商 {provider} 未配置API Key"}
     

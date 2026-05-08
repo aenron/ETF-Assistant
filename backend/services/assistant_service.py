@@ -1,7 +1,5 @@
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +16,7 @@ from schemas.assistant import (
 )
 from services.advisor_service import AdvisorService
 from services.portfolio_service import PortfolioService
+from utils.timezone import now_in_shanghai, now_in_utc_naive
 
 
 class AssistantService:
@@ -25,8 +24,6 @@ class AssistantService:
 
     HISTORY_LIMIT = 20
     MEMORY_WINDOW = 12
-    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-
     @staticmethod
     def normalize_response(text: str) -> str:
         """清洗模型返回，避免把 JSON 包装直接展示给前端"""
@@ -233,7 +230,7 @@ class AssistantService:
         message: str,
         set_title: bool = False,
     ) -> None:
-        conversation.updated_at = datetime.now(cls.SHANGHAI_TZ).replace(tzinfo=None)
+        conversation.updated_at = now_in_utc_naive()
         conversation.last_message_preview = cls.build_preview(message)
         if set_title and (not conversation.title or conversation.title == "新会话"):
             conversation.title = cls.build_session_title(message)
@@ -246,6 +243,7 @@ class AssistantService:
         session_id: int | None,
         message: str,
         retry_message_id: int | None = None,
+        include_portfolio_context: bool = True,
     ) -> tuple[AssistantSession, AssistantSessionMessage, str]:
         clean_message = message.strip()
         if not clean_message:
@@ -276,6 +274,7 @@ class AssistantService:
                 conversation.id,
                 clean_message,
                 before_message_id=user_message.id,
+                include_portfolio_context=include_portfolio_context,
             )
             await cls.touch_session(conversation, clean_message, set_title=False)
             return conversation, user_message, prompt
@@ -289,7 +288,13 @@ class AssistantService:
         session.add(user_message)
         await session.flush()
         await cls.touch_session(conversation, clean_message, set_title=True)
-        prompt = await cls.build_prompt(session, user_id, conversation.id, clean_message)
+        prompt = await cls.build_prompt(
+            session,
+            user_id,
+            conversation.id,
+            clean_message,
+            include_portfolio_context=include_portfolio_context,
+        )
         return conversation, user_message, prompt
 
     @classmethod
@@ -300,6 +305,7 @@ class AssistantService:
         session_id: int | None,
         message: str,
         retry_message_id: int | None = None,
+        include_portfolio_context: bool = True,
     ) -> AssistantChatResponse:
         conversation, user_message, prompt = await cls.prepare_user_message(
             session,
@@ -307,8 +313,15 @@ class AssistantService:
             session_id,
             message,
             retry_message_id=retry_message_id,
+            include_portfolio_context=include_portfolio_context,
         )
         llm = AdvisorService.get_llm_client()
+        prompt = await AdvisorService.enrich_prompt_with_tavily_tools(
+            llm,
+            prompt,
+            context=f"assistant_chat:session:{conversation.id}",
+            max_calls=3,
+        )
 
         try:
             reply_text = cls.normalize_response(
@@ -345,6 +358,7 @@ class AssistantService:
         session_id: int | None,
         message: str,
         retry_message_id: int | None = None,
+        include_portfolio_context: bool = True,
     ) -> tuple[None, AsyncIterator[str]]:
         conversation, user_message, prompt = await cls.prepare_user_message(
             session,
@@ -352,8 +366,15 @@ class AssistantService:
             session_id,
             message,
             retry_message_id=retry_message_id,
+            include_portfolio_context=include_portfolio_context,
         )
         llm = AdvisorService.get_llm_client()
+        prompt = await AdvisorService.enrich_prompt_with_tavily_tools(
+            llm,
+            prompt,
+            context=f"assistant_stream:session:{conversation.id}",
+            max_calls=3,
+        )
 
         async def event_stream() -> AsyncIterator[str]:
             yield f"event: meta\ndata: {json.dumps({'session': AssistantSessionResponse.model_validate(conversation).model_dump(mode='json'), 'user_message': AssistantMessageResponse.model_validate(user_message).model_dump(mode='json')}, ensure_ascii=False)}\n\n"
@@ -397,10 +418,9 @@ class AssistantService:
         session_id: int,
         latest_user_message: str,
         before_message_id: int | None = None,
+        include_portfolio_context: bool = True,
     ) -> str:
         user = await session.get(User, user_id)
-        portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-        summary = PortfolioService.build_summary_from_portfolios(portfolios)
 
         history_result = await session.execute(
             select(AssistantSessionMessage)
@@ -422,40 +442,66 @@ class AssistantService:
             f"{'用户' if item.role == 'user' else '助手'}: {item.content}"
             for item in history_messages
         ) or "暂无历史对话。"
-        current_time = datetime.now(cls.SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+        current_time = now_in_shanghai().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-        account_balance = float(user.account_balance) if user and user.account_balance is not None else 0.0
-        total_market_value = summary.total_market_value
-        available_cash = max(0.0, account_balance - total_market_value)  # 计算实际可用现金
-        portfolio_lines = []
-        for item in portfolios:
-            current_price = f"{item.current_price:.4f}" if item.current_price is not None else "N/A"
-            pnl_pct = f"{item.pnl_pct:.2f}%" if item.pnl_pct is not None else "N/A"
-            market_value = f"{item.market_value:.2f}" if item.market_value is not None else "0.00"
-            portfolio_lines.append(
-                f"- {item.etf_code} {item.etf_name or ''} | 份额 {item.shares:.2f} | "
-                f"成本 {item.cost_price:.4f} | 现价 {current_price} | 盈亏 {pnl_pct} | 市值 {market_value}"
-            )
-        portfolio_text = "\n".join(portfolio_lines) if portfolio_lines else "当前无持仓。"
-
-        return (
+        portfolio_context = ""
+        search_instruction = (
+            "回答时必须主动搜索最新公告、新闻、政策和宏观事件，以增强回答的准确性和时效性。"
+            "如果问题涉及用户持仓、ETF、指数、行业、宏观、利率、汇率、政策、公告、新闻、市场走势或具体投资品种，"
+            "需要结合持仓上下文生成具体搜索方向，不要只依赖历史知识或模型记忆。"
+            "搜索结果不足或不可用时，需要明确说明信息不足，并把结论降级为观察性分析。"
+        )
+        role_context = (
             "你是 ETF 投资智能体中的前端浮动助手。你的职责是基于用户当前持仓、账户概况和历史对话，"
             "回答投资组合相关问题、解释已有建议、提示风险，并给出务实、可执行的下一步建议。"
+        )
+        if include_portfolio_context:
+            portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
+            summary = PortfolioService.build_summary_from_portfolios(portfolios)
+            account_balance = float(user.account_balance) if user and user.account_balance is not None else 0.0
+            total_market_value = summary.total_market_value
+            available_cash = max(0.0, account_balance - total_market_value)
+            portfolio_lines = []
+            for item in portfolios:
+                current_price = f"{item.current_price:.4f}" if item.current_price is not None else "N/A"
+                pnl_pct = f"{item.pnl_pct:.2f}%" if item.pnl_pct is not None else "N/A"
+                market_value = f"{item.market_value:.2f}" if item.market_value is not None else "0.00"
+                portfolio_lines.append(
+                    f"- {item.etf_code} {item.etf_name or ''} | 份额 {item.shares:.2f} | "
+                    f"成本 {item.cost_price:.4f} | 现价 {current_price} | 盈亏 {pnl_pct} | 市值 {market_value}"
+                )
+            portfolio_text = "\n".join(portfolio_lines) if portfolio_lines else "当前无持仓。"
+            portfolio_context = (
+                f"账户概况:\n"
+                f"- 账户总金额: {account_balance:.2f}\n"
+                f"- 持仓总市值: {summary.total_market_value:.2f}\n"
+                f"- 可用现金: {available_cash:.2f}\n"
+                f"- 总成本: {summary.total_cost:.2f}\n"
+                f"- 总盈亏: {summary.total_pnl:.2f} ({summary.total_pnl_pct:.2f}%)\n"
+                f"- 今日盈亏: {f'{summary.today_pnl:.2f} ({summary.today_pnl_pct or 0:.2f}%)' if summary.today_pnl is not None else '暂无今日行情'}\n"
+                f"- 分类分布: {summary.category_distribution}\n\n"
+                f"当前持仓:\n{portfolio_text}\n\n"
+            )
+        else:
+            role_context = (
+                "你是 ETF 和宏观市场投资分析助手。你的职责是基于用户问题和历史对话，"
+                "解释市场、行业、ETF、资产配置和风险管理问题，并给出务实、可执行的分析建议。"
+            )
+            search_instruction = (
+                "当前模式不会引用用户持仓信息。只要用户问题涉及 ETF、指数、行业、宏观、利率、汇率、政策、公告、新闻、市场走势或具体投资品种，"
+                "必须主动搜索最新公告、新闻、政策和宏观事件后再回答；不要只依赖历史知识或模型记忆。"
+                "如果搜索结果不足或不可用，需要明确说明信息不足，并把结论降级为观察性分析。"
+            )
+
+        return (
+            f"{role_context}"
             "不要编造不存在的持仓或收益数据；如果上下文里没有，就明确说没有。"
-            "回答时搜索相关资讯以增强回答的准确性和时效性。"
+            f"{search_instruction}"
             "回答使用简体中文，优先简洁、直接、可操作。请直接输出 Markdown 正文，不要返回 JSON、代码块外壳或 response 字段包装。"
             "如果适合，使用 Markdown 标题、项目符号、编号列表、加粗重点和分段来提升可读性。\n\n"
             f"当前时间:\n"
             f"- {current_time}\n\n"
-            f"账户概况:\n"
-            f"- 账户总金额: {account_balance:.2f}\n"
-            f"- 持仓总市值: {summary.total_market_value:.2f}\n"
-            f"- 可用现金: {available_cash:.2f}\n"
-            f"- 总成本: {summary.total_cost:.2f}\n"
-            f"- 总盈亏: {summary.total_pnl:.2f} ({summary.total_pnl_pct:.2f}%)\n"
-            f"- 今日盈亏: {summary.today_pnl or 0:.2f} ({summary.today_pnl_pct or 0:.2f}%)\n"
-            f"- 分类分布: {summary.category_distribution}\n\n"
-            f"当前持仓:\n{portfolio_text}\n\n"
+            f"{portfolio_context}"
             f"历史对话记忆:\n{history_text}\n\n"
             f"用户最新问题:\n{latest_user_message}\n\n"
             "请结合以上上下文直接作答。"

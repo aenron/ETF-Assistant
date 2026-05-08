@@ -18,6 +18,7 @@ class DeepSeekClient(BaseLLMClient):
         self.model = model
     
     async def chat(self, prompt: str) -> str:
+        self.reset_search_usage(provider="deepseek", enabled=False, source="none")
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
@@ -36,6 +37,7 @@ class DeepSeekClient(BaseLLMClient):
             return data["choices"][0]["message"]["content"]
 
     async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
+        self.reset_search_usage(provider="deepseek", enabled=False, source="none")
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream(
                 "POST",
@@ -71,6 +73,7 @@ class DeepSeekClient(BaseLLMClient):
                         yield content
     
     async def chat_json(self, prompt: str) -> dict:
+        self.reset_search_usage(provider="deepseek", enabled=False, source="none")
         response = await self.chat(prompt)
         try:
             start = response.find("{")

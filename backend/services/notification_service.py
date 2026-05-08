@@ -1,6 +1,5 @@
 """通知服务"""
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional, Sequence
 
@@ -14,6 +13,7 @@ from schemas.notification import (
     NotificationConfigResponse,
     TelegramNotificationConfigUpdate,
 )
+from utils.timezone import now_in_shanghai, now_in_utc_naive
 
 
 DEFAULT_BARK_URL = "https://api.day.app"
@@ -247,7 +247,7 @@ class NotificationService:
         success: bool,
         message: str,
     ) -> UserNotificationConfig:
-        config.last_test_at = datetime.now()
+        config.last_test_at = now_in_utc_naive()
         config.last_test_success = success
         config.last_error = None if success else message
         await session.flush()

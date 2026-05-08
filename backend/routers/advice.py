@@ -111,7 +111,7 @@ async def get_latest_advices(
     result = await db.execute(query)
     logs = result.scalars().all()
     return {
-        log.etf_code: AdviceLogResponse.model_validate(log) for log in logs
+        log.etf_code: AdvisorService.build_advice_log_response(log) for log in logs
     }
 
 

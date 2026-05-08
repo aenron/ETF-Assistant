@@ -1,10 +1,12 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List, Literal
 
+from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
-class PeriodAdvice(BaseModel):
+
+class PeriodAdvice(ShanghaiBaseModel):
     """单个周期建议"""
     advice_type: str
     action: str
@@ -14,7 +16,7 @@ class PeriodAdvice(BaseModel):
     confidence: float
 
 
-class EventItem(BaseModel):
+class EventItem(ShanghaiBaseModel):
     """新闻/政策/宏观事件依据"""
     title: str = ""
     date: Optional[str] = None
@@ -25,7 +27,7 @@ class EventItem(BaseModel):
     summary: str = ""
 
 
-class EventContext(BaseModel):
+class EventContext(ShanghaiBaseModel):
     """模型搜索得到的事件上下文"""
     search_status: Literal["success", "partial", "unavailable"] = "unavailable"
     source_quality: Literal["high", "medium", "low", "unknown"] = "unknown"
@@ -35,12 +37,12 @@ class EventContext(BaseModel):
     events: List[EventItem] = Field(default_factory=list)
 
 
-class AdviceGenerateRequest(BaseModel):
+class AdviceGenerateRequest(ShanghaiBaseModel):
     """生成建议请求"""
     etf_codes: Optional[List[str]] = None  # 为空则生成全部持仓建议
 
 
-class AdviceResponse(BaseModel):
+class AdviceResponse(ShanghaiBaseModel):
     """单条建议"""
     etf_code: str
     etf_name: Optional[str] = None
@@ -59,9 +61,10 @@ class AdviceResponse(BaseModel):
     long_term: PeriodAdvice
     current_price: Optional[float] = None
     pnl_pct: Optional[float] = None
+    created_at: datetime
 
 
-class AccountAnalysisResponse(BaseModel):
+class AccountAnalysisResponse(ShanghaiBaseModel):
     """账户级分析建议"""
     summary: str
     position_advice: str
@@ -72,7 +75,7 @@ class AccountAnalysisResponse(BaseModel):
     created_at: datetime
 
 
-class AdviceLogResponse(BaseModel):
+class AdviceLogResponse(ShanghaiOrmModel):
     """建议日志"""
     id: int
     etf_code: Optional[str] = None
@@ -83,5 +86,3 @@ class AdviceLogResponse(BaseModel):
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
     created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)

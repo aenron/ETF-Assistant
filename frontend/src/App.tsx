@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot } from 'lucide-react'
 import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
@@ -31,6 +31,9 @@ const AdminUsersPage = lazy(() =>
 const AdminSchedulerPage = lazy(() =>
   import('@/pages/AdminSchedulerPage').then((module) => ({ default: module.AdminSchedulerPage })),
 )
+const MultiAgentWorkbenchPage = lazy(() =>
+  import('@/pages/MultiAgentWorkbenchPage').then((module) => ({ default: module.MultiAgentWorkbenchPage })),
+)
 const LoginPage = lazy(() => import('@/pages/LoginPage'))
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -46,6 +49,7 @@ function AppContent() {
     { to: '/', label: '仪表盘', icon: LayoutDashboard },
     { to: '/portfolio', label: '持仓管理', icon: Briefcase },
     { to: '/advice', label: '决策历史', icon: Lightbulb },
+    { to: '/multi-agent', label: '多智能体', icon: Bot },
   ]
 
   useEffect(() => {
@@ -163,6 +167,7 @@ function AppContent() {
             <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
             <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
             <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
+            <Route path="/multi-agent" element={<PrivateRoute><MultiAgentWorkbenchPage /></PrivateRoute>} />
             <Route path="/notifications" element={<PrivateRoute><NotificationSettingsPage /></PrivateRoute>} />
             <Route path="/admin/users" element={<PrivateRoute><AdminUsersPage /></PrivateRoute>} />
             <Route path="/admin/scheduler" element={<PrivateRoute><AdminSchedulerPage /></PrivateRoute>} />

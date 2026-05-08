@@ -59,6 +59,7 @@ async def chat_with_assistant(
         session_id=data.session_id,
         message=data.message,
         retry_message_id=data.retry_message_id,
+        include_portfolio_context=data.include_portfolio_context,
     )
 
 
@@ -75,6 +76,7 @@ async def stream_chat_with_assistant(
         session_id=data.session_id,
         message=data.message,
         retry_message_id=data.retry_message_id,
+        include_portfolio_context=data.include_portfolio_context,
     )
     return StreamingResponse(
         stream,

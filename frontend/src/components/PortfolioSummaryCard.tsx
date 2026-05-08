@@ -48,9 +48,7 @@ function buildPnlAttributionData(
       const actualValue =
         mode === 'total'
           ? Number(portfolio.pnl ?? 0)
-          : portfolio.market_value && portfolio.change_pct !== null && portfolio.change_pct !== undefined
-            ? portfolio.market_value - portfolio.market_value / (1 + portfolio.change_pct / 100)
-            : 0
+          : Number(portfolio.today_pnl ?? 0)
       return {
         key: `${portfolio.etf_code}-${mode}`,
         name: portfolio.etf_name || portfolio.etf_code,
@@ -314,11 +312,19 @@ export function PortfolioSummaryCard({
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-sm font-medium">今日盈亏</CardTitle>
-          {(summary.today_pnl ?? 0) >= 0 ? <TrendingUp className="h-4 w-4 text-red-500" /> : <TrendingDown className="h-4 w-4 text-green-500" />}
+          {summary.today_pnl === null ? (
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          ) : summary.today_pnl >= 0 ? (
+            <TrendingUp className="h-4 w-4 text-red-500" />
+          ) : (
+            <TrendingDown className="h-4 w-4 text-green-500" />
+          )}
         </CardHeader>
         <CardContent>
-          <div className={`break-words text-xl font-bold sm:text-2xl ${(summary.today_pnl ?? 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
-            {summary.today_pnl !== null ? `${summary.today_pnl >= 0 ? '+' : ''}${summary.today_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+          <div className={`break-words text-xl font-bold sm:text-2xl ${summary.today_pnl === null ? 'text-muted-foreground' : summary.today_pnl >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+            {summary.today_pnl !== null
+              ? `${summary.today_pnl >= 0 ? '+' : ''}${summary.today_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}${summary.today_pnl_pct !== null ? ` (${summary.today_pnl_pct.toFixed(2)}%)` : ''}`
+              : '-'}
           </div>
         </CardContent>
       </Card>

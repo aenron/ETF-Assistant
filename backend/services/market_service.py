@@ -19,6 +19,7 @@ from models import EtfInfo, MarketDaily
 from schemas.market import MarketQuote, KLineItem, EtfSearchResult, TechnicalIndicators
 from config import settings
 from services.redis_service import RedisService
+from utils.timezone import now_in_shanghai
 
 
 class MarketService:
@@ -37,7 +38,7 @@ class MarketService:
         refreshed_at: Optional[datetime] = None,
     ) -> MarketQuote:
         """为行情附加刷新时间"""
-        return quote.model_copy(update={"refreshed_at": refreshed_at or datetime.now()})
+        return quote.model_copy(update={"refreshed_at": refreshed_at or now_in_shanghai()})
     
     @classmethod
     async def get_quote_from_cache(cls, code: str) -> Optional[MarketQuote]:
@@ -79,7 +80,7 @@ class MarketService:
 
         payload = {
             "data": [item.model_dump(mode="json") for item in data],
-            "cached_at": datetime.now().isoformat(),
+            "cached_at": now_in_shanghai().isoformat(),
         }
         await RedisService.set(
             cls._kline_cache_key(code, days),
@@ -99,8 +100,8 @@ class MarketService:
         if settings.redis_enabled:
             cache_data = {
                 "data": quote_with_time.model_dump(mode="json"),
-                "cached_at": quote_with_time.refreshed_at.isoformat() if quote_with_time.refreshed_at else datetime.now().isoformat(),
-                "cache_date": date.today().isoformat(),
+                "cached_at": quote_with_time.refreshed_at.isoformat() if quote_with_time.refreshed_at else now_in_shanghai().isoformat(),
+                "cache_date": now_in_shanghai().date().isoformat(),
             }
             await RedisService.set(
                 f"{cls.REDIS_KEY_QUOTE_PREFIX}{code}", 
@@ -650,7 +651,7 @@ class MarketService:
             except Exception as e:
                 print(f"[MarketService] 同步ETF基本信息失败: {e}")
         
-        print(f"[MarketService] ✓ 已缓存 {cached_count} 只ETF行情到Redis (有效期7天, 缓存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+        print(f"[MarketService] ✓ 已缓存 {cached_count} 只ETF行情到Redis (有效期7天, 缓存时间: {now_in_shanghai().strftime('%Y-%m-%d %H:%M:%S %Z')})")
     
     @classmethod
     def _parse_quotes_from_df(cls, codes: List[str], df: pd.DataFrame) -> Dict[str, MarketQuote]:

@@ -1,10 +1,12 @@
 """用户认证相关Schema"""
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import Field, field_validator
 from typing import Optional, Union
 from datetime import datetime
 
+from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
-class UserCreate(BaseModel):
+
+class UserCreate(ShanghaiBaseModel):
     """用户注册"""
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=6, max_length=100)
@@ -22,13 +24,13 @@ class UserCreate(BaseModel):
         return v
 
 
-class UserLogin(BaseModel):
+class UserLogin(ShanghaiBaseModel):
     """用户登录"""
     username: str
     password: str
 
 
-class UserResponse(BaseModel):
+class UserResponse(ShanghaiOrmModel):
     """用户信息响应"""
     id: int
     username: str
@@ -38,30 +40,26 @@ class UserResponse(BaseModel):
     account_balance: Optional[float] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
-
-class AccountBalanceUpdate(BaseModel):
+class AccountBalanceUpdate(ShanghaiBaseModel):
     """账户金额更新"""
     account_balance: float = Field(..., gt=0, description="账户金额")
 
 
-class AdminUserUpdate(BaseModel):
+class AdminUserUpdate(ShanghaiBaseModel):
     """管理员更新用户信息"""
     is_active: Optional[bool] = None
     is_admin: Optional[bool] = None
     account_balance: Optional[float] = Field(default=None, ge=0)
 
 
-class Token(BaseModel):
+class Token(ShanghaiBaseModel):
     """Token响应"""
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
 
 
-class TokenPayload(BaseModel):
+class TokenPayload(ShanghaiBaseModel):
     """Token载荷"""
     sub: int  # user_id
     exp: datetime

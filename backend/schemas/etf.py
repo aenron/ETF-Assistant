@@ -1,8 +1,9 @@
-from pydantic import BaseModel
 from typing import Optional
 
+from schemas.base import ShanghaiBaseModel
 
-class EtfSearchResult(BaseModel):
+
+class EtfSearchResult(ShanghaiBaseModel):
     """ETF搜索结果"""
     code: str
     name: str

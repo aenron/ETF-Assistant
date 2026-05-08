@@ -11,6 +11,7 @@ import { PortfolioSummaryCard } from '@/components/PortfolioSummaryCard'
 import { RefreshCw, TrendingUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { authApi } from '@/services/authApi'
+import { compareBeijingTimeDesc, formatBeijingTime } from '@/utils/time'
 
 export function PortfolioPage() {
   const [portfolios, setPortfolios] = useState<PortfolioWithMarket[]>([])
@@ -23,20 +24,17 @@ export function PortfolioPage() {
   const latestMarketRefreshAt = portfolios
     .map((portfolio) => portfolio.market_refreshed_at)
     .filter((value): value is string => Boolean(value))
-    .sort()
-    .at(-1) ?? null
+    .sort(compareBeijingTimeDesc)
+    .at(0) ?? null
 
-  const formatMarketRefreshAt = (value: string | null) => {
-    if (!value) return '暂无缓存行情'
-    return new Date(value).toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
+  const formatMarketRefreshAt = (value: string | null) =>
+    formatBeijingTime(value, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-    })
-  }
+    }, '暂无缓存行情')
 
   const fetchData = async () => {
     setLoading(true)
