@@ -32,9 +32,6 @@ class GeminiNativeAgentClient(NativeAgentClient):
 
     def _build_tools(self, tools: list[AgentTool]) -> list[Any]:
         gemini_tools: list[Any] = []
-        if self.llm.enable_grounding:
-            return [types.Tool(google_search=types.GoogleSearch())]
-
         declarations = []
         for tool in tools:
             declarations.append(

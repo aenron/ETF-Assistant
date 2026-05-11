@@ -8,6 +8,7 @@ from schemas.multi_agent import MultiAgentContextSummary, MultiAgentRoleOpinion,
 from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
 from services.agents.tool_registry import ToolRegistry
 from services.agents.types import AgentMessage, AgentRunEvent, AgentTool
+from utils.timezone import now_in_shanghai
 
 
 class RoleAgentExecutor:
@@ -43,12 +44,15 @@ class RoleAgentExecutor:
         self.max_steps = max_steps
 
     def _messages(self) -> list[AgentMessage]:
+        current_time = now_in_shanghai().strftime("%Y-%m-%d %H:%M:%S %Z")
         system_lines = [
             f"你是多智能体投资辩论系统中的【{self.role_name}】。",
             f"场景：{self.scene.value}。",
+            f"当前时间：{current_time}。",
             f"角色职责：{self.role_focus}",
             "你必须像 ReAct agent 一样工作：先判断需要哪些数据，必要时调用可用工具获取 Observation，再输出最终 JSON。",
-            "外部新闻、政策和最新市场信息请使用 Gemini 内置 Google Search 能力，不要依赖 Tavily 或其他后端搜索工具。",
+            "外部新闻、政策和最新市场信息必须通过可用搜索工具获取 Observation，不要编造最新事件。",
+            "调用搜索工具时，query 必须面向当前时间检索最新信息，优先包含“最新”“近期”“今日”“2026”等时间约束；不要使用过去年份作为检索时间，除非用户问题明确要求历史日期。",
             "最终回答只能输出 JSON，字段必须包含：stance, action, summary, evidence, risk_notes, confidence, rebuttals。",
             "stance 只能是 bullish / neutral / bearish / mixed；confidence 为 0-100 数字。",
             "evidence 必须引用你实际获得的工具结果或上下文证据，不能编造数据来源。",
@@ -57,7 +61,8 @@ class RoleAgentExecutor:
         if self.role_id == "policy_event":
             system_lines.extend(
                 [
-                    "政策事件角色必须优先使用 Gemini 内置 Google Search 获取最新新闻、政策、公告、监管或行业事件。",
+                    "政策事件角色必须优先调用 search_policy_events 或 search_latest_news 获取最新新闻、政策、公告、监管或行业事件。",
+                    "政策事件角色的搜索 query 必须围绕当前日期检索最新政策/新闻，例如包含“最新 政策 新闻 公告 2026”，不得自行使用 2024、2025 等旧年份，除非用户明确问历史事件。",
                     "summary 必须先说明最新事件对方向和节奏的影响，不能只基于账户、现金、持仓结构给结论。",
                     "evidence 至少 2 条；每条必须包含新闻/政策/公告事件名称、发布日期或时间线、来源标题或URL，以及它如何影响判断。",
                     "如果没有找到足够最新新闻/政策证据，evidence 和 risk_notes 必须明确写“未找到足够最新政策/新闻证据”，不得用账户数据冒充政策事件证据。",

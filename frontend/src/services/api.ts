@@ -117,6 +117,19 @@ export interface MarketHistoryResponse {
   indicators: TechnicalIndicators | null
 }
 
+export interface EtfProfileResponse {
+  code: string
+  year: string
+  basic: Record<string, unknown>
+  asset_allocation: Array<Record<string, unknown>>
+  stock_holdings: Array<Record<string, unknown>>
+  bond_holdings: Array<Record<string, unknown>>
+  events: Array<Record<string, unknown>>
+  errors: string[]
+  source?: string | null
+  refreshed_at?: string | null
+}
+
 export interface AdviceResponse {
   etf_code: string
   etf_name: string | null
@@ -429,6 +442,7 @@ export const portfolioApi = {
 export const marketApi = {
   getQuote: (code: string) => api.get<MarketQuote>(`/market/quote/${code}`),
   getHistory: (code: string, days = 60) => api.get<MarketHistoryResponse>(`/market/history/${code}`, { params: { days } }),
+  getEtfProfile: (code: string, year?: number, forceRefresh = false) => api.get<EtfProfileResponse>(`/market/etf/${code}/profile`, { params: { year, force_refresh: forceRefresh } }),
   searchEtf: (q: string) => api.get<EtfSearchResult[]>('/market/etf/search', { params: { q } }),
   refreshQuote: (code: string) => api.post(`/market/refresh/${code}`),
   refreshAll: () => api.post('/market/refresh-all'),

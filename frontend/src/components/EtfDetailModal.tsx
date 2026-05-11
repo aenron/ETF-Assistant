@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { X, BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock } from 'lucide-react'
+import { X, BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock, Database } from 'lucide-react'
 import {
   marketApi, adviceApi,
-  type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse
+  type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse, type EtfProfileResponse
 } from '@/services/api'
 import { AdviceEventContextPanel, parseEventContextFromReason } from '@/components/AdviceEventContextPanel'
 import { formatBeijingTime } from '@/utils/time'
@@ -203,6 +203,25 @@ function formatVolumeLabel(value: number) {
   return value.toFixed(0)
 }
 
+function displayValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '-'
+  if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString() : '-'
+  return String(value)
+}
+
+function pickValue(row: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    if (row[name] !== undefined && row[name] !== null && row[name] !== '') return row[name]
+  }
+  return undefined
+}
+
+function visibleProfileErrors(errors: string[]) {
+  return errors.filter((item) => {
+    return !item.includes('fund_individual_basic_info_xq') && !item.includes('fund_portfolio_bond_hold_em')
+  })
+}
+
 function CandlestickChart({
   data,
   costPrice,
@@ -352,9 +371,11 @@ function CandlestickChart({
 }
 
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
-  const [activeTab, setActiveTab] = useState<'chart' | 'advice'>('chart')
+  const [activeTab, setActiveTab] = useState<'chart' | 'advice' | 'profile'>('chart')
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
   const [historyLoading, setHistoryLoading] = useState(true)
+  const [profile, setProfile] = useState<EtfProfileResponse | null>(null)
+  const [profileLoading, setProfileLoading] = useState(true)
   const [advice, setAdvice] = useState<AdviceResponse | null>(null)
   const [adviceLoading, setAdviceLoading] = useState(false)
   const [latestAdvice, setLatestAdvice] = useState<AdviceLogResponse | null>(null)
@@ -362,6 +383,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
 
   useEffect(() => {
     fetchHistory()
+    fetchProfile()
     fetchLatestAdvice()
   }, [p.etf_code])
 
@@ -387,6 +409,19 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
       console.error('Failed to fetch history:', e)
     } finally {
       setHistoryLoading(false)
+    }
+  }
+
+  const fetchProfile = async (forceRefresh = false) => {
+    setProfileLoading(true)
+    try {
+      const res = await marketApi.getEtfProfile(p.etf_code, undefined, forceRefresh)
+      setProfile(res.data)
+    } catch (e) {
+      console.error('Failed to fetch ETF profile:', e)
+      setProfile(null)
+    } finally {
+      setProfileLoading(false)
     }
   }
 
@@ -423,6 +458,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   }))
 
   const displayAdvice = advice || latestAdvice
+  const profileErrors = profile ? visibleProfileErrors(profile.errors || []) : []
   const displayConfig = displayAdvice ? (adviceTypeConfig[displayAdvice.advice_type || 'hold'] || adviceTypeConfig.hold) : null
   const displayConfidence = displayAdvice ? (displayAdvice.confidence || 0) : 0
   const displayTime = displayAdvice?.created_at || null
@@ -501,6 +537,13 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
           >
             <Lightbulb className="h-4 w-4 inline mr-1.5" />
             AI决策
+          </button>
+          <button
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === 'profile' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setActiveTab('profile')}
+          >
+            <Database className="h-4 w-4 inline mr-1.5" />
+            ETF资料
           </button>
         </div>
 
@@ -752,6 +795,138 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               {latestLoading && !adviceLoading && (
                 <div className="text-center py-8">
                   <Loader2 className="h-6 w-6 mx-auto animate-spin text-muted-foreground" />
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'profile' && (
+            <div className="space-y-4">
+              {profileLoading ? (
+                <div className="text-center py-12">
+                  <Loader2 className="h-8 w-8 mx-auto animate-spin text-primary mb-4" />
+                  <p className="text-muted-foreground">正在加载ETF资料...</p>
+                </div>
+              ) : profile ? (
+                <>
+                  <Card>
+                    <CardContent className="pt-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h3 className="text-sm font-semibold">基本信息</h3>
+                        <Button size="sm" variant="ghost" onClick={() => fetchProfile(true)}>
+                          <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                          刷新
+                        </Button>
+                      </div>
+                      {Object.keys(profile.basic || {}).length > 0 ? (
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {Object.entries(profile.basic).slice(0, 12).map(([key, value]) => (
+                            <div key={key} className="rounded-lg border bg-muted/20 px-3 py-2">
+                              <div className="text-xs text-muted-foreground">{key}</div>
+                              <div className="mt-1 truncate text-sm font-medium" title={displayValue(value)}>
+                                {displayValue(value)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">暂无基本资料</p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <Card>
+                      <CardContent className="pt-4">
+                        <h3 className="mb-3 text-sm font-semibold">资产配置</h3>
+                        {profile.asset_allocation.length > 0 ? (
+                          <div className="space-y-2">
+                            {profile.asset_allocation.slice(0, 8).map((row, index) => (
+                              <div key={index} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
+                                <span className="truncate">{displayValue(pickValue(row, ['资产类型', '项目', '类型', 'name']))}</span>
+                                <span className="font-mono">{displayValue(pickValue(row, ['占比', '比例', 'value', '持仓占比']))}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">暂无资产配置数据</p>
+                        )}
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardContent className="pt-4">
+                        <h3 className="mb-3 text-sm font-semibold">大事提醒 / 公告</h3>
+                        {profile.events.length > 0 ? (
+                          <div className="max-h-56 space-y-2 overflow-y-auto">
+                            {profile.events.slice(0, 8).map((row, index) => (
+                              <div key={index} className="rounded-lg border px-3 py-2 text-sm">
+                                <div className="font-medium">{displayValue(pickValue(row, ['公告标题', '标题', 'title', '公告名称']))}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">
+                                  {displayValue(pickValue(row, ['公告日期', '日期', 'date', '发布时间']))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">暂无公告提醒数据</p>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  <Card>
+                    <CardContent className="pt-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h3 className="text-sm font-semibold">基金持仓股票</h3>
+                        <Badge variant="outline">{profile.year}</Badge>
+                      </div>
+                      {profile.stock_holdings.length > 0 ? (
+                        <div className="max-h-80 overflow-auto">
+                          <table className="w-full text-xs">
+                            <thead className="sticky top-0 bg-background">
+                              <tr className="border-b text-muted-foreground">
+                                <th className="px-2 py-2 text-left">股票代码</th>
+                                <th className="px-2 py-2 text-left">股票名称</th>
+                                <th className="px-2 py-2 text-right">占比</th>
+                                <th className="px-2 py-2 text-right">持股数</th>
+                                <th className="px-2 py-2 text-right">持仓市值</th>
+                                <th className="px-2 py-2 text-left">季度</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {profile.stock_holdings.map((row, index) => (
+                                <tr key={index} className="border-b hover:bg-muted/30">
+                                  <td className="px-2 py-2 font-mono">{displayValue(pickValue(row, ['股票代码', '代码', 'stock_code']))}</td>
+                                  <td className="px-2 py-2">{displayValue(pickValue(row, ['股票名称', '名称', 'stock_name']))}</td>
+                                  <td className="px-2 py-2 text-right">{displayValue(pickValue(row, ['占净值比例', '持仓占比', '占比']))}</td>
+                                  <td className="px-2 py-2 text-right">{displayValue(pickValue(row, ['持股数', '持股数（万股）', '持仓数量']))}</td>
+                                  <td className="px-2 py-2 text-right">{displayValue(pickValue(row, ['持仓市值', '持仓市值（万元）', '市值']))}</td>
+                                  <td className="px-2 py-2">{displayValue(pickValue(row, ['季度', '报告期', '持仓截止日期']))}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">暂无基金股票持仓数据</p>
+                      )}
+                      {profileErrors.length > 0 && (
+                        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          部分数据源不可用：{profileErrors.slice(0, 2).join('；')}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </>
+              ) : (
+                <div className="text-center py-12">
+                  <Database className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
+                  <p className="text-muted-foreground mb-4">暂无ETF资料</p>
+                  <Button onClick={() => fetchProfile(true)}>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    重新加载
+                  </Button>
                 </div>
               )}
             </div>

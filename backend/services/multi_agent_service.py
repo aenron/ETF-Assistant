@@ -108,7 +108,7 @@ class MultiAgentService:
             client = GeminiClient(
                 api_key=settings.gemini_api_key,
                 model=settings.gemini_model,
-                enable_grounding=settings.gemini_enable_grounding,
+                enable_grounding=False,
                 timeout_seconds=settings.gemini_timeout_seconds,
             )
             client.provider = "gemini"
@@ -175,10 +175,30 @@ class MultiAgentService:
             )
             return {"codes": context.codes, "summary": context.prompt_block}
 
+        def ensure_recent_query(value: Any) -> str:
+            clean = cls._normalize_text(value)
+            if not clean:
+                clean = cls._normalize_text(question or "")
+            recent_tokens = ("最新", "近期", "今日", "当前", "2026", "本周", "本月")
+            historical_tokens = ("历史", "回顾", "复盘", "当时", "过去")
+            if any(year in clean for year in ("2024", "2025")) and not any(token in clean for token in historical_tokens):
+                clean = (
+                    clean.replace("2024年", "")
+                    .replace("2024", "")
+                    .replace("2025年", "")
+                    .replace("2025", "")
+                )
+                clean = cls._normalize_text(clean)
+            if not any(token in clean for token in recent_tokens):
+                clean = cls._normalize_text(f"{clean} 最新 近期 2026")
+            return clean[:180]
+
         async def search_latest_news(args: dict[str, Any]) -> dict[str, Any]:
-            query = cls._normalize_text(args.get("query") or question or "")
+            query = ensure_recent_query(args.get("query") or question or "")
             if not query:
-                query = " ".join(cls._build_search_queries(scene, question, holdings_preview, portfolio_summary))
+                query = ensure_recent_query(
+                    " ".join(cls._build_search_queries(scene, question, holdings_preview, portfolio_summary))
+                )
             if not TavilySearchService.is_enabled():
                 return {"enabled": False, "error": "Tavily is not configured", "query": query, "results": []}
             response = await TavilySearchService.search(
@@ -205,8 +225,10 @@ class MultiAgentService:
             }
 
         async def search_policy_events(args: dict[str, Any]) -> dict[str, Any]:
-            query = cls._normalize_text(args.get("query") or "")
-            queries = [query] if query else cls._build_policy_event_queries(question, holdings_preview)
+            query = ensure_recent_query(args.get("query") or "")
+            queries = [query] if query else [
+                ensure_recent_query(item) for item in cls._build_policy_event_queries(question, holdings_preview)
+            ]
             if not TavilySearchService.is_enabled():
                 return {"enabled": False, "error": "Tavily is not configured", "queries": queries, "results": []}
             responses = await asyncio.gather(
@@ -296,18 +318,18 @@ class MultiAgentService:
         }
         role_tools: dict[str, list[str]] = {
             "technical": ["get_holdings", "get_kline_indicators"],
-            "policy_event": ["get_portfolio_summary", "get_holdings"],
-            "allocation": ["get_portfolio_summary", "get_holdings"],
-            "risk_arbiter": ["get_portfolio_summary", "get_holdings"],
+            "policy_event": ["get_portfolio_summary", "get_holdings", "search_policy_events", "search_latest_news"],
+            "allocation": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
+            "risk_arbiter": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
             "portfolio_structure": ["get_portfolio_summary", "get_holdings"],
-            "rebalance": ["get_portfolio_summary", "get_holdings"],
-            "risk_exposure": ["get_portfolio_summary", "get_holdings"],
+            "rebalance": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
+            "risk_exposure": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
             "capital_executor": ["get_portfolio_summary", "get_holdings"],
-            "researcher": ["get_portfolio_summary", "get_holdings"],
-            "counterpoint": ["get_portfolio_summary", "get_holdings"],
-            "evidence": ["get_portfolio_summary", "get_holdings"],
+            "researcher": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
+            "counterpoint": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
+            "evidence": ["get_portfolio_summary", "get_holdings", "search_latest_news"],
         }
-        names = role_tools.get(role.key, ["get_portfolio_summary", "get_holdings"])
+        names = role_tools.get(role.key, ["get_portfolio_summary", "get_holdings", "search_latest_news"])
         return [tool_map[name] for name in names if name in tool_map]
 
     @classmethod

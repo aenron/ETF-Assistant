@@ -11,14 +11,16 @@ import { formatBeijingTime } from '@/utils/time'
 function describeJob(job: SchedulerJob) {
   if (job.id === 'daily_analysis') return '工作日收盘后为所有活跃用户生成持仓分析，并按用户通知配置推送。'
   if (job.id === 'weekly_account_analysis') return '每周五收盘后为所有活跃用户生成账户级分析，并推送摘要。'
-  if (job.id.startsWith('market_refresh_')) return 'A股交易时段刷新活跃用户持仓 ETF 的行情缓存。'
+  if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'A股交易时段刷新活跃用户持仓 ETF 的行情缓存。'
+  if (job.id === 'etf_profile_refresh') return '交易日 09:15 和 13:15 刷新活跃用户持仓 ETF 的资料快照、资产配置、公告和基金持仓。'
   return '后台调度任务'
 }
 
 function jobTone(job: SchedulerJob) {
   if (job.id === 'daily_analysis') return 'border-blue-200 bg-blue-50 text-blue-700'
   if (job.id === 'weekly_account_analysis') return 'border-violet-200 bg-violet-50 text-violet-700'
-  if (job.id.startsWith('market_refresh_')) return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (job.id === 'etf_profile_refresh') return 'border-amber-200 bg-amber-50 text-amber-700'
   return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 

@@ -293,6 +293,49 @@ async def refresh_market_quotes():
     print(f"[Scheduler] 行情刷新完成，成功缓存 {len(quotes)} 只ETF")
 
 
+async def refresh_etf_profiles():
+    """定时刷新活跃用户持仓涉及的 ETF 资料缓存和数据库快照"""
+    current_year = now_in_shanghai().year
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行ETF资料刷新任务...")
+
+    async with async_session_maker() as db:
+        try:
+            result = await db.execute(
+                select(Portfolio.etf_code)
+                .join(User, Portfolio.user_id == User.id)
+                .where(User.is_active == True)
+                .distinct()
+            )
+            codes = sorted({code for code in result.scalars().all() if code})
+            if not codes:
+                print("[Scheduler] 无持仓ETF，跳过ETF资料刷新")
+                return
+
+            print(f"[Scheduler] 共 {len(codes)} 只ETF待刷新资料")
+        except Exception as e:
+            print(f"[Scheduler] 加载ETF列表失败: {e}")
+            return
+
+        success_count = 0
+        for code in codes:
+            try:
+                profile = await MarketService.get_etf_profile(
+                    code,
+                    year=current_year,
+                    session=db,
+                    force_refresh=True,
+                )
+                await db.commit()
+                if not profile.get("errors"):
+                    success_count += 1
+                print(f"[Scheduler] ETF资料刷新完成: {code}")
+            except Exception as e:
+                await db.rollback()
+                print(f"[Scheduler] ETF资料刷新失败: {code}, {e}")
+
+    print(f"[Scheduler] ETF资料刷新完成，成功刷新 {success_count}/{len(codes)} 只ETF")
+
+
 def setup_scheduler():
     """配置定时任务"""
     # 工作日收盘后 15:05 执行持仓分析
@@ -339,9 +382,24 @@ def setup_scheduler():
         replace_existing=True
     )
 
+    # 工作日盘前和午后刷新 ETF 资料快照，供持仓详情页直接读取缓存。
+    scheduler.add_job(
+        refresh_etf_profiles,
+        trigger=CronTrigger(
+            day_of_week='mon-fri',
+            hour='9,13',
+            minute=15,
+            timezone='Asia/Shanghai'
+        ),
+        id='etf_profile_refresh',
+        name='ETF资料缓存刷新',
+        replace_existing=True
+    )
+
     print("[Scheduler] 定时任务已配置: 工作日 15:05 自动执行收盘持仓分析")
     print("[Scheduler] 定时任务已配置: 每周五 15:10 自动执行本周账户分析并推送")
     print("[Scheduler] 定时任务已配置: A股交易时段每5分钟自动刷新行情缓存，15:00收盘补刷一次")
+    print("[Scheduler] 定时任务已配置: 工作日 09:15、13:15 自动刷新ETF资料缓存")
 
 
 def start_scheduler():

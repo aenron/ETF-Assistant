@@ -1,4 +1,5 @@
 from models.etf_info import EtfInfo
+from models.etf_profile import EtfProfile
 from models.portfolio import Portfolio
 from models.market_daily import MarketDaily
 from models.advice_log import AdviceLog
@@ -12,6 +13,7 @@ from models.user import User
 
 __all__ = [
     "EtfInfo",
+    "EtfProfile",
     "Portfolio",
     "MarketDaily",
     "AdviceLog",

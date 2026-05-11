@@ -82,3 +82,19 @@ async def get_history(
 async def search_etf(q: str = Query(default="", min_length=1)):
     """搜索ETF"""
     return await MarketService.search_etf(q)
+
+
+@router.get("/etf/{code}/profile")
+async def get_etf_profile(
+    code: str,
+    year: int | None = Query(default=None, ge=2000, le=2100),
+    force_refresh: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
+):
+    """获取ETF/基金资料、资产配置、持仓明细和公告提醒"""
+    return await MarketService.get_etf_profile(
+        code,
+        year=year,
+        session=session,
+        force_refresh=force_refresh,
+    )
