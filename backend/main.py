@@ -22,6 +22,7 @@ async def run_migrations():
         ("advice_log.llm_model", "ALTER TABLE advice_log ADD COLUMN llm_model VARCHAR(100)"),
         ("user_notification_config.chat_id", "ALTER TABLE user_notification_config ADD COLUMN chat_id VARCHAR(255)"),
         ("users.is_admin", "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL"),
+        ("multi_agent_run.title", "ALTER TABLE multi_agent_run ADD COLUMN title VARCHAR(120)"),
         ("multi_agent_run.max_debate_rounds", "ALTER TABLE multi_agent_run ADD COLUMN max_debate_rounds INTEGER DEFAULT 3 NOT NULL"),
         ("multi_agent_run.collapse_debate_by_default", "ALTER TABLE multi_agent_run ADD COLUMN collapse_debate_by_default BOOLEAN DEFAULT TRUE NOT NULL"),
     ]

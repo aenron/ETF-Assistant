@@ -313,8 +313,14 @@ export interface MultiAgentFinalConclusion {
   risk_notes: string[]
 }
 
+export interface MultiAgentChatTranscriptEvent {
+  event: string
+  payload: Record<string, unknown>
+}
+
 export interface MultiAgentRunResponse {
   run_id: number
+  title: string
   scene: MultiAgentScene
   question?: string | null
   use_portfolio_context?: boolean
@@ -329,6 +335,7 @@ export interface MultiAgentRunResponse {
   search_metadata: MultiAgentSearchMetadata[]
   arbiter_summary: MultiAgentArbiterSummary | null
   final_conclusion: MultiAgentFinalConclusion
+  chat_transcript: MultiAgentChatTranscriptEvent[]
   status: 'running' | 'success' | 'partial' | 'failed'
 }
 
@@ -489,6 +496,17 @@ export const schedulerApi = {
 
 export const multiAgentApi = {
   createRun: (data: MultiAgentRunCreate) => api.post<MultiAgentRunResponse>('/multi-agent/runs', data),
+  streamRun: async (data: MultiAgentRunCreate) =>
+    fetch('/api/multi-agent/runs/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      },
+      body: JSON.stringify(data),
+    }),
   listRuns: () => api.get<MultiAgentRunListResponse>('/multi-agent/runs'),
   getRun: (runId: number) => api.get<MultiAgentRunResponse>(`/multi-agent/runs/${runId}`),
+  updateRun: (runId: number, data: { title: string }) => api.patch<MultiAgentRunResponse>(`/multi-agent/runs/${runId}`, data),
+  deleteRun: (runId: number) => api.delete<{ success: boolean }>(`/multi-agent/runs/${runId}`),
 }

@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import Field
+from pydantic import field_validator
 from pydantic import model_validator
 
 from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
@@ -22,6 +23,18 @@ class MultiAgentRunCreate(ShanghaiBaseModel):
     use_portfolio_context: bool = True
     max_debate_rounds: int = Field(default=3, ge=1, le=8)
     collapse_debate_by_default: bool = True
+
+
+class MultiAgentRunUpdate(ShanghaiBaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("标题不能为空")
+        return title
 
 
 class MultiAgentContextSummary(ShanghaiBaseModel):
@@ -89,8 +102,14 @@ class MultiAgentFinalConclusion(ShanghaiBaseModel):
     risk_notes: list[str] = Field(default_factory=list)
 
 
+class MultiAgentChatTranscriptEvent(ShanghaiBaseModel):
+    event: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 class MultiAgentRunResponse(ShanghaiOrmModel):
     run_id: int
+    title: str = ""
     scene: MultiAgentScene
     question: Optional[str] = None
     use_portfolio_context: bool = True
@@ -105,6 +124,7 @@ class MultiAgentRunResponse(ShanghaiOrmModel):
     search_metadata: list[MultiAgentSearchMetadata] = Field(default_factory=list)
     arbiter_summary: Optional[MultiAgentArbiterSummary] = None
     final_conclusion: MultiAgentFinalConclusion
+    chat_transcript: list[MultiAgentChatTranscriptEvent] = Field(default_factory=list)
     status: Literal["running", "success", "partial", "failed"]
 
     @model_validator(mode="after")

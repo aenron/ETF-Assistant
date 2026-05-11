@@ -1,6 +1,8 @@
 import asyncio
 import json
 import unittest
+import unittest.mock
+import types
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
@@ -21,7 +23,24 @@ from schemas.multi_agent import (
     MultiAgentScene,
     MultiAgentSearchMetadata,
 )
-from services.multi_agent_service import MultiAgentService, RoleBlueprint, SearchBundle
+from services.multi_agent_service import (
+    MultiAgentService,
+    PolicyEventContextBundle,
+    RoleBlueprint,
+    SearchBundle,
+    TechnicalContextBundle,
+)
+
+fake_advisor_service = types.ModuleType("services.advisor_service")
+
+
+class _FakeAdvisorService:
+    async def chat_json_with_logging(self, *args, **kwargs):  # pragma: no cover - patched in tests
+        raise AssertionError("Unexpected AdvisorService call")
+
+
+fake_advisor_service.AdvisorService = _FakeAdvisorService()
+sys.modules.setdefault("services.advisor_service", fake_advisor_service)
 
 
 class _FakeRun:
@@ -132,7 +151,7 @@ class MultiAgentServiceContractTests(unittest.TestCase):
         self.assertEqual(payload.arbiter_summary.round_index, 2)
         self.assertEqual(payload.max_debate_rounds, 3)
 
-    def test_create_run_runs_initial_round_in_parallel_and_stops_on_consensus(self):
+    def test_create_run_runs_initial_round_sequentially_and_stops_on_consensus(self):
         session = _FakeSession()
         request = MultiAgentRunCreate(
             scene=MultiAgentScene.ETF,
@@ -252,7 +271,7 @@ class MultiAgentServiceContractTests(unittest.TestCase):
 
         response = asyncio.run(run_case())
 
-        self.assertGreater(max_active, 1)
+        self.assertEqual(max_active, 1)
         self.assertEqual(response.status, "success")
         self.assertEqual(len(response.initial_role_opinions), 4)
         self.assertEqual(len(response.debate_rounds), 0)
@@ -408,6 +427,242 @@ class MultiAgentServiceContractTests(unittest.TestCase):
         self.assertEqual(response.arbiter_summary.consensus_reached, True)
         mock_search.assert_not_called()
         self.assertEqual(response.search_metadata, [])
+
+    def test_technical_context_is_only_injected_for_technical_role(self):
+        prompts: dict[str, str] = {}
+        context_summary = MultiAgentContextSummary(
+            scenario=MultiAgentScene.ETF,
+            title="159655 技术面研判",
+            bullets=[],
+        )
+        technical_context = TechnicalContextBundle(
+            prompt_block="### 159655\n- 最近5根日K：\n- 2026-05-08: 开1.000 收1.020 高1.030 低0.990 涨跌2.00% 量1000\n- RSI(14)：68.5\n- MACD：DIF=0.01，DEA=0.02，柱=-0.02",
+            codes=["159655"],
+        )
+
+        async def fake_chat_json_with_logging(llm, prompt, context):
+            prompts[context] = prompt
+            return {
+                "stance": "neutral",
+                "action": "等待确认",
+                "summary": "技术面等待突破确认",
+                "evidence": ["RSI 与 MACD 已纳入判断"],
+                "risk_notes": ["短线波动"],
+                "confidence": 66,
+                "rebuttals": [],
+            }
+
+        async def run_case():
+            with (
+                unittest.mock.patch.object(MultiAgentService, "_create_llm_client", return_value=object()),
+                unittest.mock.patch("services.advisor_service.AdvisorService.chat_json_with_logging", new=fake_chat_json_with_logging),
+            ):
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.ETF,
+                    role=RoleBlueprint("technical", "技术面角色", "判断价格位置。"),
+                    round_index=1,
+                    question="159655 技术面怎么看",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="", metadata=[]),
+                    technical_context=technical_context,
+                    provider="openai",
+                )
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.ETF,
+                    role=RoleBlueprint("policy_event", "政策事件角色", "判断政策事件。"),
+                    round_index=1,
+                    question="159655 技术面怎么看",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="", metadata=[]),
+                    technical_context=technical_context,
+                    provider="openai",
+                )
+
+        asyncio.run(run_case())
+
+        technical_prompt = prompts["multi_agent:etf:technical:r1"]
+        policy_prompt = prompts["multi_agent:etf:policy_event:r1"]
+        self.assertIn("## 技术面K线与指标数据", technical_prompt)
+        self.assertIn("最近5根日K", technical_prompt)
+        self.assertIn("RSI(14)", technical_prompt)
+        self.assertIn("## 技术面输出要求", technical_prompt)
+        self.assertIn("evidence 至少 2 条", technical_prompt)
+        self.assertIn("K 线、均线、RSI、MACD", technical_prompt)
+        self.assertNotIn("## 技术面K线与指标数据", policy_prompt)
+
+    def test_policy_event_context_requires_news_policy_evidence(self):
+        prompts: dict[str, str] = {}
+        context_summary = MultiAgentContextSummary(
+            scenario=MultiAgentScene.ETF,
+            title="159655 政策事件研判",
+            bullets=[],
+        )
+        policy_context = PolicyEventContextBundle(
+            prompt_block=(
+                "### tavily_search #1\n"
+                "- query: 159655 最新 政策 公告 新闻\n"
+                "- results:\n"
+                "  1. title=示例政策新闻; url=https://example.com/policy; date=2026-05-08; content=监管政策影响行业估值"
+            ),
+            metadata=[],
+        )
+
+        async def fake_chat_json_with_logging(llm, prompt, context):
+            prompts[context] = prompt
+            return {
+                "stance": "neutral",
+                "action": "等待政策落地",
+                "summary": "政策事件证据有限，先观察",
+                "evidence": ["示例政策新闻 | 2026-05-08 | https://example.com/policy | 影响行业估值"],
+                "risk_notes": ["政策落地节奏不确定"],
+                "confidence": 62,
+                "rebuttals": [],
+            }
+
+        async def run_case():
+            with (
+                unittest.mock.patch.object(MultiAgentService, "_create_llm_client", return_value=object()),
+                unittest.mock.patch("services.advisor_service.AdvisorService.chat_json_with_logging", new=fake_chat_json_with_logging),
+            ):
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.ETF,
+                    role=RoleBlueprint("policy_event", "政策事件角色", "判断政策事件。"),
+                    round_index=1,
+                    question="159655 政策事件怎么看",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="", metadata=[]),
+                    policy_event_context=policy_context,
+                    provider="openai",
+                )
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.ETF,
+                    role=RoleBlueprint("allocation", "配置视角角色", "判断配置价值。"),
+                    round_index=1,
+                    question="159655 政策事件怎么看",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="", metadata=[]),
+                    policy_event_context=policy_context,
+                    provider="openai",
+                )
+
+        asyncio.run(run_case())
+
+        policy_prompt = prompts["multi_agent:etf:policy_event:r1"]
+        allocation_prompt = prompts["multi_agent:etf:allocation:r1"]
+        self.assertIn("## 政策事件专用搜索证据", policy_prompt)
+        self.assertIn("示例政策新闻", policy_prompt)
+        self.assertIn("## 政策事件输出要求", policy_prompt)
+        self.assertIn("evidence 至少 2 条", policy_prompt)
+        self.assertIn("来源标题或URL", policy_prompt)
+        self.assertNotIn("## 政策事件专用搜索证据", allocation_prompt)
+
+    def test_account_roles_require_account_data_evidence(self):
+        prompts: dict[str, str] = {}
+        context_summary = MultiAgentContextSummary(
+            scenario=MultiAgentScene.ACCOUNT,
+            title="账户再平衡研判",
+            bullets=[],
+        )
+        account_block = "\n".join(
+            [
+                "以下账户数据供账户场景各角色引用为决策证据：",
+                "- 总市值：¥70,000.00",
+                "- 总盈亏：+1,000.00 (+1.50%)",
+                "- 可用资金：¥30,000.00",
+                "- 持仓预览：",
+                "  - 510300 | 份额 1000.00 | 成本 4.0000",
+            ]
+        )
+
+        async def fake_chat_json_with_logging(llm, prompt, context):
+            prompts[context] = prompt
+            return {
+                "stance": "neutral",
+                "action": "小幅再平衡",
+                "summary": "账户结构需小幅再平衡",
+                "evidence": ["可用资金 30000 支持分批执行", "总盈亏 +1.50% 可适度锁定收益"],
+                "risk_notes": ["集中度待确认"],
+                "confidence": 70,
+                "rebuttals": [],
+            }
+
+        async def run_case():
+            with (
+                unittest.mock.patch.object(MultiAgentService, "_create_llm_client", return_value=object()),
+                unittest.mock.patch("services.advisor_service.AdvisorService.chat_json_with_logging", new=fake_chat_json_with_logging),
+            ):
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.ACCOUNT,
+                    role=RoleBlueprint("rebalance", "再平衡角色", "判断是否应该再平衡。"),
+                    round_index=1,
+                    question="账户要不要再平衡",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="### tavily_search #1\n- query: 账户再平衡 风险", metadata=[]),
+                    account_evidence_block=account_block,
+                    provider="openai",
+                )
+
+        asyncio.run(run_case())
+
+        prompt = prompts["multi_agent:account:rebalance:r1"]
+        self.assertIn("## 账户数据证据", prompt)
+        self.assertIn("总市值：¥70,000.00", prompt)
+        self.assertIn("## 账户场景证据输出要求", prompt)
+        self.assertIn("evidence 至少 2 条", prompt)
+        self.assertIn("总资产、总市值、总盈亏、今日盈亏、可用资金", prompt)
+        self.assertIn("重点引用总盈亏、今日盈亏、仓位结构、现金比例或持仓偏离", prompt)
+
+    def test_general_roles_require_source_evidence(self):
+        prompts: dict[str, str] = {}
+        context_summary = MultiAgentContextSummary(
+            scenario=MultiAgentScene.GENERAL,
+            title="黄金还能买吗",
+            bullets=[],
+        )
+        general_block = "\n".join(
+            [
+                "以下通用场景数据供各角色引用为决策证据：",
+                "- 用户问题：最近黄金还能买吗",
+                "- 组合总资产：¥100,000.00",
+            ]
+        )
+
+        async def fake_chat_json_with_logging(llm, prompt, context):
+            prompts[context] = prompt
+            return {
+                "stance": "mixed",
+                "action": "等待更多证据",
+                "summary": "问题需要结合最新金价和宏观证据",
+                "evidence": ["用户问题缺少期限", "搜索结果显示宏观不确定"],
+                "risk_notes": ["信息边界不清"],
+                "confidence": 60,
+                "rebuttals": [],
+            }
+
+        async def run_case():
+            with (
+                unittest.mock.patch.object(MultiAgentService, "_create_llm_client", return_value=object()),
+                unittest.mock.patch("services.advisor_service.AdvisorService.chat_json_with_logging", new=fake_chat_json_with_logging),
+            ):
+                await MultiAgentService._generate_role_opinion(
+                    scene=MultiAgentScene.GENERAL,
+                    role=RoleBlueprint("evidence", "证据搜索角色", "整合最新证据。"),
+                    round_index=1,
+                    question="最近黄金还能买吗",
+                    context_summary=context_summary,
+                    search_bundle=SearchBundle(prompt_block="### tavily_search #1\n- query: 黄金 最新 新闻\n- results:\n  1. title=黄金新闻; url=https://example.com/gold", metadata=[]),
+                    general_evidence_block=general_block,
+                    provider="openai",
+                )
+
+        asyncio.run(run_case())
+
+        prompt = prompts["multi_agent:general:evidence:r1"]
+        self.assertIn("## 通用场景证据", prompt)
+        self.assertIn("用户问题：最近黄金还能买吗", prompt)
+        self.assertIn("## 通用场景证据输出要求", prompt)
+        self.assertIn("evidence 至少 2 条", prompt)
+        self.assertIn("来源标题或URL", prompt)
 
 
 if __name__ == "__main__":

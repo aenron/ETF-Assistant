@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
     gemini_enable_grounding: bool = True
+    gemini_timeout_seconds: float = 600.0
     
     # 通义千问 配置
     qwen_api_key: str = ""

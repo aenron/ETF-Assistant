@@ -30,36 +30,36 @@ export function ContextSummary({
 
   return (
     <Card>
-      <CardHeader className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">{sceneLabelMap[summary.scenario]}</Badge>
-          {run?.llm_provider && <Badge variant="outline">LLM: {run.llm_provider}</Badge>}
-          {typeof run?.max_debate_rounds === 'number' && (
-            <Badge variant="outline">最大轮数 {run.max_debate_rounds}</Badge>
-          )}
-          {run && (
-            <Badge variant="outline">{run.collapse_debate_by_default ? '默认折叠' : '默认展开'}</Badge>
-          )}
-          <CardTitle className="text-base">{summary.title}</CardTitle>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="outline">{sceneLabelMap[summary.scenario]}</Badge>
+            <CardTitle className="truncate text-base">{summary.title}</CardTitle>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {run?.llm_provider && <Badge variant="outline">LLM: {run.llm_provider}</Badge>}
+            {typeof run?.max_debate_rounds === 'number' && (
+              <Badge variant="outline">{run.max_debate_rounds} 轮</Badge>
+            )}
+          </div>
         </div>
         {summary.question && (
-          <p className="text-sm text-muted-foreground">问题：{summary.question}</p>
+          <p className="truncate text-sm text-muted-foreground">问题：{summary.question}</p>
         )}
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-2 pt-0">
         {summary.metrics && Object.keys(summary.metrics).length > 0 && (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {Object.entries(summary.metrics).map(([key, value]) => (
-              <div key={key} className="rounded-lg border bg-muted/20 px-3 py-2">
-                <div className="text-xs text-muted-foreground">{key}</div>
-                <div className="mt-1 text-sm font-medium">{value}</div>
-              </div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(summary.metrics).slice(0, 3).map(([key, value]) => (
+              <Badge key={key} variant="secondary" className="max-w-full truncate font-normal">
+                {key}: {value}
+              </Badge>
             ))}
           </div>
         )}
-        <div className="space-y-2">
-          {summary.bullets.map((bullet, index) => (
-            <div key={`${bullet}-${index}`} className="rounded-lg border bg-background px-3 py-2 text-sm leading-relaxed text-foreground/80">
+        <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+          {summary.bullets.slice(0, 2).map((bullet, index) => (
+            <div key={`${bullet}-${index}`} className="truncate">
               {bullet}
             </div>
           ))}

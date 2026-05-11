@@ -13,6 +13,7 @@ class MultiAgentRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
     scene: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     use_portfolio_context: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

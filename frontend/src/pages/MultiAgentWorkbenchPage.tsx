@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Bot, Clock, ChevronDown, ChevronUp, RefreshCw, Sparkles } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Bot, CheckCircle2, Clock, ChevronDown, ChevronUp, Pencil, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 
 import {
   multiAgentApi,
   type MultiAgentContextSummary,
+  type MultiAgentArbiterSummary,
   type MultiAgentDebateRound,
+  type MultiAgentFinalConclusion,
+  type MultiAgentRoleOpinion,
   type MultiAgentRunResponse,
   type MultiAgentScene,
 } from '@/services/api'
@@ -13,10 +16,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Switch } from '@/components/ui/switch'
-import { formatBeijingTime } from '@/utils/time'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { ContextSummary } from '@/components/MultiAgent/ContextSummary'
 import { RoleOpinionCard } from '@/components/MultiAgent/RoleOpinionCard'
 import { ConclusionPanel } from '@/components/MultiAgent/ConclusionPanel'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 
 const sceneLabelMap: Record<MultiAgentScene, string> = {
   etf: 'ETF',
@@ -38,14 +43,355 @@ const convergenceLabelMap: Record<MultiAgentDebateRound['convergence_state'], st
   failed: '失败',
 }
 
+type DebateChatMessage = {
+  id: string
+  kind: 'status' | 'round' | 'role' | 'arbiter' | 'final' | 'error'
+  roleId?: string
+  roundIndex?: number
+  speaker: string
+  content: string
+  detail?: string
+  stance?: MultiAgentRoleOpinion['stance']
+  confidence?: number
+  streaming?: boolean
+}
+
+const stanceLabelMap: Record<MultiAgentRoleOpinion['stance'], string> = {
+  bullish: '偏多',
+  neutral: '中性',
+  bearish: '偏空',
+  mixed: '分歧',
+}
+
+const stanceBubbleMap: Record<MultiAgentRoleOpinion['stance'], string> = {
+  bullish: 'border-red-200 bg-red-50',
+  neutral: 'border-slate-200 bg-white',
+  bearish: 'border-emerald-200 bg-emerald-50',
+  mixed: 'border-amber-200 bg-amber-50',
+}
+
+const roleAvatarMap: Record<string, { label: string; className: string }> = {
+  policy_event: { label: '策', className: 'bg-red-100 text-red-700 ring-red-200' },
+  technical: { label: '技', className: 'bg-sky-100 text-sky-700 ring-sky-200' },
+  allocation: { label: '配', className: 'bg-violet-100 text-violet-700 ring-violet-200' },
+  risk_arbiter: { label: '风', className: 'bg-emerald-100 text-emerald-700 ring-emerald-200' },
+  portfolio_structure: { label: '组', className: 'bg-blue-100 text-blue-700 ring-blue-200' },
+  rebalance: { label: '衡', className: 'bg-orange-100 text-orange-700 ring-orange-200' },
+  risk_exposure: { label: '险', className: 'bg-rose-100 text-rose-700 ring-rose-200' },
+  capital_executor: { label: '资', className: 'bg-cyan-100 text-cyan-700 ring-cyan-200' },
+  researcher: { label: '研', className: 'bg-indigo-100 text-indigo-700 ring-indigo-200' },
+  counterpoint: { label: '反', className: 'bg-amber-100 text-amber-700 ring-amber-200' },
+  evidence: { label: '证', className: 'bg-teal-100 text-teal-700 ring-teal-200' },
+  arbiter: { label: '裁', className: 'bg-blue-100 text-blue-700 ring-blue-200' },
+  final: { label: '结', className: 'bg-slate-900 text-white ring-slate-300' },
+  system: { label: '系', className: 'bg-slate-100 text-slate-600 ring-slate-200' },
+}
+
+function formatListSection(title: string, items: string[]) {
+  const clean = items.map((item) => item.trim()).filter(Boolean)
+  if (clean.length === 0) return ''
+  return [title, ...clean.map((item) => `- ${item}`)].join('\n')
+}
+
+function appendMessageDetail(message: DebateChatMessage, detail: string) {
+  const clean = detail.trim()
+  if (!clean) return message
+  return {
+    ...message,
+    detail: message.detail ? `${message.detail}\n\n${clean}` : clean,
+  }
+}
+
+function summarizeToolResult(result: unknown) {
+  try {
+    const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    return text.length > 900 ? `${text.slice(0, 900)}...` : text
+  } catch {
+    return String(result)
+  }
+}
+
+function avatarForMessage(message: DebateChatMessage) {
+  if (message.roleId && roleAvatarMap[message.roleId]) return roleAvatarMap[message.roleId]
+  if (message.kind === 'arbiter') return roleAvatarMap.arbiter
+  if (message.kind === 'final') return roleAvatarMap.final
+  if (message.kind === 'status' || message.kind === 'round' || message.kind === 'error') return roleAvatarMap.system
+  return roleAvatarMap.system
+}
+
+function opinionToMessage(opinion: MultiAgentRoleOpinion): DebateChatMessage {
+  const detailParts = [
+    opinion.action ? `动作：${opinion.action}` : '',
+    formatListSection('结论证据', opinion.evidence),
+    formatListSection('风险依据', opinion.risk_notes),
+    formatListSection('回应 / 反驳', opinion.rebuttals || []),
+  ].filter(Boolean)
+  return {
+    id: `role-${opinion.round_index}-${opinion.role_id}`,
+    kind: 'role',
+    roleId: opinion.role_id,
+    roundIndex: opinion.round_index,
+    speaker: opinion.role_name,
+    content: opinion.summary,
+    detail: detailParts.join('\n'),
+    stance: opinion.stance,
+    confidence: opinion.confidence,
+  }
+}
+
+function arbiterToMessage(arbiter: MultiAgentArbiterSummary): DebateChatMessage {
+  const detailParts = [
+    formatListSection('支持角色', arbiter.supporting_roles),
+    formatListSection('主要分歧', arbiter.disagreements),
+    formatListSection('风险提示', arbiter.risk_notes),
+    formatListSection('强烈反对', arbiter.strong_opposition),
+    arbiter.why_stop ? `停止原因：${arbiter.why_stop}` : '',
+  ].filter(Boolean)
+  return {
+    id: `arbiter-${arbiter.round_index}-${arbiter.convergence_state}-${arbiter.consensus_reached}`,
+    kind: 'arbiter',
+    roleId: 'arbiter',
+    roundIndex: arbiter.round_index,
+    speaker: '裁决角色',
+    content: arbiter.conclusion,
+    detail: detailParts.join('\n\n'),
+    confidence: arbiter.confidence,
+  }
+}
+
+function finalToMessage(conclusion: MultiAgentFinalConclusion): DebateChatMessage {
+  const detailParts = [
+    conclusion.action ? `动作：${conclusion.action}` : '',
+    formatListSection('支持角色', conclusion.supporting_roles),
+    formatListSection('主要分歧', conclusion.disagreements),
+    formatListSection('风险提示', conclusion.risk_notes),
+  ].filter(Boolean)
+  return {
+    id: `final-${conclusion.recommended_action}-${conclusion.confidence}`,
+    kind: 'final',
+    roleId: 'final',
+    speaker: '最终结论',
+    content: conclusion.conclusion,
+    detail: detailParts.join('\n\n') || conclusion.action || conclusion.recommended_action,
+    confidence: conclusion.confidence,
+  }
+}
+
+function applyTranscriptEvent(messages: DebateChatMessage[], eventName: string, payload: Record<string, any>) {
+  if (eventName === 'status') {
+    return [
+      ...messages,
+      {
+        id: `status-${messages.length}-${payload.message || ''}`,
+        kind: 'status' as const,
+        speaker: '系统',
+        content: payload.message || '处理中',
+      },
+    ]
+  }
+  if (eventName === 'round_start') {
+    return [
+      ...messages,
+      {
+        id: `round-${payload.round_index}-${messages.length}`,
+        kind: 'round' as const,
+        roundIndex: payload.round_index,
+        speaker: '系统',
+        content: payload.title || `第 ${payload.round_index} 轮`,
+        detail: payload.summary,
+      },
+    ]
+  }
+  if (eventName === 'role_start') {
+    return [
+      ...messages,
+      {
+        id: payload.message_id,
+        kind: 'role' as const,
+        roleId: payload.role_id,
+        roundIndex: payload.round_index,
+        speaker: payload.role_name,
+        content: '',
+      },
+    ]
+  }
+  if (eventName === 'role_chunk') {
+    return messages.map((item) => (
+      item.id === payload.message_id ? { ...item, content: `${item.content}${payload.content || ''}` } : item
+    ))
+  }
+  if (eventName === 'tool_call_start') {
+    return messages.map((item) => (
+      item.id === payload.message_id
+        ? appendMessageDetail(item, `调用工具：${payload.tool_name}\n参数：${summarizeToolResult(payload.arguments || {})}`)
+        : item
+    ))
+  }
+  if (eventName === 'tool_call_done') {
+    return messages.map((item) => (
+      item.id === payload.message_id
+        ? appendMessageDetail(item, `工具结果：${payload.tool_name}\n${summarizeToolResult(payload.result || {})}`)
+        : item
+    ))
+  }
+  if (eventName === 'role_done') {
+    const message = opinionToMessage(payload.opinion as MultiAgentRoleOpinion)
+    return messages.map((item) => (
+      item.id === payload.message_id
+        ? { ...message, id: payload.message_id, detail: [item.detail, message.detail].filter(Boolean).join('\n\n') }
+        : item
+    ))
+  }
+  if (eventName === 'arbiter') return [...messages, arbiterToMessage(payload as MultiAgentArbiterSummary)]
+  if (eventName === 'final') return [...messages, finalToMessage(payload as MultiAgentFinalConclusion)]
+  if (eventName === 'error') {
+    return [
+      ...messages,
+      {
+        id: `error-${messages.length}-${payload.message || ''}`,
+        kind: 'error' as const,
+        speaker: '系统',
+        content: payload.message || '研判失败',
+      },
+    ]
+  }
+  return messages
+}
+
+function buildMessagesFromRun(run: MultiAgentRunResponse | null): DebateChatMessage[] {
+  if (!run) return []
+  if (run.chat_transcript?.length) {
+    return run.chat_transcript.reduce<DebateChatMessage[]>(
+      (messages, item) => applyTranscriptEvent(messages, item.event, item.payload as Record<string, any>),
+      [],
+    )
+  }
+  const messages: DebateChatMessage[] = [
+    {
+      id: `round-1-${run.run_id}`,
+      kind: 'round',
+      roundIndex: 1,
+      speaker: '系统',
+      content: '第 1 轮初始并行分析',
+    },
+    ...run.initial_role_opinions.map(opinionToMessage),
+  ]
+  if (run.debate_rounds.length === 0 && run.arbiter_summary) {
+    messages.push(arbiterToMessage(run.arbiter_summary))
+  }
+  for (const round of run.debate_rounds) {
+    messages.push({
+      id: `round-${round.round_index}-${run.run_id}`,
+      kind: 'round',
+      roundIndex: round.round_index,
+      speaker: '系统',
+      content: `第 ${round.round_index} 轮反驳与回应`,
+      detail: round.round_summary,
+    })
+    messages.push(...round.role_opinions.map(opinionToMessage))
+    if (round.arbiter_summary) {
+      messages.push(arbiterToMessage(round.arbiter_summary))
+    }
+  }
+  messages.push(finalToMessage(run.final_conclusion))
+  return messages
+}
+
+function DebateChat({ messages, running }: { messages: DebateChatMessage[]; running: boolean }) {
+  const bottomRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages.length, running])
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-base">群组辩论</CardTitle>
+        {running && <Badge variant="outline">实时生成中</Badge>}
+      </CardHeader>
+      <CardContent>
+        {messages.length === 0 ? (
+          <div className="rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground">
+            开始研判后，角色会像群聊一样逐条发言。
+          </div>
+        ) : (
+          <div className="max-h-[640px] space-y-4 overflow-y-auto rounded-xl border bg-slate-50 p-4">
+            {messages.map((message) => {
+              const isSystem = message.kind === 'status' || message.kind === 'round'
+              const isArbiter = message.kind === 'arbiter' || message.kind === 'final'
+              const avatar = avatarForMessage(message)
+              return (
+                <div key={message.id} className={isSystem ? 'flex justify-center' : 'flex justify-start'}>
+                  <div className={isSystem ? 'flex max-w-[90%] items-center gap-2' : 'flex max-w-[92%] items-start gap-3'}>
+                    <div
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ring-1 ${avatar.className}`}
+                      title={message.speaker}
+                    >
+                      {avatar.label}
+                    </div>
+                    {isSystem ? (
+                      <div className="rounded-full border bg-white px-3 py-1.5 text-xs text-muted-foreground">{message.content}</div>
+                    ) : (
+                      <div
+                        className={`rounded-xl border px-4 py-3 shadow-sm ${
+                          message.stance ? stanceBubbleMap[message.stance] : isArbiter ? 'border-blue-200 bg-blue-50' : 'bg-white'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-semibold">{message.speaker}</span>
+                          {message.roundIndex && <Badge variant="outline">第 {message.roundIndex} 轮</Badge>}
+                          {message.stance && <Badge variant="outline">{stanceLabelMap[message.stance]}</Badge>}
+                          {typeof message.confidence === 'number' && (
+                            <span className="text-xs text-muted-foreground">{message.confidence.toFixed(0)}%</span>
+                          )}
+                          {message.streaming && <Badge variant="outline">生成中</Badge>}
+                          {message.kind === 'final' && <CheckCircle2 className="h-4 w-4 text-blue-600" />}
+                        </div>
+                        <div className="mt-2 whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
+                        {message.detail && (
+                          <div className="mt-2 whitespace-pre-wrap rounded-lg border bg-white/70 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                            {message.detail}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+            {running && (
+              <div className="flex justify-start">
+                <div className="flex max-w-[92%] items-start gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                    …
+                  </div>
+                  <div className="rounded-xl border bg-white px-4 py-3 text-sm text-muted-foreground shadow-sm">
+                    角色正在输入...
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function RunHistoryItem({
   run,
   active,
   onClick,
+  onEdit,
+  onDelete,
 }: {
   run: MultiAgentRunResponse
   active: boolean
   onClick: () => void
+  onEdit: () => void
+  onDelete: () => void
 }) {
   return (
     <button
@@ -55,21 +401,16 @@ function RunHistoryItem({
         active ? 'border-primary bg-primary/5' : 'hover:border-primary/40 hover:bg-muted/30'
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{run.context_summary.title}</div>
-          <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-            {run.context_summary.bullets[0] || '暂无摘要'}
-          </div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-sm font-medium">{run.title || run.context_summary.title}</div>
+        <div className="flex shrink-0 items-center gap-1" onClick={(event) => event.stopPropagation()}>
+          <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={onEdit} title="编辑标题">
+            <Pencil className="h-3.5 w-3.5" />
+          </Button>
+          <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={onDelete} title="删除记录">
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          </Button>
         </div>
-        <Badge variant="outline">{sceneLabelMap[run.scene]}</Badge>
-      </div>
-      <div className="mt-3 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
-          <span>{run.final_conclusion.recommended_action}</span>
-          {run.llm_provider && <Badge variant="outline" className="bg-background">{run.llm_provider}</Badge>}
-        </div>
-        <span>{formatBeijingTime(run.created_at, { hour: '2-digit', minute: '2-digit' }, '')}</span>
       </div>
     </button>
   )
@@ -87,8 +428,15 @@ export function MultiAgentWorkbenchPage() {
   const [running, setRunning] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [showTranscript, setShowTranscript] = useState(false)
+  const [liveContext, setLiveContext] = useState<MultiAgentContextSummary | null>(null)
+  const [chatMessages, setChatMessages] = useState<DebateChatMessage[]>([])
+  const [editingRun, setEditingRun] = useState<MultiAgentRunResponse | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
+  const [savingTitle, setSavingTitle] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<MultiAgentRunResponse | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
-  const currentContext = useMemo<MultiAgentContextSummary | null>(() => currentRun?.context_summary ?? null, [currentRun])
+  const currentContext = useMemo<MultiAgentContextSummary | null>(() => currentRun?.context_summary ?? liveContext, [currentRun, liveContext])
   const currentInitialOpinions = currentRun?.initial_role_opinions ?? []
   const currentDebateRounds = currentRun?.debate_rounds ?? []
   const currentArbiter = currentRun?.arbiter_summary ?? null
@@ -97,6 +445,12 @@ export function MultiAgentWorkbenchPage() {
     setShowTranscript(currentRun ? !currentRun.collapse_debate_by_default : false)
   }, [currentRun?.run_id])
 
+  useEffect(() => {
+    if (!running) {
+      setChatMessages(buildMessagesFromRun(currentRun))
+    }
+  }, [currentRun?.run_id, running])
+
   const loadRuns = async () => {
     setLoadingHistory(true)
     setMessage(null)
@@ -104,7 +458,15 @@ export function MultiAgentWorkbenchPage() {
       const res = await multiAgentApi.listRuns()
       setRuns(res.data.runs)
       if (!currentRun && res.data.runs.length > 0) {
-        setCurrentRun(res.data.runs[0])
+        const firstRun = res.data.runs[0]
+        try {
+          const detail = await multiAgentApi.getRun(firstRun.run_id)
+          setCurrentRun(detail.data)
+          setChatMessages(buildMessagesFromRun(detail.data))
+        } catch {
+          setCurrentRun(firstRun)
+          setChatMessages(buildMessagesFromRun(firstRun))
+        }
       }
     } catch (error: any) {
       console.error('Failed to load multi-agent runs:', error)
@@ -117,20 +479,148 @@ export function MultiAgentWorkbenchPage() {
   const handleRun = async () => {
     setRunning(true)
     setMessage(null)
+    setCurrentRun(null)
+    setLiveContext(null)
+    setChatMessages([])
     try {
-      const res = await multiAgentApi.createRun({
+      const response = await multiAgentApi.streamRun({
         scene,
         question: question.trim() || undefined,
         use_portfolio_context: usePortfolioContext,
         max_debate_rounds: maxDebateRounds,
         collapse_debate_by_default: collapseDebateByDefault,
       })
-      setCurrentRun(res.data)
-      setShowTranscript(!res.data.collapse_debate_by_default)
-      setRuns((prev) => [res.data, ...prev.filter((item) => item.run_id !== res.data.run_id)])
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split('\n\n')
+        buffer = events.pop() || ''
+
+        for (const eventBlock of events) {
+          const lines = eventBlock.split('\n')
+          const eventName = lines.find((line) => line.startsWith('event:'))?.replace('event:', '').trim()
+          const dataLine = lines.find((line) => line.startsWith('data:'))?.replace('data:', '').trim()
+          if (!eventName || !dataLine) continue
+
+          const payload = JSON.parse(dataLine)
+          if (eventName === 'status') {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: `status-${prev.length}-${Date.now()}`,
+                kind: 'status',
+                speaker: '系统',
+                content: payload.message || '处理中',
+              },
+            ])
+          }
+          if (eventName === 'round_start') {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: `round-${payload.round_index}-${prev.length}`,
+                kind: 'round',
+                roundIndex: payload.round_index,
+                speaker: '系统',
+                content: payload.title || `第 ${payload.round_index} 轮`,
+                detail: payload.summary,
+              },
+            ])
+          }
+          if (eventName === 'context') {
+            setLiveContext(payload as MultiAgentContextSummary)
+          }
+          if (eventName === 'role_start') {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: payload.message_id,
+                kind: 'role',
+                roleId: payload.role_id,
+                roundIndex: payload.round_index,
+                speaker: payload.role_name,
+                content: '',
+                streaming: true,
+              },
+            ])
+          }
+          if (eventName === 'role_chunk') {
+            setChatMessages((prev) => prev.map((item) => (
+              item.id === payload.message_id
+                ? { ...item, content: `${item.content}${payload.content || ''}`, streaming: true }
+                : item
+            )))
+          }
+          if (eventName === 'tool_call_start') {
+            setChatMessages((prev) => prev.map((item) => (
+              item.id === payload.message_id
+                ? appendMessageDetail(
+                  item,
+                  `调用工具：${payload.tool_name}\n参数：${summarizeToolResult(payload.arguments || {})}`,
+                )
+                : item
+            )))
+          }
+          if (eventName === 'tool_call_done') {
+            setChatMessages((prev) => prev.map((item) => (
+              item.id === payload.message_id
+                ? appendMessageDetail(
+                  item,
+                  `工具结果：${payload.tool_name}\n${summarizeToolResult(payload.result || {})}`,
+                )
+                : item
+            )))
+          }
+          if (eventName === 'role_done') {
+            const message = opinionToMessage(payload.opinion as MultiAgentRoleOpinion)
+            setChatMessages((prev) => prev.map((item) => (
+              item.id === payload.message_id
+                ? { ...message, id: payload.message_id, detail: [item.detail, message.detail].filter(Boolean).join('\n\n'), streaming: false }
+                : item
+            )))
+          }
+          if (eventName === 'role_opinion') {
+            setChatMessages((prev) => [...prev, opinionToMessage(payload as MultiAgentRoleOpinion)])
+          }
+          if (eventName === 'arbiter') {
+            setChatMessages((prev) => [...prev, arbiterToMessage(payload as MultiAgentArbiterSummary)])
+          }
+          if (eventName === 'final') {
+            setChatMessages((prev) => [...prev, finalToMessage(payload as MultiAgentFinalConclusion)])
+          }
+          if (eventName === 'error') {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: `error-${prev.length}-${Date.now()}`,
+                kind: 'error',
+                speaker: '系统',
+                content: payload.message || '研判失败',
+              },
+            ])
+          }
+          if (eventName === 'done') {
+            const run = payload as MultiAgentRunResponse
+            setCurrentRun(run)
+            setChatMessages(buildMessagesFromRun(run))
+            setShowTranscript(!run.collapse_debate_by_default)
+            setRuns((prev) => [run, ...prev.filter((item) => item.run_id !== run.run_id)])
+          }
+        }
+      }
     } catch (error: any) {
       console.error('Failed to create multi-agent run:', error)
-      setMessage(error.response?.data?.detail || '研判失败')
+      setMessage(error.response?.data?.detail || error.message || '研判失败')
     } finally {
       setRunning(false)
     }
@@ -138,8 +628,9 @@ export function MultiAgentWorkbenchPage() {
 
   const handleLoadRun = async (runId: number) => {
     const localRun = runs.find((item) => item.run_id === runId)
-    if (localRun) {
+    if (localRun?.chat_transcript?.length) {
       setCurrentRun(localRun)
+      setChatMessages(buildMessagesFromRun(localRun))
       setShowTranscript(!localRun.collapse_debate_by_default)
       return
     }
@@ -147,10 +638,64 @@ export function MultiAgentWorkbenchPage() {
     try {
       const res = await multiAgentApi.getRun(runId)
       setCurrentRun(res.data)
+      setChatMessages(buildMessagesFromRun(res.data))
       setShowTranscript(!res.data.collapse_debate_by_default)
     } catch (error: any) {
       console.error('Failed to load run detail:', error)
       setMessage(error.response?.data?.detail || '加载研判详情失败')
+    }
+  }
+
+  const openEditTitle = (run: MultiAgentRunResponse) => {
+    setEditingRun(run)
+    setEditingTitle(run.title || run.context_summary.title)
+  }
+
+  const handleSaveTitle = async () => {
+    if (!editingRun || savingTitle) return
+    const title = editingTitle.trim()
+    if (!title) {
+      setMessage('标题不能为空')
+      return
+    }
+
+    setSavingTitle(true)
+    setMessage(null)
+    try {
+      const res = await multiAgentApi.updateRun(editingRun.run_id, { title })
+      setRuns((prev) => prev.map((item) => item.run_id === res.data.run_id ? res.data : item))
+      if (currentRun?.run_id === res.data.run_id) {
+        setCurrentRun(res.data)
+      }
+      setEditingRun(null)
+      setEditingTitle('')
+    } catch (error: any) {
+      console.error('Failed to update run title:', error)
+      setMessage(error.response?.data?.detail || '更新标题失败')
+    } finally {
+      setSavingTitle(false)
+    }
+  }
+
+  const handleDeleteRun = async () => {
+    if (!deleteTarget || deleting) return
+    const targetId = deleteTarget.run_id
+    setDeleting(true)
+    setMessage(null)
+    try {
+      await multiAgentApi.deleteRun(targetId)
+      const nextRuns = runs.filter((item) => item.run_id !== targetId)
+      setRuns(nextRuns)
+      if (currentRun?.run_id === targetId) {
+        setCurrentRun(nextRuns[0] ?? null)
+        setChatMessages(buildMessagesFromRun(nextRuns[0] ?? null))
+      }
+      setDeleteTarget(null)
+    } catch (error: any) {
+      console.error('Failed to delete run:', error)
+      setMessage(error.response?.data?.detail || '删除历史失败')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -265,6 +810,8 @@ export function MultiAgentWorkbenchPage() {
                   run={run}
                   active={run.run_id === activeRunId}
                   onClick={() => void handleLoadRun(run.run_id)}
+                  onEdit={() => openEditTitle(run)}
+                  onDelete={() => setDeleteTarget(run)}
                 />
               ))
             ) : (
@@ -275,6 +822,8 @@ export function MultiAgentWorkbenchPage() {
 
         <div className="space-y-6">
           <ContextSummary summary={currentContext} run={currentRun} />
+
+          <DebateChat messages={chatMessages} running={running} />
 
           <ConclusionPanel conclusion={currentRun?.final_conclusion ?? null} arbiter={currentArbiter} />
 
@@ -382,6 +931,46 @@ export function MultiAgentWorkbenchPage() {
           </Card>
         </div>
       </div>
+
+      <Dialog open={!!editingRun} onOpenChange={(open) => {
+        if (!open && !savingTitle) {
+          setEditingRun(null)
+          setEditingTitle('')
+        }
+      }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>编辑历史标题</DialogTitle>
+          </DialogHeader>
+          <Input
+            value={editingTitle}
+            onChange={(event) => setEditingTitle(event.target.value)}
+            maxLength={120}
+            autoFocus
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingRun(null)} disabled={savingTitle}>取消</Button>
+            <Button onClick={handleSaveTitle} disabled={savingTitle || !editingTitle.trim()}>
+              {savingTitle ? '保存中...' : '保存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deleting) {
+            setDeleteTarget(null)
+          }
+        }}
+        title="删除历史记录"
+        description={deleteTarget ? `确认删除“${deleteTarget.title || deleteTarget.context_summary.title}”吗？此操作不可撤销。` : ''}
+        confirmText="确认删除"
+        onConfirm={handleDeleteRun}
+        loading={deleting}
+        variant="destructive"
+      />
     </div>
   )
 }

@@ -17,13 +17,18 @@ class GeminiClient(BaseLLMClient):
         api_key: str,
         model: str = "gemini-2.0-flash",
         enable_grounding: bool = True,
+        timeout_seconds: float = 600.0,
     ):
         self.api_key = api_key
         self.model = model
         self.model_name = model
         self.enable_grounding = enable_grounding
+        self.timeout_seconds = timeout_seconds
         # 创建客户端
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=int(timeout_seconds * 1000)),
+        )
 
     def _build_tools(self):
         return [types.Tool(google_search=types.GoogleSearch())] if self.enable_grounding else None

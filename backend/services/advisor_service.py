@@ -56,6 +56,7 @@ class AdvisorService:
                     api_key=settings.gemini_api_key,
                     model=settings.gemini_model,
                     enable_grounding=settings.gemini_enable_grounding,
+                    timeout_seconds=settings.gemini_timeout_seconds,
                 )
                 cls._llm_client.provider = "gemini"
             elif settings.llm_provider == "qwen":

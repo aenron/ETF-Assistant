@@ -14,6 +14,7 @@ from schemas.multi_agent import (
     MultiAgentFinalConclusion,
     MultiAgentRunCreate,
     MultiAgentRunResponse,
+    MultiAgentRunUpdate,
     MultiAgentRoleOpinion,
     MultiAgentScene,
 )
@@ -53,6 +54,7 @@ class _FakeSession:
         self.run = run
         self.added = []
         self.flushed = 0
+        self.deleted = []
 
     async def execute(self, statement):
         sql = str(statement)
@@ -67,11 +69,15 @@ class _FakeSession:
     async def flush(self):
         self.flushed += 1
 
+    async def delete(self, obj):
+        self.deleted.append(obj)
+
 
 class MultiAgentHistoryTests(unittest.TestCase):
     def test_list_runs_restores_same_response_shape(self):
         payload = MultiAgentRunResponse(
             run_id=1,
+            title="510300 研判",
             scene=MultiAgentScene.ETF,
             created_at=datetime(2026, 5, 7, 15, 6, 2),
             context_summary=MultiAgentContextSummary(
@@ -108,10 +114,12 @@ class MultiAgentHistoryTests(unittest.TestCase):
         self.assertEqual(len(result.runs), 1)
         self.assertEqual(result.runs[0].final_conclusion.recommended_action, "hold")
         self.assertEqual(result.runs[0].context_summary.title, "510300 研判")
+        self.assertEqual(result.runs[0].title, "510300 研判")
 
     def test_get_run_restores_detail_shape(self):
         payload = MultiAgentRunResponse(
             run_id=1,
+            title="账户研判",
             scene=MultiAgentScene.ACCOUNT,
             created_at=datetime(2026, 5, 7, 15, 6, 2),
             context_summary=MultiAgentContextSummary(
@@ -138,6 +146,78 @@ class MultiAgentHistoryTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.scene, MultiAgentScene.ACCOUNT)
         self.assertEqual(result.final_conclusion.conclusion, "继续持有")
+
+    def test_update_run_title_updates_stored_payload(self):
+        payload = MultiAgentRunResponse(
+            run_id=1,
+            title="旧标题",
+            scene=MultiAgentScene.ACCOUNT,
+            created_at=datetime(2026, 5, 7, 15, 6, 2),
+            context_summary=MultiAgentContextSummary(
+                scenario=MultiAgentScene.ACCOUNT,
+                title="旧标题",
+                bullets=[],
+            ),
+            role_opinions=[],
+            final_conclusion=MultiAgentFinalConclusion(
+                recommended_action="hold",
+                conclusion="继续持有",
+                confidence=80.0,
+                supporting_roles=[],
+                disagreements=[],
+                risk_notes=[],
+            ),
+            status="success",
+        )
+        fake_run = _FakeRun(payload.model_dump_json())
+        session = _FakeSession(fake_run)
+
+        result = asyncio.run(
+            MultiAgentService.update_run(
+                session,
+                user_id=7,
+                run_id=1,
+                request=MultiAgentRunUpdate(title="新标题"),
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.title, "新标题")
+        self.assertEqual(result.context_summary.title, "新标题")
+        self.assertEqual(fake_run.title, "新标题")
+        self.assertIn('"title":"新标题"', fake_run.result_json)
+        self.assertEqual(session.flushed, 1)
+
+    def test_delete_run_deletes_matching_user_record(self):
+        payload = MultiAgentRunResponse(
+            run_id=1,
+            title="账户研判",
+            scene=MultiAgentScene.ACCOUNT,
+            created_at=datetime(2026, 5, 7, 15, 6, 2),
+            context_summary=MultiAgentContextSummary(
+                scenario=MultiAgentScene.ACCOUNT,
+                title="账户研判",
+                bullets=[],
+            ),
+            role_opinions=[],
+            final_conclusion=MultiAgentFinalConclusion(
+                recommended_action="hold",
+                conclusion="继续持有",
+                confidence=80.0,
+                supporting_roles=[],
+                disagreements=[],
+                risk_notes=[],
+            ),
+            status="success",
+        )
+        fake_run = _FakeRun(payload.model_dump_json())
+        session = _FakeSession(fake_run)
+
+        deleted = asyncio.run(MultiAgentService.delete_run(session, user_id=7, run_id=1))
+
+        self.assertTrue(deleted)
+        self.assertEqual(session.deleted, [fake_run])
+        self.assertEqual(session.flushed, 1)
 
 
 if __name__ == "__main__":
