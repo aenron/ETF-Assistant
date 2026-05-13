@@ -2,6 +2,7 @@ import asyncio
 import akshare as ak
 import httpx
 import pandas as pd
+import math
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
@@ -11,6 +12,11 @@ import time
 import os
 import random
 import json
+
+try:
+    import tushare as ts
+except Exception:
+    ts = None
 
 # 设置环境变量模拟浏览器
 os.environ.setdefault('HTTP_USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
@@ -33,6 +39,8 @@ class MarketService:
     CACHE_EXPIRE_SECONDS = 604800  # 7天缓存 (7 * 24 * 60 * 60)
     KLINE_CACHE_EXPIRE_SECONDS = 7200  # 2小时缓存
     PROFILE_CACHE_EXPIRE_SECONDS = 86400  # ETF资料1天缓存，后台定时刷新
+    _THS_INDUSTRY_NAME_MAP: Dict[str, str] | None = None
+    _TUSHARE_PRO = None
 
     @staticmethod
     def _with_refresh_time(
@@ -214,6 +222,321 @@ class MarketService:
             "Referer": referer,
         }
 
+    @staticmethod
+    def _to_float(value: Any, divisor: float = 1.0) -> Optional[float]:
+        try:
+            if value in (None, "", "-", "--"):
+                return None
+            parsed = float(value)
+            if math.isnan(parsed) or math.isinf(parsed):
+                return None
+            result = parsed / divisor
+            if math.isnan(result) or math.isinf(result):
+                return None
+            return result
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_int(value: Any) -> Optional[int]:
+        try:
+            if value in (None, "", "-", "--"):
+                return None
+            parsed = float(value)
+            if math.isnan(parsed) or math.isinf(parsed):
+                return None
+            return int(parsed)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _get_tushare_pro(cls):
+        if ts is None:
+            return None
+        token = settings.tushare_token.strip()
+        if not token:
+            return None
+        if cls._TUSHARE_PRO is None:
+            try:
+                ts.set_token(token)
+                cls._TUSHARE_PRO = ts.pro_api(token)
+            except Exception as e:
+                print(f"[MarketService] Tushare初始化失败: {e}")
+                return None
+        return cls._TUSHARE_PRO
+
+    @staticmethod
+    def _tushare_ts_code_candidates(code: str) -> List[str]:
+        clean = str(code or "").strip()
+        if "." in clean:
+            return [clean.upper()]
+
+        candidates: List[str] = []
+        if clean.startswith(("60", "68", "51", "58", "50", "56", "110", "113", "118")):
+            candidates.append(f"{clean}.SH")
+        if clean.startswith(("00", "30", "15", "16", "18", "12", "13")):
+            candidates.append(f"{clean}.SZ")
+        if clean.startswith(("43", "82", "83", "87", "88", "92")):
+            candidates.append(f"{clean}.BJ")
+        candidates.extend([f"{clean}.SH", f"{clean}.SZ", f"{clean}.BJ"])
+        return list(dict.fromkeys(candidates))
+
+    @classmethod
+    def _eastmoney_secid_candidates(cls, code: str) -> List[str]:
+        """Return Eastmoney secid candidates for stocks, funds, indices and sector codes."""
+        clean = str(code or "").strip()
+        if "." in clean:
+            market, symbol = clean.split(".", 1)
+            if market.isdigit() and symbol:
+                return [clean]
+
+        candidates: List[str] = []
+        if clean.startswith(("00", "30", "15", "16", "18", "39")):
+            candidates.append(f"0.{clean}")
+        if clean.startswith(("60", "68", "51", "58", "50", "56", "000")):
+            candidates.append(f"1.{clean}")
+        if clean.startswith(("43", "82", "83", "87", "88", "92")):
+            # 裸 88xxxx 优先视为同花顺行业代码，不能自动尝试东方财富 90.xxxxxx。
+            candidates.extend([f"0.{clean}", f"2.{clean}"])
+        if clean.upper().startswith(("BK", "GN")):
+            candidates.append(f"90.{clean.upper()}")
+
+        candidates.extend([f"1.{clean}", f"0.{clean}", f"2.{clean}"])
+        return list(dict.fromkeys(candidates))
+
+    @classmethod
+    def _get_ths_industry_name_map(cls) -> Dict[str, str]:
+        if cls._THS_INDUSTRY_NAME_MAP is not None:
+            return cls._THS_INDUSTRY_NAME_MAP
+
+        mapping: Dict[str, str] = {}
+        try:
+            df = ak.stock_board_industry_name_ths()
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    code = str(row.get("code") or "").strip()
+                    name = str(row.get("name") or "").strip()
+                    if code and name:
+                        mapping[code] = name
+        except Exception as e:
+            print(f"[MarketService] 同花顺行业代码表获取失败: {e}")
+
+        cls._THS_INDUSTRY_NAME_MAP = mapping
+        return mapping
+
+    @classmethod
+    def _resolve_ths_industry_name(cls, code: str) -> Optional[str]:
+        clean = str(code or "").strip()
+        if not clean.startswith("88"):
+            return None
+        return cls._get_ths_industry_name_map().get(clean)
+
+    @classmethod
+    def _fetch_history_kline_ths_industry(cls, code: str, days: int = 60) -> List[KLineItem]:
+        """使用同花顺行业指数获取 88xxxx 行业代码历史行情。"""
+        name = cls._resolve_ths_industry_name(code)
+        if not name:
+            return []
+
+        try:
+            end_date = now_in_shanghai().strftime("%Y%m%d")
+            start_date = (now_in_shanghai() - timedelta(days=max(days * 3, 30))).strftime("%Y%m%d")
+            print(f"[MarketService] >>> 同花顺行业指数获取历史K线: {code} {name}")
+            df = ak.stock_board_industry_index_ths(
+                symbol=name,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if df is None or df.empty:
+                return []
+            df = df.rename(columns={
+                "开盘价": "开盘",
+                "收盘价": "收盘",
+                "最高价": "最高",
+                "最低价": "最低",
+            })
+            return cls._items_from_ohlcv_df(df, days)
+        except Exception as e:
+            print(f"[MarketService] 同花顺行业指数历史K线获取失败: {code}, {e}")
+            return []
+
+    @classmethod
+    def _fetch_ths_industry_quote(cls, code: str) -> Optional[MarketQuote]:
+        """使用同花顺行业指数最近日线生成 88xxxx 实时/最新行情。"""
+        data = cls._fetch_history_kline_ths_industry(code, days=2)
+        if not data:
+            return None
+
+        latest = data[-1]
+        name = cls._resolve_ths_industry_name(code) or ""
+        return MarketQuote(
+            code=code,
+            name=name,
+            price=latest.close_price,
+            change_pct=latest.change_pct,
+            open_price=latest.open_price,
+            high_price=latest.high_price,
+            low_price=latest.low_price,
+            volume=latest.volume,
+            amount=None,
+        )
+
+    @classmethod
+    async def _fetch_from_ths_industry_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        result: Dict[str, MarketQuote] = {}
+        for code in codes:
+            quote = await asyncio.to_thread(cls._fetch_ths_industry_quote, code)
+            if quote:
+                result[code] = quote
+        return result
+
+    @classmethod
+    async def _fetch_single_from_eastmoney_quote(cls, code: str) -> Optional[MarketQuote]:
+        """Fetch a single broad-market quote from Eastmoney qt/stock/get."""
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        headers = cls._build_default_headers("https://quote.eastmoney.com/")
+        errors: List[str] = []
+
+        for secid in cls._eastmoney_secid_candidates(code):
+            params = {
+                "ut": "bd1d9ddb04089700cf9c27f6267cc896",
+                "fltt": 2,
+                "invt": 2,
+                "fields": "f43,f44,f45,f46,f47,f48,f58,f107,f116,f117,f152,f168,f169,f170",
+                "secid": secid,
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url, params=params, headers=headers)
+                    response.raise_for_status()
+                    data = response.json().get("data") or {}
+            except Exception as e:
+                errors.append(f"{secid}: {type(e).__name__}: {e}")
+                continue
+
+            name = str(data.get("f58") or "").strip()
+            price = cls._to_float(data.get("f43"))
+            if not name or price is None or price <= 0:
+                continue
+
+            return MarketQuote(
+                code=code,
+                name=name,
+                price=price,
+                change_pct=cls._to_float(data.get("f170")) or 0.0,
+                open_price=cls._to_float(data.get("f46")),
+                high_price=cls._to_float(data.get("f44")),
+                low_price=cls._to_float(data.get("f45")),
+                volume=cls._to_int(data.get("f47")),
+                amount=cls._to_float(data.get("f48")),
+            )
+        if errors:
+            print(
+                f"[MarketService] 东方财富单证券行情请求失败: {code}, "
+                f"尝试 {len(errors)} 个secid 均失败，首个错误: {errors[0]}"
+            )
+        return None
+
+    @classmethod
+    async def _fetch_from_eastmoney_quote_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        """Fetch stocks, listed funds, indices and sector quotes one by one."""
+        result: Dict[str, MarketQuote] = {}
+        for code in codes:
+            quote = await cls._fetch_single_from_eastmoney_quote(code)
+            if quote:
+                result[code] = quote
+        return result
+
+    @classmethod
+    async def _fetch_otc_fund_quote(cls, code: str) -> Optional[MarketQuote]:
+        """Fetch OTC fund estimate/net value from Eastmoney fundgz endpoint."""
+        url = f"https://fundgz.1234567.com.cn/js/{code}.js"
+        headers = cls._build_default_headers("https://fund.eastmoney.com/")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+            text = response.text.strip()
+            if text.startswith("jsonpgz("):
+                text = text[len("jsonpgz("):].rstrip(");")
+            data = json.loads(text)
+        except Exception as e:
+            print(f"[MarketService] 场外基金估值请求失败: {code}, {e}")
+            return None
+
+        price = cls._to_float(data.get("gsz")) or cls._to_float(data.get("dwjz"))
+        if price is None or price <= 0:
+            return None
+        return MarketQuote(
+            code=code,
+            name=str(data.get("name") or ""),
+            price=price,
+            change_pct=cls._to_float(data.get("gszzl")) or 0.0,
+            open_price=None,
+            high_price=None,
+            low_price=None,
+            volume=None,
+            amount=None,
+        )
+
+    @classmethod
+    async def _fetch_from_otc_fund_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        result: Dict[str, MarketQuote] = {}
+        for code in codes:
+            quote = await cls._fetch_otc_fund_quote(code)
+            if quote:
+                result[code] = quote
+        return result
+
+    @classmethod
+    def _fetch_tushare_quotes_sync(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        """使用 Tushare daily + basic 信息补充最近交易日行情。"""
+        pro = cls._get_tushare_pro()
+        if pro is None:
+            return {}
+
+        result: Dict[str, MarketQuote] = {}
+        for code in codes:
+            for ts_code in cls._tushare_ts_code_candidates(code):
+                try:
+                    df = pro.daily(ts_code=ts_code, limit=1)
+                    if df is None or df.empty:
+                        df = pro.fund_daily(ts_code=ts_code, limit=1)
+                    if df is None or df.empty:
+                        continue
+
+                    row = df.iloc[0]
+                    name = ""
+                    try:
+                        if ts_code.endswith((".SH", ".SZ", ".BJ")):
+                            basic_df = pro.stock_basic(ts_code=ts_code, fields="ts_code,name")
+                            if basic_df is not None and not basic_df.empty:
+                                name = str(basic_df.iloc[0].get("name") or "")
+                    except Exception:
+                        pass
+                    if not name:
+                        name = code
+
+                    result[code] = MarketQuote(
+                        code=code,
+                        name=name,
+                        price=float(row.get("close") or 0),
+                        change_pct=float(row.get("pct_chg") or 0),
+                        open_price=cls._to_float(row.get("open")),
+                        high_price=cls._to_float(row.get("high")),
+                        low_price=cls._to_float(row.get("low")),
+                        volume=cls._to_int(row.get("vol")),
+                        amount=cls._to_float(row.get("amount")),
+                    )
+                    break
+                except Exception as e:
+                    print(f"[MarketService] Tushare行情获取失败: {code} {ts_code}, {e}")
+        return result
+
+    @classmethod
+    async def _fetch_from_tushare_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        return await asyncio.to_thread(cls._fetch_tushare_quotes_sync, codes)
+
     @classmethod
     async def _fetch_from_eastmoney_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """直接从东方财富API获取行情（绕过akshare爬虫）"""
@@ -329,98 +652,215 @@ class MarketService:
             print(f"[MarketService] 新浪API请求失败: {e}")
         
         return {}
+
+    @classmethod
+    def _fetch_from_akshare_etf_spot_sync(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        """使用 AkShare ETF 实时列表兜底，适合场内 ETF/LOF。"""
+        try:
+            df = ak.fund_etf_spot_em()
+        except Exception as e:
+            print(f"[MarketService] AkShare ETF实时列表获取失败: {e}")
+            return {}
+
+        return cls._parse_quotes_from_df(codes, df)
+
+    @classmethod
+    async def _fetch_from_akshare_etf_spot(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        return await asyncio.to_thread(cls._fetch_from_akshare_etf_spot_sync, codes)
     
     @classmethod
+    def _items_from_ohlcv_df(cls, df: pd.DataFrame, days: int = 60) -> List[KLineItem]:
+        if df is None or df.empty:
+            return []
+        df = df.tail(days)
+        result = []
+        date_col = "日期" if "日期" in df.columns else "date" if "date" in df.columns else df.columns[0]
+        open_col = "开盘" if "开盘" in df.columns else "open" if "open" in df.columns else None
+        close_col = "收盘" if "收盘" in df.columns else "close" if "close" in df.columns else None
+        high_col = "最高" if "最高" in df.columns else "high" if "high" in df.columns else None
+        low_col = "最低" if "最低" in df.columns else "low" if "low" in df.columns else None
+        volume_col = "成交量" if "成交量" in df.columns else "volume" if "volume" in df.columns else None
+        change_col = "涨跌幅" if "涨跌幅" in df.columns else None
+        if not all([open_col, close_col, high_col, low_col]):
+            return []
+
+        for _, row in df.iterrows():
+            close = float(row[close_col])
+            if change_col and row.get(change_col) not in (None, ""):
+                change_pct = float(row[change_col])
+            elif result and result[-1].close_price > 0:
+                change_pct = (close - result[-1].close_price) / result[-1].close_price * 100
+            else:
+                change_pct = 0.0
+
+            result.append(KLineItem(
+                trade_date=row[date_col] if isinstance(row[date_col], date) else date.fromisoformat(str(row[date_col]).split(" ")[0]),
+                open_price=float(row[open_col]),
+                close_price=close,
+                high_price=float(row[high_col]),
+                low_price=float(row[low_col]),
+                volume=cls._to_int(row.get(volume_col)) or 0 if volume_col else 0,
+                change_pct=round(change_pct, 2),
+            ))
+        return result
+
+    @classmethod
     def _fetch_history_kline_akshare(cls, code: str, days: int = 60) -> List[KLineItem]:
-        """使用akshare获取历史K线数据"""
+        """使用akshare获取场内ETF历史K线数据"""
         try:
             print(f"[MarketService] >>> akshare获取历史K线: {code}")
             df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
-            
-            if df is not None and not df.empty:
-                # 取最近N天
-                df = df.tail(days)
-                result = []
-                for _, row in df.iterrows():
-                    # 计算涨跌幅
-                    change_pct = 0.0
-                    if row.get("收盘") and len(result) > 0:
-                        prev_close = result[-1].close_price
-                        if prev_close > 0:
-                            change_pct = (row["收盘"] - prev_close) / prev_close * 100
-                    
-                    result.append(KLineItem(
-                        trade_date=row["日期"] if isinstance(row["日期"], date) else date.fromisoformat(str(row["日期"])),
-                        open_price=float(row["开盘"]),
-                        close_price=float(row["收盘"]),
-                        high_price=float(row["最高"]),
-                        low_price=float(row["最低"]),
-                        volume=int(row["成交量"]),
-                        change_pct=round(change_pct, 2),
-                    ))
+            result = cls._items_from_ohlcv_df(df, days)
+            if result:
                 print(f"[MarketService] ✓ akshare获取到 {len(result)} 条K线")
                 return result
         except Exception as e:
             print(f"[MarketService] akshare获取历史K线失败: {e}")
         
         return []
+
+    @classmethod
+    def _fetch_history_kline_akshare_stock(cls, code: str, days: int = 60) -> List[KLineItem]:
+        """使用akshare获取A股历史K线数据"""
+        try:
+            print(f"[MarketService] >>> akshare获取股票历史K线: {code}")
+            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq")
+            result = cls._items_from_ohlcv_df(df, days)
+            if result:
+                print(f"[MarketService] ✓ akshare股票K线获取到 {len(result)} 条")
+                return result
+        except Exception as e:
+            print(f"[MarketService] akshare股票K线获取失败: {e}")
+        return []
+
+    @classmethod
+    def _fetch_history_kline_akshare_otc_fund(cls, code: str, days: int = 60) -> List[KLineItem]:
+        """使用akshare获取场外基金净值走势，映射成日线收盘价。"""
+        try:
+            print(f"[MarketService] >>> akshare获取场外基金净值: {code}")
+            df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+            if df is None or df.empty:
+                return []
+            df = df.tail(days)
+            result = []
+            date_col = "净值日期" if "净值日期" in df.columns else "日期" if "日期" in df.columns else df.columns[0]
+            value_col = "单位净值" if "单位净值" in df.columns else "净值" if "净值" in df.columns else df.columns[1]
+            change_col = "日增长率" if "日增长率" in df.columns else None
+            for _, row in df.iterrows():
+                value = float(row[value_col])
+                if change_col and row.get(change_col) not in (None, ""):
+                    change_pct = float(str(row[change_col]).replace("%", ""))
+                elif result and result[-1].close_price > 0:
+                    change_pct = (value - result[-1].close_price) / result[-1].close_price * 100
+                else:
+                    change_pct = 0.0
+                result.append(KLineItem(
+                    trade_date=row[date_col] if isinstance(row[date_col], date) else date.fromisoformat(str(row[date_col]).split(" ")[0]),
+                    open_price=value,
+                    close_price=value,
+                    high_price=value,
+                    low_price=value,
+                    volume=0,
+                    change_pct=round(change_pct, 2),
+                ))
+            return result
+        except Exception as e:
+            print(f"[MarketService] akshare场外基金净值获取失败: {e}")
+        return []
+
+    @classmethod
+    def _fetch_history_kline_tushare_sync(cls, code: str, days: int = 60) -> List[KLineItem]:
+        """使用 Tushare 获取股票/场内基金最近日线。"""
+        pro = cls._get_tushare_pro()
+        if pro is None:
+            return []
+
+        for ts_code in cls._tushare_ts_code_candidates(code):
+            try:
+                df = pro.daily(ts_code=ts_code, limit=days)
+                if df is None or df.empty:
+                    df = pro.fund_daily(ts_code=ts_code, limit=days)
+                if df is None or df.empty:
+                    continue
+
+                df = df.sort_values("trade_date")
+                result: List[KLineItem] = []
+                for _, row in df.iterrows():
+                    trade_date_text = str(row.get("trade_date") or "")
+                    if not trade_date_text:
+                        continue
+                    result.append(KLineItem(
+                        trade_date=date.fromisoformat(
+                            f"{trade_date_text[:4]}-{trade_date_text[4:6]}-{trade_date_text[6:8]}"
+                        ),
+                        open_price=float(row.get("open") or 0),
+                        close_price=float(row.get("close") or 0),
+                        high_price=float(row.get("high") or 0),
+                        low_price=float(row.get("low") or 0),
+                        volume=cls._to_int(row.get("vol")) or 0,
+                        change_pct=float(row.get("pct_chg") or 0),
+                    ))
+                if result:
+                    return result
+            except Exception as e:
+                print(f"[MarketService] Tushare历史K线获取失败: {code} {ts_code}, {e}")
+        return []
+
+    @classmethod
+    async def _fetch_history_kline_tushare(cls, code: str, days: int = 60) -> List[KLineItem]:
+        return await asyncio.to_thread(cls._fetch_history_kline_tushare_sync, code, days)
     
     @classmethod
     async def _fetch_history_kline_eastmoney(cls, code: str, days: int = 60) -> List[KLineItem]:
         """从东方财富API获取历史K线数据（备用）"""
-        # 东方财富历史K线API
-        # 判断市场
-        market = "1" if code.startswith(("51", "58")) else "0"  # 1=上海, 0=深圳
-        secid = f"{market}.{code}"
-        
         url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-        params = {
-            "secid": secid,
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "klt": "101",  # 日K
-            "fqt": "1",    # 前复权
-            "end": "20500000",
-            "lmt": str(days),
-        }
         headers = cls._build_default_headers("https://quote.eastmoney.com/")
         
-        try:
-            print(f"[MarketService] >>> 东方财富API获取历史K线: {code}")
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-            
-            if data.get("data") and data["data"].get("klines"):
-                result = []
-                klines = data["data"]["klines"]
-                
-                for i, line in enumerate(klines):
-                    parts = line.split(',')
-                    if len(parts) >= 6:
-                        # 计算涨跌幅
-                        change_pct = 0.0
-                        if i > 0:
-                            prev_close = result[-1].close_price
+        for secid in cls._eastmoney_secid_candidates(code):
+            params = {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "klt": "101",  # 日K
+                "fqt": "1",    # 前复权
+                "end": "20500000",
+                "lmt": str(days),
+            }
+            try:
+                print(f"[MarketService] >>> 东方财富API获取历史K线: {code} ({secid})")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url, params=params, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+
+                if data.get("data") and data["data"].get("klines"):
+                    result = []
+                    klines = data["data"]["klines"]
+
+                    for i, line in enumerate(klines):
+                        parts = line.split(',')
+                        if len(parts) >= 6:
                             close = float(parts[2])
-                            if prev_close > 0:
-                                change_pct = (close - prev_close) / prev_close * 100
-                        
-                        result.append(KLineItem(
-                            trade_date=date.fromisoformat(parts[0]),
-                            open_price=float(parts[1]),
-                            close_price=float(parts[2]),
-                            high_price=float(parts[3]),
-                            low_price=float(parts[4]),
-                            volume=int(parts[5]),
-                            change_pct=round(change_pct, 2),
-                        ))
-                
-                print(f"[MarketService] ✓ 东方财富API获取到 {len(result)} 条K线")
-                return result
-        except Exception as e:
-            print(f"[MarketService] 东方财富API获取历史K线失败: {e}")
+                            change_pct = float(parts[8]) if len(parts) > 8 and parts[8] else 0.0
+                            if i > 0 and not change_pct:
+                                prev_close = result[-1].close_price
+                                if prev_close > 0:
+                                    change_pct = (close - prev_close) / prev_close * 100
+
+                            result.append(KLineItem(
+                                trade_date=date.fromisoformat(parts[0]),
+                                open_price=float(parts[1]),
+                                close_price=close,
+                                high_price=float(parts[3]),
+                                low_price=float(parts[4]),
+                                volume=cls._to_int(parts[5]) or 0,
+                                change_pct=round(change_pct, 2),
+                            ))
+
+                    print(f"[MarketService] ✓ 东方财富API获取到 {len(result)} 条K线")
+                    return result
+            except Exception as e:
+                print(f"[MarketService] 东方财富API获取历史K线失败: {code} {secid}, {e}")
         
         return []
     
@@ -479,8 +919,17 @@ class MarketService:
     
     @classmethod
     async def get_history_kline(cls, code: str, days: int = 60) -> List[KLineItem]:
-        """获取历史K线数据（akshare → 东方财富API → 新浪API）"""
+        """获取历史K线数据（ETF/股票/指数板块/场外基金多源降级）"""
         print(f"[MarketService] 开始获取历史K线: {code}, 天数: {days}")
+
+        # 同花顺 88xxxx 行业代码，必须优先于东方财富板块代码体系。
+        try:
+            result = await asyncio.to_thread(cls._fetch_history_kline_ths_industry, code, days)
+            if result:
+                await cls.cache_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] 同花顺行业指数K线异常: {e}")
 
         cached = await cls.get_kline_from_cache(code, days)
         if cached:
@@ -494,8 +943,17 @@ class MarketService:
                 return result
         except Exception as e:
             print(f"[MarketService] akshare获取K线异常: {e}")
+
+        # A股股票
+        try:
+            result = await asyncio.to_thread(cls._fetch_history_kline_akshare_stock, code, days)
+            if result:
+                await cls.cache_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] akshare股票K线异常: {e}")
         
-        # 备用：东方财富API
+        # 备用：东方财富通用K线API，覆盖股票、场内基金、指数和部分板块。
         try:
             result = await cls._fetch_history_kline_eastmoney(code, days)
             if result:
@@ -503,8 +961,27 @@ class MarketService:
                 return result
         except Exception as e:
             print(f"[MarketService] 东方财富API获取K线异常: {e}")
+
+        # Tushare 补充日线
+        if settings.tushare_token.strip():
+            try:
+                result = await cls._fetch_history_kline_tushare(code, days)
+                if result:
+                    await cls.cache_kline(code, days, result)
+                    return result
+            except Exception as e:
+                print(f"[MarketService] Tushare历史K线异常: {e}")
         
-        # 备用：新浪API
+        # 场外基金净值走势
+        try:
+            result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
+            if result:
+                await cls.cache_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] akshare场外基金净值异常: {e}")
+
+        # 备用：新浪API。放在场外基金之后，避免场外基金代码被误识别为交易所代码。
         try:
             result = await cls._fetch_history_kline_sina(code, days)
             if result:
@@ -595,32 +1072,76 @@ class MarketService:
     
     @classmethod
     async def _fetch_quotes_from_akshare(cls, codes: List[str]) -> Dict[str, MarketQuote]:
-        """从数据源获取指定ETF行情"""
+        """从数据源获取指定证券/基金行情"""
         if not codes:
             return {}
         
-        print(f"[MarketService] 开始获取 {len(codes)} 只ETF行情: {codes}")
+        print(f"[MarketService] 开始获取 {len(codes)} 个品种行情: {codes}")
+        result: Dict[str, MarketQuote] = {}
         
-        # 优先使用东方财富API
-        result = await cls._fetch_from_eastmoney_api(codes)
+        # 优先使用原 ETF 批量接口，保持现有场内ETF性能。
+        etf_result = await cls._fetch_from_eastmoney_api(codes)
+        if etf_result:
+            print(f"[MarketService] ✓ 东方财富ETF批量API成功: {len(etf_result)} 个")
+            result.update(etf_result)
+
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] >>> 尝试 AkShare ETF实时列表: {missing_codes}")
+            akshare_etf_result = await cls._fetch_from_akshare_etf_spot(missing_codes)
+            if akshare_etf_result:
+                print(f"[MarketService] ✓ AkShare ETF实时列表成功: {len(akshare_etf_result)} 个")
+                result.update(akshare_etf_result)
+        
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] >>> 尝试同花顺行业指数数据源: {missing_codes}")
+            ths_result = await cls._fetch_from_ths_industry_api(missing_codes)
+            if ths_result:
+                print(f"[MarketService] ✓ 同花顺行业指数成功: {len(ths_result)} 个")
+                result.update(ths_result)
+
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] >>> 尝试备用数据源: 新浪财经API {missing_codes}")
+            sina_result = await cls._fetch_from_sina_api(missing_codes)
+            if sina_result:
+                print(f"[MarketService] ✓ 新浪API成功: {len(sina_result)} 个")
+                result.update(sina_result)
+
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes and settings.tushare_token.strip():
+            print(f"[MarketService] >>> 尝试 Tushare 数据源: {missing_codes}")
+            tushare_result = await cls._fetch_from_tushare_api(missing_codes)
+            if tushare_result:
+                print(f"[MarketService] ✓ Tushare成功: {len(tushare_result)} 个")
+                result.update(tushare_result)
+
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] >>> 尝试场外基金数据源: {missing_codes}")
+            fund_result = await cls._fetch_from_otc_fund_api(missing_codes)
+            if fund_result:
+                print(f"[MarketService] ✓ 场外基金估值API成功: {len(fund_result)} 个")
+                result.update(fund_result)
+
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] >>> 最后尝试通用证券数据源: 东方财富单证券API {missing_codes}")
+            broad_result = await cls._fetch_from_eastmoney_quote_api(missing_codes)
+            if broad_result:
+                print(f"[MarketService] ✓ 东方财富通用证券API成功: {len(broad_result)} 个")
+                result.update(broad_result)
+
         if result:
-            print(f"[MarketService] ✓ 东方财富API成功: {len(result)} 只ETF")
-            for code, quote in result.items():
+            for code, quote in list(result.items()):
                 result[code] = await cls.cache_quote(code, quote)
-            return result
         
-        # 备用：新浪财经API
-        print("[MarketService] >>> 尝试备用数据源: 新浪财经API")
-        result = await cls._fetch_from_sina_api(codes)
-        if result:
-            print(f"[MarketService] ✓ 新浪API成功: {len(result)} 只ETF")
-            for code, quote in result.items():
-                result[code] = await cls.cache_quote(code, quote)
-            return result
-        
-        # 获取失败，返回空数据
-        print("[MarketService] ✗ 所有数据源均失败，返回空数据")
-        return cls._get_empty_quotes(codes)
+        missing_codes = [code for code in codes if code not in result]
+        if missing_codes:
+            print(f"[MarketService] ✗ 部分品种所有数据源均失败，返回空数据: {missing_codes}")
+            result.update(cls._get_empty_quotes(missing_codes))
+        return result
     
     @classmethod
     async def _cache_all_quotes(cls, df: pd.DataFrame, session: Optional[AsyncSession] = None):
@@ -654,8 +1175,8 @@ class MarketService:
                     open_price=float(row.get(open_col, 0)) if open_col and row.get(open_col) else None,
                     high_price=float(row.get(high_col, 0)) if high_col and row.get(high_col) else None,
                     low_price=float(row.get(low_col, 0)) if low_col and row.get(low_col) else None,
-                    volume=int(row.get(volume_col, 0)) if volume_col and row.get(volume_col) else None,
-                    amount=float(row.get(amount_col, 0)) if amount_col and row.get(amount_col) else None,
+                    volume=cls._to_int(row.get(volume_col)) if volume_col else None,
+                    amount=cls._to_float(row.get(amount_col)) if amount_col else None,
                 )
                 await cls.cache_quote(code, quote)
                 cached_count += 1
@@ -709,8 +1230,8 @@ class MarketService:
                     open_price=float(row.get(open_col, 0)) if open_col and row.get(open_col) else None,
                     high_price=float(row.get(high_col, 0)) if high_col and row.get(high_col) else None,
                     low_price=float(row.get(low_col, 0)) if low_col and row.get(low_col) else None,
-                    volume=int(row.get(volume_col, 0)) if volume_col and row.get(volume_col) else None,
-                    amount=float(row.get(amount_col, 0)) if amount_col and row.get(amount_col) else None,
+                    volume=cls._to_int(row.get(volume_col)) if volume_col else None,
+                    amount=cls._to_float(row.get(amount_col)) if amount_col else None,
                 )
         return result
     
@@ -808,6 +1329,67 @@ class MarketService:
         return [cls._clean_record(dict(row)) for _, row in df.iterrows()]
 
     @classmethod
+    async def _fetch_ths_industry_profile_from_source(cls, code: str, target_year: str) -> Optional[Dict[str, Any]]:
+        """获取同花顺 88xxxx 行业指数资料，兼容 ETF profile 响应结构。"""
+        name = cls._resolve_ths_industry_name(code)
+        if not name:
+            return None
+
+        result: Dict[str, Any] = {
+            "code": code,
+            "year": target_year,
+            "basic": {
+                "代码": code,
+                "名称": name,
+                "类型": "同花顺行业指数",
+                "资料口径": "行业指数行情与行业一览，不包含基金资产配置或基金公告",
+            },
+            "asset_allocation": [],
+            "stock_holdings": [],
+            "bond_holdings": [],
+            "events": [],
+            "errors": [],
+            "source": "akshare:ths_industry",
+            "refreshed_at": now_in_shanghai().isoformat(),
+        }
+
+        try:
+            info_df = await asyncio.to_thread(ak.stock_board_industry_info_ths, symbol=name)
+            for item in cls._df_records(info_df):
+                key = item.get("项目")
+                if key:
+                    result["basic"][str(key)] = item.get("值")
+        except Exception as exc:
+            result["errors"].append(f"stock_board_industry_info_ths: {type(exc).__name__}: {exc}")
+
+        try:
+            summary_df = await asyncio.to_thread(ak.stock_board_industry_summary_ths)
+            if summary_df is not None and not getattr(summary_df, "empty", True) and "板块" in summary_df.columns:
+                matched = summary_df[summary_df["板块"].astype(str) == name]
+                result["asset_allocation"] = cls._df_records(matched, limit=1)
+        except Exception as exc:
+            result["errors"].append(f"stock_board_industry_summary_ths: {type(exc).__name__}: {exc}")
+
+        try:
+            klines = await asyncio.to_thread(cls._fetch_history_kline_ths_industry, code, 5)
+            result["events"] = [
+                {
+                    "日期": item.trade_date.isoformat(),
+                    "开盘": item.open_price,
+                    "收盘": item.close_price,
+                    "最高": item.high_price,
+                    "最低": item.low_price,
+                    "成交量": item.volume,
+                    "涨跌幅": item.change_pct,
+                }
+                for item in klines
+            ]
+        except Exception as exc:
+            result["errors"].append(f"stock_board_industry_index_ths: {type(exc).__name__}: {exc}")
+
+        return result
+
+    @classmethod
     async def get_etf_profile(
         cls,
         code: str,
@@ -817,8 +1399,9 @@ class MarketService:
     ) -> Dict[str, Any]:
         """获取 ETF/基金资料，优先读取 Redis 和数据库缓存。"""
         target_year = str(year or datetime.now().year)
+        is_ths_industry_code = cls._resolve_ths_industry_name(code) is not None
 
-        if not force_refresh:
+        if not force_refresh and not is_ths_industry_code:
             cached = await cls.get_etf_profile_from_cache(code, target_year)
             if cached:
                 return cached
@@ -883,6 +1466,10 @@ class MarketService:
     @classmethod
     async def _fetch_etf_profile_from_source(cls, code: str, target_year: str) -> Dict[str, Any]:
         """从 AkShare 拉取 ETF/基金资料、资产配置、持仓股票和公告提醒。"""
+        ths_profile = await cls._fetch_ths_industry_profile_from_source(code, target_year)
+        if ths_profile is not None:
+            return ths_profile
+
         result: Dict[str, Any] = {
             "code": code,
             "year": target_year,

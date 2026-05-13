@@ -366,9 +366,9 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    # A股开盘时段每5分钟刷新一次行情缓存。用一个组合触发器保持任务列表简洁。
+    # A股集合竞价开始后每5分钟刷新一次行情缓存。用一个组合触发器保持任务列表简洁。
     market_refresh_trigger = OrTrigger([
-        CronTrigger(day_of_week='mon-fri', hour=9, minute='30-59/5', timezone='Asia/Shanghai'),
+        CronTrigger(day_of_week='mon-fri', hour=9, minute='15-59/5', timezone='Asia/Shanghai'),
         CronTrigger(day_of_week='mon-fri', hour=10, minute='*/5', timezone='Asia/Shanghai'),
         CronTrigger(day_of_week='mon-fri', hour=11, minute='0-30/5', timezone='Asia/Shanghai'),
         CronTrigger(day_of_week='mon-fri', hour='13,14', minute='*/5', timezone='Asia/Shanghai'),
@@ -398,7 +398,7 @@ def setup_scheduler():
 
     print("[Scheduler] 定时任务已配置: 工作日 15:05 自动执行收盘持仓分析")
     print("[Scheduler] 定时任务已配置: 每周五 15:10 自动执行本周账户分析并推送")
-    print("[Scheduler] 定时任务已配置: A股交易时段每5分钟自动刷新行情缓存，15:00收盘补刷一次")
+    print("[Scheduler] 定时任务已配置: A股集合竞价开始后每5分钟自动刷新行情缓存，15:00收盘补刷一次")
     print("[Scheduler] 定时任务已配置: 工作日 09:15、13:15 自动刷新ETF资料缓存")
 
 

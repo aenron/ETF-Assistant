@@ -18,19 +18,20 @@ router = APIRouter(
 
 @router.get("/quote/{code}", response_model=MarketQuote)
 async def get_quote(code: str):
-    """获取单个ETF实时行情"""
+    """获取单个证券/基金实时行情"""
     quotes = await MarketService.get_quotes_for_codes([code])
     if code not in quotes:
-        return {"error": "未找到该ETF"}
-    return quotes[code]
+        return {"error": "未找到该品种"}
+    return MarketQuote.model_validate(quotes[code])
 
 
 @router.post("/refresh/{code}")
 async def refresh_quote(code: str):
-    """强制刷新单个ETF行情"""
+    """强制刷新单个证券/基金行情"""
     quote = await MarketService.refresh_quote(code)
     if quote:
-        return {"success": True, "quote": quote}
+        clean_quote = MarketQuote.model_validate(quote).model_dump(mode="json")
+        return {"success": True, "quote": clean_quote}
     return {"success": False, "message": f"刷新 {code} 行情失败"}
 
 
@@ -39,19 +40,18 @@ async def refresh_all_quotes(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """强制刷新所有持仓ETF行情"""
-    # 获取用户持仓的所有ETF代码
+    """强制刷新所有持仓品种行情"""
+    # 获取用户持仓的所有代码
     portfolios = await PortfolioService.get_with_market(session, user_id=current_user.id)
     codes = list(set(p.etf_code for p in portfolios))
     
     if not codes:
         return {"success": True, "message": "无持仓数据", "refreshed": 0}
     
-    # 强制刷新行情
     quotes = await MarketService.refresh_quotes(codes)
     return {
         "success": True,
-        "message": f"已刷新 {len(quotes)} 只ETF行情",
+        "message": f"已刷新 {len(quotes)} 个品种行情",
         "refreshed": len(quotes),
         "codes": codes,
     }

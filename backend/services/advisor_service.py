@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
@@ -227,6 +228,129 @@ class AdvisorService:
         return calls
 
     @classmethod
+    def _prompt_time_context(cls) -> str:
+        now = cls.now_in_shanghai()
+        current_date = now.strftime("%Y-%m-%d")
+        return (
+            f"当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}。"
+            f"当前日期：{current_date}。"
+            "所有新闻、政策、宏观和市场事件判断必须以该时间为基准；"
+            f"调用搜索工具时，query 必须包含完整当前日期“{current_date}”，并可同时包含“最新”“近期”“今日”等时间约束，优先使用最近7天到30天的可核实信息。"
+            "不要用旧年份或过期事件替代最新信息，除非明确说明其仍在持续影响当前市场。"
+        )
+
+    @classmethod
+    def _dedupe_items(cls, items: list[str], *, limit: int = 4) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            clean = " ".join((item or "").split()).strip(" ,，:：;；")
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            values.append(clean)
+            if len(values) >= limit:
+                break
+        return values
+
+    @classmethod
+    def _build_tavily_query_seed(cls, prompt: str, context: str) -> dict:
+        current_date = cls.now_in_shanghai().strftime("%Y-%m-%d")
+        scene = "general"
+        focus = ""
+        keywords: list[str] = []
+
+        if context.startswith("portfolio_advice:"):
+            scene = "portfolio_advice"
+            parts = context.split(":")
+            code = parts[1] if len(parts) > 1 else ""
+            mode = parts[2] if len(parts) > 2 else ""
+            match = re.search(r"代码:\s*([0-9A-Za-z]+),\s*名称:\s*([^\n]+)", prompt)
+            if match:
+                code = match.group(1).strip()
+                name = match.group(2).strip()
+                keywords.extend([code, name])
+            elif code:
+                keywords.append(code)
+            focus = "ETF持仓分析" if mode != "scheduled" else "ETF收盘复盘"
+        elif context.startswith("account_analysis:"):
+            scene = "account_analysis"
+            mode = context.split(":")[1] if ":" in context else ""
+            holdings_section = ""
+            match = re.search(r"## 持仓明细(?:.*)?\n(.*?)(?:\n## |\Z)", prompt, re.S)
+            if match:
+                holdings_section = match.group(1)
+            holding_codes = re.findall(r"-\s*(\d{6})\s+([^\n:]+)", holdings_section)
+            for code, name in holding_codes[:3]:
+                keywords.extend([code.strip(), name.strip()])
+            focus = "账户持仓再平衡" if mode != "scheduled" else "账户收盘后再平衡"
+        else:
+            scene = context.split(":", 1)[0]
+            focus = "ETF市场新闻政策"
+            code_match = re.search(r"\b(\d{6})\b", prompt)
+            if code_match:
+                keywords.append(code_match.group(1))
+            name_match = re.search(r"名称:\s*([^\n]+)", prompt)
+            if name_match:
+                keywords.append(name_match.group(1).strip())
+
+        compact_keywords = cls._dedupe_items(keywords, limit=4)
+        return {
+            "current_date": current_date,
+            "scene": scene,
+            "focus": focus,
+            "keywords": compact_keywords,
+            "context": context,
+        }
+
+    @classmethod
+    def _build_tavily_planning_prompt(cls, prompt: str, context: str, max_calls: int) -> str:
+        seed = cls._build_tavily_query_seed(prompt, context)
+        return f"""你是搜索参数构造器。Tavily 工具已确定要调用，你只负责为后续联网搜索生成查询参数。
+
+## 时间基准
+{cls._prompt_time_context()}
+
+## 任务场景
+- scene: {seed["scene"]}
+- focus: {seed["focus"] or "ETF市场信息"}
+- keywords: {", ".join(seed["keywords"]) or "无"}
+
+要求:
+1. 直接输出 JSON，不要解释
+2. 输出 1 到 {max_calls} 个 tavily_search 调用
+3. query 必须简洁具体，优先围绕 keywords 和 focus 构建，并且必须包含完整当前日期 {seed["current_date"]}
+4. query 必须加入“最近”“近期”“最新”中的至少两个时间词
+5. portfolio_advice 场景优先生成“公告/新闻/政策/市场事件/基金动态”类查询，不要生成“持仓分析”“投资策略”这类分析型搜索词
+6. account_analysis 场景优先生成“持仓相关公告/新闻/政策/市场事件”类查询
+7. topic 优先使用 finance；只有明显是泛新闻时才用 news；不要输出无关 topic
+8. time_range 优先使用配置值对应的范围，不要随意放大
+9. max_results 取 3 到 5
+10. 不要复述原始分析 prompt，不要输出和查询无关的内容
+
+输出格式:
+{{"tool_calls":[{{"name":"tavily_search","arguments":{{"query":"关键词 最近 近期 最新 公告 新闻 {seed["current_date"]}","topic":"finance","time_range":"week","max_results":5}}}}]}}"""
+
+    @classmethod
+    def _default_tavily_tool_calls(cls, prompt: str, context: str, max_calls: int) -> list[dict]:
+        seed = cls._build_tavily_query_seed(prompt, context)
+        current_date = seed["current_date"]
+        keywords = seed["keywords"] or ["ETF", "市场"]
+        if seed["scene"] == "portfolio_advice":
+            suffix = ["最近", "近期", "最新", "公告", "新闻", "政策", current_date]
+        elif seed["scene"] == "account_analysis":
+            suffix = ["最近", "近期", "最新", "持仓", "公告", "新闻", current_date]
+        else:
+            suffix = ["最近", "近期", "最新", "新闻", current_date]
+        query = " ".join([*keywords[:3], *suffix]).strip()
+        return [{
+            "query": query[:240],
+            "topic": "finance",
+            "time_range": settings.tavily_time_range,
+            "max_results": min(max(settings.tavily_max_results, 3), 5),
+        }][:max_calls]
+
+    @classmethod
     async def enrich_prompt_with_tavily_tools(
         cls,
         llm: BaseLLMClient,
@@ -235,7 +359,7 @@ class AdvisorService:
         context: str,
         max_calls: int = 2,
     ) -> str:
-        """Let the model decide whether to call Tavily, then append tool results."""
+        """Build Tavily search params with a compact prompt, then append tool results."""
         if not TavilySearchService.is_enabled():
             print(
                 f"[Tavily] {context}: disabled "
@@ -248,48 +372,32 @@ class AdvisorService:
             )
             return prompt
 
-        planning_prompt = f"""你是后端工具调用规划器。请判断下面的任务是否需要调用 Tavily 联网搜索工具。
+        planning_prompt = cls._build_tavily_planning_prompt(prompt, context, max_calls)
 
-可用工具:
-- tavily_search(query, topic, time_range, max_results)
-
-调用规则:
-1. 只有当最新新闻、政策、宏观或市场事件会影响答案时才调用工具
-2. 最多调用 {max_calls} 次 tavily_search
-3. query 必须具体，包含 ETF 名称/代码、行业方向、市场或宏观变量之一
-4. topic 只能是 "finance" / "news" / "general"，ETF和投资问题优先 finance
-5. time_range 优先 "week"
-6. max_results 取 3 到 5
-7. 如果不需要搜索，返回空数组
-
-请只输出 JSON，不要添加解释:
-{{"tool_calls":[{{"name":"tavily_search","arguments":{{"query":"...","topic":"finance","time_range":"week","max_results":5}}}}]}}
-
-原始任务:
-{prompt[:12000]}"""
+        original_grounding = getattr(llm, "enable_grounding", None)
+        planning_disable_grounding = isinstance(original_grounding, bool)
+        if planning_disable_grounding:
+            llm.enable_grounding = False
 
         try:
-            plan = await cls.chat_json_with_logging(
-                llm,
-                planning_prompt,
-                context=f"tavily_tool_plan:{context}",
-            )
-        except Exception as exc:
-            print(f"[Tavily] 工具规划失败，跳过搜索: {exc}", flush=True)
-            print(
-                f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': True, 'search_used': None, 'search_queries': [], 'search_result_count': 0, 'detail': f'planning_failed: {exc}'}, ensure_ascii=False)}",
-                flush=True,
-            )
-            return prompt
+            try:
+                plan = await cls.chat_json_with_logging(
+                    llm,
+                    planning_prompt,
+                    context=f"tavily_tool_plan:{context}",
+                )
+            except Exception as exc:
+                print(f"[Tavily] 工具规划失败，使用默认查询: {exc}", flush=True)
+                calls = cls._default_tavily_tool_calls(prompt, context, max_calls)
+            else:
+                calls = cls._parse_tavily_tool_calls(plan, max_calls=max_calls)
+        finally:
+            if planning_disable_grounding:
+                llm.enable_grounding = original_grounding
 
-        calls = cls._parse_tavily_tool_calls(plan, max_calls=max_calls)
         if not calls:
-            print(f"[Tavily] {context}: 模型决定不调用 Tavily", flush=True)
-            print(
-                f"[Search] {json.dumps({'context': context, 'provider': 'tavily', 'source': 'tavily_tool', 'search_enabled': True, 'search_used': False, 'search_queries': [], 'search_result_count': 0, 'detail': 'model_skipped'}, ensure_ascii=False)}",
-                flush=True,
-            )
-            return prompt
+            print(f"[Tavily] {context}: 规划结果为空，使用默认查询", flush=True)
+            calls = cls._default_tavily_tool_calls(prompt, context, max_calls)
 
         responses = []
         for call in calls:
@@ -339,6 +447,9 @@ class AdvisorService:
         """构造LLM Prompt"""
         return f"""你是一名专业的ETF投资顾问。请根据以下信息给出投资建议。
 
+## 时间基准
+{AdvisorService._prompt_time_context()}
+
 ## 品种信息
 - 代码: {etf_code}, 名称: {etf_name}
 
@@ -361,7 +472,7 @@ class AdvisorService:
 - 距60日高点回撤={indicators.get('drawdown_60', 'N/A')}%, 距250日高点回撤={indicators.get('drawdown_250', 'N/A')}%
 - 20日波动率={indicators.get('volatility_20', 'N/A')}%, 60日波动率={indicators.get('volatility_60', 'N/A')}%
 
-请综合考虑技术面、基本面、政策面和市场情绪，并通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息，给出投资建议。
+请综合考虑技术面、基本面、政策面和市场情绪，并通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息，给出投资建议。搜索和事件判断必须围绕上述当前时间基准，不要引用过期信息作为当前决策依据。
 
 输出要求：
 1. 给出一个顶层主决策，格式上必须包含:
@@ -385,7 +496,7 @@ class AdvisorService:
 7. 三个周期的结论必须体现时间维度差异，不要重复同一句话
 8. 顶层 main_judgment / action / why 必须和 medium_term 保持一致，形成“结论 -> 依据 -> 动作”的闭环
 9. news_basis 和 policy_basis 必须来自模型联网搜索到的真实最新信息；如果当前模型不支持联网搜索或未检索到可靠结果，就返回空数组，不要编造
-10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
+10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。search_status 为 success/partial 且有可用搜索结果时，events 输出 2到5条互不重复的新闻、政策或宏观事件；只有搜索不可用、结果不足或相关性弱时才允许少于2条，并在 summary 中说明限制。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
 11. 如果 event_context.search_status 不是 "success"，不能因为新闻政策给出 buy/add/sell；如果事件 relevance 是 "weak"，不能作为主要依据；如果利好但 priced_in_risk 是 "high"，短期不能追高，只能 hold 或等待回踩
 12. 输出要直接、结构化，不要写额外解释文字
 
@@ -403,7 +514,10 @@ class AdvisorService:
     "policy_signal": "positive/neutral/negative/unknown",
     "macro_signal": "positive/neutral/negative/unknown",
     "news_signal": "positive/neutral/negative/unknown",
-    "events": [{{"title": "事件标题", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}]
+    "events": [
+      {{"title": "事件标题1", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}},
+      {{"title": "事件标题2", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}
+    ]
   }},
   "short_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
   "medium_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
@@ -424,6 +538,9 @@ class AdvisorService:
     ) -> str:
         """构造定时任务使用的收盘分析 Prompt"""
         return f"""你是一名专业的ETF投资顾问。请基于今日收盘后数据和最新可核实信息，对该ETF持仓给出投资建议。
+
+## 时间基准
+{AdvisorService._prompt_time_context()}
 
 ## 品种信息
 - 代码: {etf_code}, 名称: {etf_name}
@@ -450,7 +567,7 @@ class AdvisorService:
 分析要求：
 1. 本次分析默认基于今日收盘后数据，不按盘中波动口径给出判断
 2. 请综合考虑技术面、基本面、政策面和市场情绪
-3. 通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息
+3. 通过模型自带的联网搜索能力主动搜索最新的相关新闻和政策消息；搜索和事件判断必须围绕上述当前时间基准，不要引用过期信息作为当前决策依据
 4. 结论要更偏向“收盘后的复盘判断”和“下一交易日到未来数周的执行策略”
 5. 如果行情源暂未更新到今日，则按“最新可用交易日收盘数据”理解，不要假设存在盘中实时价格
 
@@ -476,7 +593,7 @@ class AdvisorService:
 7. 三个周期的结论必须体现时间维度差异，不要重复同一句话
 8. 顶层 main_judgment / action / why 必须和 medium_term 保持一致，形成“结论 -> 依据 -> 动作”的闭环
 9. news_basis 和 policy_basis 必须来自模型联网搜索到的真实最新信息；如果当前模型不支持联网搜索或未检索到可靠结果，就返回空数组，不要编造
-10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
+10. 必须输出 event_context，用于记录搜索状态、来源质量、事件相关性和是否可能已定价。search_status 为 success/partial 且有可用搜索结果时，events 输出 2到5条互不重复的新闻、政策或宏观事件；只有搜索不可用、结果不足或相关性弱时才允许少于2条，并在 summary 中说明限制。不要让新闻政策直接决定买卖，必须先判断事件和 ETF 的相关性、时效性、来源质量、已定价风险，再结合技术位置决定动作
 11. 如果 event_context.search_status 不是 "success"，不能因为新闻政策给出 buy/add/sell；如果事件 relevance 是 "weak"，不能作为主要依据；如果利好但 priced_in_risk 是 "high"，短期不能追高，只能 hold 或等待回踩
 12. 输出要直接、结构化，不要写额外解释文字
 
@@ -494,7 +611,10 @@ class AdvisorService:
     "policy_signal": "positive/neutral/negative/unknown",
     "macro_signal": "positive/neutral/negative/unknown",
     "news_signal": "positive/neutral/negative/unknown",
-    "events": [{{"title": "事件标题", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}]
+    "events": [
+      {{"title": "事件标题1", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}},
+      {{"title": "事件标题2", "date": "YYYY-MM-DD", "source": "来源", "relevance": "direct/indirect/weak/unknown", "impact": "positive/neutral/negative/unknown", "priced_in_risk": "low/medium/high/unknown", "summary": "与ETF关系和影响摘要"}}
+    ]
   }},
   "short_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
   "medium_term": {{"advice_type": "操作建议", "action": "具体动作", "conclusion": "一句话结论", "signals": ["依据1", "依据2"], "risks": ["风险1"], "confidence": 置信度数值}},
@@ -707,6 +827,9 @@ class AdvisorService:
         """构造账户级分析 Prompt"""
         return f"""你是一名专业的ETF投资顾问。请根据当前账户整体情况，给出账户层面的投资建议。
 
+## 时间基准
+{AdvisorService._prompt_time_context()}
+
 ## 账户概览
 {portfolio_summary_text}
 
@@ -721,6 +844,7 @@ class AdvisorService:
 2. 当前持仓是否过于集中，是否需要分散或再平衡
 3. 哪些方向应该继续持有，哪些方向应该减仓或观察
 4. 接下来1-3条最重要的账户操作建议
+5. 如引用市场、政策、宏观或新闻背景，必须以时间基准中的当前日期为准，优先使用近期信息，不要用过期事件作为当前调仓依据
 
 输出要求：
 1. summary: 对当前账户状态的总体判断，120字以内
@@ -742,6 +866,9 @@ class AdvisorService:
         """构造定时任务使用的账户级分析 Prompt"""
         return f"""你是一名专业的ETF投资顾问。请基于今日收盘后数据，对当前账户整体情况给出本周分析结论和后续投资建议。
 
+## 时间基准
+{AdvisorService._prompt_time_context()}
+
 ## 账户概览 (基于今日收盘后账户快照)
 {portfolio_summary_text}
 
@@ -757,6 +884,7 @@ class AdvisorService:
 3. 哪些方向本周应继续持有，哪些方向本周应减仓或观察
 4. 给出接下来一周最重要的 1-3 条账户操作建议
 5. 如果行情源未完全更新到今日，则按最新可用交易日收盘后的账户快照理解，不要按盘中口径推断
+6. 如引用市场、政策、宏观或新闻背景，必须以时间基准中的当前日期为准，优先使用近期信息，不要用过期事件作为本周调仓依据
 
 输出要求：
 1. summary: 对当前账户状态的本周总体判断，120字以内，明确体现“本周分析结论”
@@ -974,7 +1102,7 @@ class AdvisorService:
             llm,
             prompt,
             context=f"portfolio_advice:{p.etf_code}:{analysis_mode}",
-            max_calls=2,
+            max_calls=1,
         )
 
         try:
@@ -1313,7 +1441,7 @@ class AdvisorService:
             llm,
             prompt,
             context=f"account_analysis:{analysis_mode}",
-            max_calls=3,
+            max_calls=1,
         )
         try:
             result_json = await cls.chat_json_with_logging(

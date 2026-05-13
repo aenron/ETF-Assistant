@@ -1,9 +1,33 @@
-from pydantic import Field
+import math
+
+from pydantic import field_validator
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
 from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
+
+
+def _finite_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(parsed) or math.isinf(parsed):
+        return default
+    return parsed
+
+
+def _optional_finite_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
 
 
 class DecimalModel(ShanghaiBaseModel):
@@ -47,6 +71,20 @@ class PortfolioWithMarket(PortfolioResponse):
     today_pnl_pct: Optional[float] = None
     holding_days: Optional[int] = None
 
+    @field_validator(
+        "current_price",
+        "change_pct",
+        "market_value",
+        "pnl",
+        "pnl_pct",
+        "today_pnl",
+        "today_pnl_pct",
+        mode="before",
+    )
+    @classmethod
+    def clean_optional_float(cls, value):
+        return _optional_finite_float(value)
+
 
 class PortfolioSummary(ShanghaiBaseModel):
     """持仓汇总"""
@@ -58,3 +96,20 @@ class PortfolioSummary(ShanghaiBaseModel):
     today_pnl_pct: Optional[float] = None
     category_distribution: dict[str, float]
     total_assets: Optional[float] = None  # 总金额 = 持仓市值 + 可用资金
+
+    @field_validator("total_market_value", "total_cost", "total_pnl", "total_pnl_pct", mode="before")
+    @classmethod
+    def clean_required_float(cls, value):
+        return _finite_float(value)
+
+    @field_validator("today_pnl", "today_pnl_pct", "total_assets", mode="before")
+    @classmethod
+    def clean_summary_optional_float(cls, value):
+        return _optional_finite_float(value)
+
+    @field_validator("category_distribution", mode="before")
+    @classmethod
+    def clean_category_distribution(cls, value):
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): _finite_float(item) for key, item in value.items()}

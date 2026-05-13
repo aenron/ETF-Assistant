@@ -12,6 +12,11 @@ services:
       - ./backend/.env:/app/.env:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+    networks:
+      etf-assistant-net:
+        aliases:
+          - backend
+          - etf-assistant-backend
     restart: unless-stopped
 
   # 前端服务
@@ -26,6 +31,13 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+    networks:
+      - etf-assistant-net
     ports:
       - "8123:80"
     restart: unless-stopped
+
+networks:
+  etf-assistant-net:
+    name: etf-assistant-net
+    driver: bridge

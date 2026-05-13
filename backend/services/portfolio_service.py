@@ -1,5 +1,6 @@
 from datetime import date, datetime, time
 from decimal import Decimal
+import math
 from typing import Optional, List
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, func
@@ -41,6 +42,26 @@ class PortfolioService:
         return cls._quote_refresh_date(refreshed_at) == now.date()
 
     @staticmethod
+    def _finite_float(value, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        if math.isnan(parsed) or math.isinf(parsed):
+            return default
+        return parsed
+
+    @staticmethod
+    def _optional_finite_float(value) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(parsed) or math.isinf(parsed):
+            return None
+        return parsed
+
+    @staticmethod
     def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket], available_cash: float = 0.0) -> PortfolioSummary:
         """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
         total_market_value = 0.0
@@ -51,36 +72,41 @@ class PortfolioService:
         category_distribution = {}
 
         for p in portfolios:
-            if p.market_value:
-                total_market_value += p.market_value
-                cost = float(p.shares) * float(p.cost_price)
+            market_value = PortfolioService._optional_finite_float(p.market_value)
+            if market_value is not None and market_value > 0:
+                total_market_value += market_value
+                cost = PortfolioService._finite_float(p.shares) * PortfolioService._finite_float(p.cost_price)
                 total_cost += cost
 
-                if p.today_pnl is not None:
-                    today_pnl += p.today_pnl
-                    today_previous_value += p.market_value - p.today_pnl
+                item_today_pnl = PortfolioService._optional_finite_float(p.today_pnl)
+                if item_today_pnl is not None:
+                    today_pnl += item_today_pnl
+                    today_previous_value += market_value - item_today_pnl
                     has_today_pnl = True
 
                 category = MarketService._guess_category(p.etf_name or "")
                 if category not in category_distribution:
                     category_distribution[category] = 0.0
-                category_distribution[category] += p.market_value
+                category_distribution[category] += market_value
 
         total_pnl = total_market_value - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         today_pnl_value = today_pnl if has_today_pnl else None
         today_pnl_pct = (today_pnl / today_previous_value * 100) if has_today_pnl and today_previous_value > 0 else None
-        total_assets = total_market_value + available_cash
+        total_assets = total_market_value + PortfolioService._finite_float(available_cash)
 
         return PortfolioSummary(
-            total_market_value=total_market_value,
-            total_cost=total_cost,
-            total_pnl=total_pnl,
-            total_pnl_pct=total_pnl_pct,
-            today_pnl=today_pnl_value,
-            today_pnl_pct=today_pnl_pct,
-            category_distribution=category_distribution,
-            total_assets=total_assets,
+            total_market_value=PortfolioService._finite_float(total_market_value),
+            total_cost=PortfolioService._finite_float(total_cost),
+            total_pnl=PortfolioService._finite_float(total_pnl),
+            total_pnl_pct=PortfolioService._finite_float(total_pnl_pct),
+            today_pnl=PortfolioService._optional_finite_float(today_pnl_value),
+            today_pnl_pct=PortfolioService._optional_finite_float(today_pnl_pct),
+            category_distribution={
+                category: PortfolioService._finite_float(value)
+                for category, value in category_distribution.items()
+            },
+            total_assets=PortfolioService._finite_float(total_assets),
         )
     
     @staticmethod
@@ -177,9 +203,13 @@ class PortfolioService:
         results = []
         for p in portfolios:
             quote = quotes.get(p.etf_code)
-            if quote:
-                market_value = float(p.shares) * quote.price
-                cost = float(p.shares) * float(p.cost_price)
+            price = cls._optional_finite_float(quote.price) if quote else None
+            if quote and price is not None and price > 0:
+                shares = cls._finite_float(p.shares)
+                cost_price = cls._finite_float(p.cost_price)
+                change_pct = cls._optional_finite_float(quote.change_pct)
+                market_value = shares * price
+                cost = shares * cost_price
                 pnl = market_value - cost
                 pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                 today_pnl = None
@@ -189,10 +219,10 @@ class PortfolioService:
                     if p.buy_date == today:
                         today_pnl = pnl
                         today_pnl_pct = pnl_pct
-                    elif quote.change_pct is not None:
-                        previous_value = market_value / (1 + quote.change_pct / 100) if quote.change_pct != -100 else 0.0
+                    elif change_pct is not None:
+                        previous_value = market_value / (1 + change_pct / 100) if change_pct != -100 else 0.0
                         today_pnl = market_value - previous_value
-                        today_pnl_pct = quote.change_pct
+                        today_pnl_pct = change_pct
                 
                 holding_days = None
                 if p.buy_date:
@@ -208,14 +238,14 @@ class PortfolioService:
                     created_at=p.created_at,
                     updated_at=p.updated_at,
                     etf_name=quote.name,
-                    current_price=quote.price,
-                    change_pct=quote.change_pct,
+                    current_price=price,
+                    change_pct=change_pct,
                     market_refreshed_at=quote.refreshed_at,
-                    market_value=market_value,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    today_pnl=today_pnl,
-                    today_pnl_pct=today_pnl_pct,
+                    market_value=cls._finite_float(market_value),
+                    pnl=cls._finite_float(pnl),
+                    pnl_pct=cls._finite_float(pnl_pct),
+                    today_pnl=cls._optional_finite_float(today_pnl),
+                    today_pnl_pct=cls._optional_finite_float(today_pnl_pct),
                     holding_days=holding_days,
                 ))
             else:

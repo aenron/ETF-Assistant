@@ -68,12 +68,17 @@ async def lifespan(app: FastAPI):
     await run_migrations()
     await ensure_admin_user()
     # 启动定时任务调度器
-    start_scheduler()
-    await apply_scheduler_job_configs()
+    if settings.scheduler_enabled:
+        start_scheduler()
+        await apply_scheduler_job_configs()
+        print("[Startup] 定时任务调度器已启用")
+    else:
+        print("[Startup] 定时任务调度器已禁用（SCHEDULER_ENABLED=false）")
     print("[Startup] 行情数据将按需从Redis缓存获取")
     yield
     # 关闭时清理资源
-    shutdown_scheduler()
+    if settings.scheduler_enabled:
+        shutdown_scheduler()
     await RedisService.close()
 
 

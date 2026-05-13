@@ -1,9 +1,44 @@
-from pydantic import ConfigDict
+import math
+
+from pydantic import field_validator
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Optional, List
 
 from schemas.base import ShanghaiBaseModel
+
+
+def _finite_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(parsed) or math.isinf(parsed):
+        return default
+    return parsed
+
+
+def _optional_finite_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _optional_finite_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return int(parsed)
 
 
 class MarketQuote(ShanghaiBaseModel):
@@ -19,6 +54,21 @@ class MarketQuote(ShanghaiBaseModel):
     amount: Optional[float] = None
     refreshed_at: Optional[datetime] = None
 
+    @field_validator("price", "change_pct", mode="before")
+    @classmethod
+    def clean_required_float(cls, value):
+        return _finite_float(value)
+
+    @field_validator("open_price", "high_price", "low_price", "amount", mode="before")
+    @classmethod
+    def clean_optional_float(cls, value):
+        return _optional_finite_float(value)
+
+    @field_validator("volume", mode="before")
+    @classmethod
+    def clean_optional_int(cls, value):
+        return _optional_finite_int(value)
+
 
 class KLineItem(ShanghaiBaseModel):
     """K线数据项"""
@@ -30,6 +80,16 @@ class KLineItem(ShanghaiBaseModel):
     volume: int
     change_pct: float
 
+    @field_validator("open_price", "close_price", "high_price", "low_price", "change_pct", mode="before")
+    @classmethod
+    def clean_kline_float(cls, value):
+        return _finite_float(value)
+
+    @field_validator("volume", mode="before")
+    @classmethod
+    def clean_kline_volume(cls, value):
+        return _optional_finite_int(value) or 0
+
 
 class TechnicalIndicators(ShanghaiBaseModel):
     """技术指标"""
@@ -40,6 +100,11 @@ class TechnicalIndicators(ShanghaiBaseModel):
     macd_dif: Optional[float] = None
     macd_dea: Optional[float] = None
     macd_histogram: Optional[float] = None
+
+    @field_validator("ma5", "ma10", "ma20", "rsi14", "macd_dif", "macd_dea", "macd_histogram", mode="before")
+    @classmethod
+    def clean_indicator_float(cls, value):
+        return _optional_finite_float(value)
 
 
 class MarketDailyResponse(ShanghaiBaseModel):

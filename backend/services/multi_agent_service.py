@@ -179,7 +179,8 @@ class MultiAgentService:
             clean = cls._normalize_text(value)
             if not clean:
                 clean = cls._normalize_text(question or "")
-            recent_tokens = ("最新", "近期", "今日", "当前", "2026", "本周", "本月")
+            current_date = now_in_shanghai().strftime("%Y-%m-%d")
+            recent_tokens = ("最新", "近期", "今日", "当前", current_date, "本周", "本月")
             historical_tokens = ("历史", "回顾", "复盘", "当时", "过去")
             if any(year in clean for year in ("2024", "2025")) and not any(token in clean for token in historical_tokens):
                 clean = (
@@ -189,8 +190,10 @@ class MultiAgentService:
                     .replace("2025", "")
                 )
                 clean = cls._normalize_text(clean)
-            if not any(token in clean for token in recent_tokens):
-                clean = cls._normalize_text(f"{clean} 最新 近期 2026")
+            if current_date not in clean:
+                clean = cls._normalize_text(f"{clean} 最新 近期 {current_date}")
+            elif not any(token in clean for token in recent_tokens):
+                clean = cls._normalize_text(f"{clean} 最新 近期")
             return clean[:180]
 
         async def search_latest_news(args: dict[str, Any]) -> dict[str, Any]:
@@ -475,6 +478,7 @@ class MultiAgentService:
     ) -> list[str]:
         question_text = cls._normalize_text(question)
         codes = []
+        current_date = now_in_shanghai().strftime("%Y-%m-%d")
         for item in holdings_preview[:2]:
             code = cls._normalize_text(item.split("|", 1)[0])
             if code:
@@ -486,19 +490,19 @@ class MultiAgentService:
                 base = question_text
                 if codes:
                     base = f"{base} {' '.join(codes)}"
-                queries.append(f"{base} 最新 公告 新闻 政策 宏观 市场")
+                queries.append(f"{base} 最新 公告 新闻 政策 宏观 市场 {current_date}")
             elif codes:
-                queries.append(f"{' '.join(codes)} 最新 公告 新闻 政策 宏观 市场")
+                queries.append(f"{' '.join(codes)} 最新 公告 新闻 政策 宏观 市场 {current_date}")
         elif scene == MultiAgentScene.ACCOUNT:
             base = question_text or "账户组合 再平衡 风险"
             if codes:
                 base = f"{base} {' '.join(codes)}"
-            queries.append(f"{base} 最新 政策 新闻 风险 市场")
+            queries.append(f"{base} 最新 政策 新闻 风险 市场 {current_date}")
         else:
             if question_text:
-                queries.append(f"{question_text} 最新 公告 新闻 政策 宏观 市场")
+                queries.append(f"{question_text} 最新 公告 新闻 政策 宏观 市场 {current_date}")
             elif portfolio_summary:
-                queries.append("投资 最新 公告 新闻 政策 宏观 市场")
+                queries.append(f"投资 最新 公告 新闻 政策 宏观 市场 {current_date}")
 
         deduped: list[str] = []
         for query in queries:
@@ -606,12 +610,13 @@ class MultiAgentService:
     ) -> list[str]:
         question_text = cls._normalize_text(question)
         codes = cls._extract_etf_codes(question, holdings_preview)[:3]
+        current_date = now_in_shanghai().strftime("%Y-%m-%d")
         base = question_text or "ETF 市场"
         if codes:
             base = f"{base} {' '.join(codes)}"
         queries = [
-            f"{base} 最新 政策 公告 监管 新闻 行业 影响",
-            f"{base} 最新 宏观 政策 产业政策 事件 催化 风险",
+            f"{base} 最新 政策 公告 监管 新闻 行业 影响 {current_date}",
+            f"{base} 最新 宏观 政策 产业政策 事件 催化 风险 {current_date}",
         ]
         deduped: list[str] = []
         for query in queries:
@@ -1143,7 +1148,6 @@ class MultiAgentService:
         llm = cls._create_llm_client(provider)
         context = f"multi_agent:{scene.value}:{role.key}:r{round_index}"
         from services.advisor_service import AdvisorService
-
         raw = await AdvisorService.chat_json_with_logging(llm, prompt, context=context)
         return cls._normalize_role_opinion(raw, role=role, round_index=round_index)
 
@@ -1226,11 +1230,16 @@ class MultiAgentService:
         opposing_points: Sequence[str] = (),
         disagreement_summary: str = "",
     ) -> str:
+        from services.advisor_service import AdvisorService
+
         prompt_sections = [
             f"你是多智能体投资辩论系统中的【{role.role_name}】。",
             f"场景：{scene.value}",
             f"轮次：第{round_index}轮{'初评' if round_index == 1 else '辩论'}",
             f"角色职责：{role.focus}",
+            "",
+            "## 时间基准",
+            AdvisorService._prompt_time_context(),
             "请输出 JSON，字段必须包含：stance, action, summary, evidence, risk_notes, confidence, rebuttals。",
             "stance 只能是 bullish / neutral / bearish / mixed 之一；confidence 为 0-100 的数字。",
             "rebuttals 用于列出你对其他角色最强反对点的回应，首轮可为空数组。",

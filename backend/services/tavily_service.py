@@ -34,6 +34,7 @@ class TavilySearchService:
     """Small wrapper around Tavily Search API used as an LLM tool."""
 
     ENDPOINT = "https://api.tavily.com/search"
+    VALID_SEARCH_DEPTHS = {"advanced", "basic", "fast", "ultra-fast"}
     VALID_TOPICS = {"general", "news", "finance"}
     VALID_TIME_RANGES = {"day", "week", "month", "year", "d", "w", "m", "y"}
 
@@ -60,6 +61,12 @@ class TavilySearchService:
         return max(1, min(parsed, 10))
 
     @classmethod
+    def normalize_search_depth(cls) -> str:
+        """search_depth only comes from environment config and cannot be overridden by callers."""
+        value = (settings.tavily_search_depth or "basic").strip().lower()
+        return value if value in cls.VALID_SEARCH_DEPTHS else "basic"
+
+    @classmethod
     async def search(
         cls,
         query: str,
@@ -78,7 +85,7 @@ class TavilySearchService:
         body: dict[str, Any] = {
             "query": clean_query,
             "topic": cls.normalize_topic(topic),
-            "search_depth": settings.tavily_search_depth,
+            "search_depth": cls.normalize_search_depth(),
             "max_results": cls.normalize_max_results(max_results),
             "include_answer": "basic",
             "include_raw_content": False,

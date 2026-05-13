@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     
     # 行情缓存天数
     market_cache_days: int = 60
+
+    # 定时任务开关，排查启动/后台任务问题时可临时关闭
+    scheduler_enabled: bool = True
+
+    # Tushare 行情补充数据源
+    tushare_token: str = ""
     
     class Config:
         env_file = ".env"
