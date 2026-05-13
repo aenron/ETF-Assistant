@@ -38,16 +38,14 @@ async def generate_account_analysis(
     # 刷新用户数据以获取最新的账户余额
     await db.refresh(current_user)
     
-    # 计算实际可用现金：账户总金额 - 持仓市值
+    # current_user.account_balance 表示前端维护的可用资金，不是总资产。
     from services.portfolio_service import PortfolioService
     
-    portfolios = await PortfolioService.get_with_market(db, user_id=current_user.id)
-    summary = PortfolioService.build_summary_from_portfolios(portfolios)
-    total_market_value = summary.total_market_value
-    
-    # 如果用户设置了账户总金额，计算可用现金；否则为0
-    user_total_balance = float(current_user.account_balance) if current_user.account_balance else 0.0
-    available_cash = max(0.0, user_total_balance - total_market_value)
+    available_cash = (
+        PortfolioService._finite_float(current_user.account_balance)
+        if current_user.account_balance is not None
+        else 0.0
+    )
     
     return await AdvisorService.generate_account_analysis(
         db,

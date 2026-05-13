@@ -24,6 +24,7 @@ class AssistantService:
 
     HISTORY_LIMIT = 20
     MEMORY_WINDOW = 12
+    LLM_MAX_ATTEMPTS = 3
     @staticmethod
     def normalize_response(text: str) -> str:
         """清洗模型返回，避免把 JSON 包装直接展示给前端"""
@@ -121,6 +122,58 @@ class AssistantService:
                 yield "chunk", chunk
 
         yield "done", final_text
+
+    @classmethod
+    async def chat_with_retry(cls, llm, prompt: str, context: str) -> str:
+        last_error: Exception | None = None
+        for attempt in range(1, cls.LLM_MAX_ATTEMPTS + 1):
+            retry_context = context if attempt == 1 else f"{context}:retry:{attempt}"
+            try:
+                if attempt > 1:
+                    print(f"[Assistant] LLM调用失败后重试: {retry_context}", flush=True)
+                return await AdvisorService.chat_with_logging(llm, prompt, context=retry_context)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= cls.LLM_MAX_ATTEMPTS:
+                    break
+                print(
+                    f"[Assistant] LLM调用失败，准备第 {attempt + 1}/{cls.LLM_MAX_ATTEMPTS} 次尝试: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("LLM调用失败")
+
+    @classmethod
+    async def stream_and_collect_response_with_retry(
+        cls,
+        llm,
+        prompt: str,
+        context: str = "assistant_stream",
+    ) -> AsyncIterator[tuple[str, str | None]]:
+        last_error: Exception | None = None
+        for attempt in range(1, cls.LLM_MAX_ATTEMPTS + 1):
+            emitted_chunk = False
+            retry_context = context if attempt == 1 else f"{context}:retry:{attempt}"
+            try:
+                if attempt > 1:
+                    print(f"[Assistant] 流式LLM调用失败后重试: {retry_context}", flush=True)
+                async for event_type, payload in cls.stream_and_collect_response(llm, prompt, retry_context):
+                    if event_type == "chunk" and payload:
+                        emitted_chunk = True
+                    yield event_type, payload
+                return
+            except Exception as exc:
+                last_error = exc
+                if emitted_chunk or attempt >= cls.LLM_MAX_ATTEMPTS:
+                    break
+                print(
+                    f"[Assistant] 流式LLM调用失败，准备第 {attempt + 1}/{cls.LLM_MAX_ATTEMPTS} 次尝试: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("流式LLM调用失败")
 
     @staticmethod
     def build_session_title(message: str) -> str:
@@ -325,7 +378,7 @@ class AssistantService:
 
         try:
             reply_text = cls.normalize_response(
-                await AdvisorService.chat_with_logging(
+                await cls.chat_with_retry(
                     llm,
                     prompt,
                     context=f"assistant_chat:session:{conversation.id}",
@@ -381,7 +434,7 @@ class AssistantService:
 
             final_text = ""
             try:
-                async for event_type, payload in cls.stream_and_collect_response(
+                async for event_type, payload in cls.stream_and_collect_response_with_retry(
                     llm,
                     prompt,
                     context=f"assistant_stream:session:{conversation.id}",
@@ -457,10 +510,13 @@ class AssistantService:
         )
         if include_portfolio_context:
             portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
-            summary = PortfolioService.build_summary_from_portfolios(portfolios)
-            account_balance = float(user.account_balance) if user and user.account_balance is not None else 0.0
-            total_market_value = summary.total_market_value
-            available_cash = max(0.0, account_balance - total_market_value)
+            available_cash = (
+                PortfolioService._finite_float(user.account_balance)
+                if user and user.account_balance is not None
+                else 0.0
+            )
+            summary = PortfolioService.build_summary_from_portfolios(portfolios, available_cash)
+            total_assets = summary.total_assets if summary.total_assets is not None else summary.total_market_value + available_cash
             portfolio_lines = []
             for item in portfolios:
                 current_price = f"{item.current_price:.4f}" if item.current_price is not None else "N/A"
@@ -473,7 +529,7 @@ class AssistantService:
             portfolio_text = "\n".join(portfolio_lines) if portfolio_lines else "当前无持仓。"
             portfolio_context = (
                 f"账户概况:\n"
-                f"- 账户总金额: {account_balance:.2f}\n"
+                f"- 账户总资产: {total_assets:.2f}\n"
                 f"- 持仓总市值: {summary.total_market_value:.2f}\n"
                 f"- 可用现金: {available_cash:.2f}\n"
                 f"- 总成本: {summary.total_cost:.2f}\n"
