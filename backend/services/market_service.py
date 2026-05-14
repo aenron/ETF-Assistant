@@ -972,16 +972,7 @@ class MarketService:
             except Exception as e:
                 print(f"[MarketService] Tushare历史K线异常: {e}")
         
-        # 场外基金净值走势
-        try:
-            result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
-            if result:
-                await cls.cache_kline(code, days, result)
-                return result
-        except Exception as e:
-            print(f"[MarketService] akshare场外基金净值异常: {e}")
-
-        # 备用：新浪API。放在场外基金之后，避免场外基金代码被误识别为交易所代码。
+        # 备用：新浪API。优先于场外基金净值，避免场内 ETF 被净值走势降级成伪 K 线。
         try:
             result = await cls._fetch_history_kline_sina(code, days)
             if result:
@@ -989,6 +980,15 @@ class MarketService:
                 return result
         except Exception as e:
             print(f"[MarketService] 新浪API获取K线异常: {e}")
+
+        # 场外基金净值走势。只作为最后兜底；该数据源没有真实开高低收。
+        try:
+            result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
+            if result:
+                await cls.cache_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] akshare场外基金净值异常: {e}")
         
         print(f"[MarketService] ✗ 历史K线获取失败: {code}")
         return []

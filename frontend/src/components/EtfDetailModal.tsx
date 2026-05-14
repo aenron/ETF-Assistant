@@ -41,6 +41,8 @@ type ParsedDecisionSummary = {
   policyBasis: string[]
 }
 
+type IndicatorLineKey = 'ma5' | 'ma10' | 'ma20' | 'boll' | 'macd'
+
 function splitAdviceItems(value: string) {
   return value
     .split(/[；;]\s*/)
@@ -203,6 +205,71 @@ function formatVolumeLabel(value: number) {
   return value.toFixed(0)
 }
 
+function calculateMovingAverage(data: CandlePoint[], period: number) {
+  return data.map((_, index) => {
+    if (index < period - 1) return null
+    const window = data.slice(index - period + 1, index + 1)
+    const sum = window.reduce((total, item) => total + item.close, 0)
+    return sum / period
+  })
+}
+
+function findLastNumberIndex(values: Array<number | null>) {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (values[index] != null) return index
+  }
+  return -1
+}
+
+function calculateBollingerBands(data: CandlePoint[], period = 20, multiplier = 2) {
+  const middle = calculateMovingAverage(data, period)
+  const upper: Array<number | null> = []
+  const lower: Array<number | null> = []
+
+  data.forEach((_, index) => {
+    const middleValue = middle[index]
+    if (middleValue == null) {
+      upper.push(null)
+      lower.push(null)
+      return
+    }
+
+    const window = data.slice(index - period + 1, index + 1)
+    const variance = window.reduce((total, item) => total + (item.close - middleValue) ** 2, 0) / period
+    const standardDeviation = Math.sqrt(variance)
+    upper.push(middleValue + standardDeviation * multiplier)
+    lower.push(middleValue - standardDeviation * multiplier)
+  })
+
+  return { middle, upper, lower }
+}
+
+function calculateEma(values: number[], period: number) {
+  const multiplier = 2 / (period + 1)
+  const result: number[] = []
+
+  values.forEach((value, index) => {
+    if (index === 0) {
+      result.push(value)
+      return
+    }
+    result.push((value - result[index - 1]) * multiplier + result[index - 1])
+  })
+
+  return result
+}
+
+function calculateMacd(data: CandlePoint[]) {
+  const closes = data.map((item) => item.close)
+  const ema12 = calculateEma(closes, 12)
+  const ema26 = calculateEma(closes, 26)
+  const dif = closes.map((_, index) => ema12[index] - ema26[index])
+  const dea = calculateEma(dif, 9)
+  const histogram = dif.map((value, index) => (value - dea[index]) * 2)
+
+  return { dif, dea, histogram }
+}
+
 function displayValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString() : '-'
@@ -225,13 +292,15 @@ function visibleProfileErrors(errors: string[]) {
 function CandlestickChart({
   data,
   costPrice,
+  visibleIndicators,
 }: {
   data: CandlePoint[]
   costPrice?: number | null
+  visibleIndicators: Record<IndicatorLineKey, boolean>
 }) {
   const width = 960
   const height = 320
-  const padding = { top: 16, right: 56, bottom: 26, left: 56 }
+  const padding = { top: 16, right: 86, bottom: 26, left: 56 }
   const volumeHeight = 72
   const volumeGap = 14
   const priceHeight = height - padding.top - padding.bottom - volumeHeight - volumeGap
@@ -240,7 +309,32 @@ function CandlestickChart({
   const chartWidth = width - padding.left - padding.right
   const candleStep = chartWidth / Math.max(data.length, 1)
   const candleWidth = Math.max(4, Math.min(12, candleStep * 0.58))
-  const validPrices = data.flatMap((item) => [item.high, item.low])
+  const movingAverages = [
+    { key: 'ma5', label: 'MA5', color: '#2563eb', values: calculateMovingAverage(data, 5) },
+    { key: 'ma10', label: 'MA10', color: '#9333ea', values: calculateMovingAverage(data, 10) },
+    { key: 'ma20', label: 'MA20', color: '#f97316', values: calculateMovingAverage(data, 20) },
+  ] satisfies Array<{ key: IndicatorLineKey; label: string; color: string; values: Array<number | null> }>
+  const bollingerBands = calculateBollingerBands(data)
+  const bollLines = [
+    { key: 'boll-upper', label: 'BOLL上轨', color: '#0ea5e9', values: bollingerBands.upper, dashArray: '4 3' },
+    { key: 'boll-middle', label: 'BOLL中轨', color: '#64748b', values: bollingerBands.middle },
+    { key: 'boll-lower', label: 'BOLL下轨', color: '#0ea5e9', values: bollingerBands.lower, dashArray: '4 3' },
+  ]
+  const visibleAverages = movingAverages.filter((average) => visibleIndicators[average.key])
+  const visibleBollLines = visibleIndicators.boll ? bollLines : []
+  const visibleIndicatorLines = [...visibleAverages, ...visibleBollLines]
+  const macd = calculateMacd(data)
+  const macdMaxAbs = Math.max(
+    ...macd.dif.map((value) => Math.abs(value)),
+    ...macd.dea.map((value) => Math.abs(value)),
+    ...macd.histogram.map((value) => Math.abs(value)),
+    0.0001,
+  )
+  const validPrices = [
+    ...data.flatMap((item) => [item.high, item.low]),
+    ...movingAverages.flatMap((average) => average.values.filter((value): value is number => value != null)),
+    ...bollLines.flatMap((line) => line.values.filter((value): value is number => value != null)),
+  ]
   const baseMin = Math.min(...validPrices)
   const baseMax = Math.max(...validPrices)
   const includeCostLine = costPrice != null && costPrice > 0
@@ -256,12 +350,14 @@ function CandlestickChart({
   const getX = (index: number) => padding.left + candleStep * index + candleStep / 2
   const getPriceY = (value: number) => priceBottom - ((value - priceMin) / Math.max(priceMax - priceMin, 0.0001)) * priceHeight
   const getVolumeY = (value: number) => volumeTop + volumeHeight - (value / volumeMax) * volumeHeight
+  const getMacdY = (value: number) => volumeTop + volumeHeight / 2 - (value / macdMaxAbs) * (volumeHeight * 0.42)
+  const macdZeroY = getMacdY(0)
   const costY = includeCostLine ? getPriceY(costPrice) : null
 
   return (
     <div className="h-80 rounded-lg border bg-background/40 p-2">
-      <div className="mb-2 flex items-center justify-between px-2 text-xs text-muted-foreground">
-        <div className="flex items-center gap-3">
+      <div className="mb-2 flex items-center justify-between gap-2 px-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="inline-flex items-center gap-1">
             <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
             阳线
@@ -276,8 +372,36 @@ function CandlestickChart({
               成本线
             </span>
           ) : null}
+          {visibleAverages.map((average) => (
+            <span key={average.key} className="inline-flex items-center gap-1">
+              <span className="h-0.5 w-4" style={{ backgroundColor: average.color }} />
+              {average.label}
+            </span>
+          ))}
+          {visibleIndicators.boll ? (
+            <span className="inline-flex items-center gap-1">
+              <span className="h-0.5 w-4 bg-sky-500" />
+              BOLL
+            </span>
+          ) : null}
+          {visibleIndicators.macd ? (
+            <>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-0.5 w-4 bg-cyan-600" />
+                DIF
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-0.5 w-4 bg-amber-500" />
+                DEA
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+                MACD柱
+              </span>
+            </>
+          ) : null}
         </div>
-        <span>上方为价格，下方为成交量</span>
+        <span>上方为价格，下方为{visibleIndicators.macd ? 'MACD' : '成交量'}</span>
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="h-[calc(100%-24px)] w-full">
         {priceTicks.map((tick) => {
@@ -300,6 +424,14 @@ function CandlestickChart({
         <text x={padding.left - 10} y={volumeTop + volumeHeight + 4} textAnchor="end" fontSize="11" fill="currentColor" opacity="0.4">
           0
         </text>
+        {visibleIndicators.macd ? (
+          <g>
+            <line x1={padding.left} x2={width - padding.right} y1={macdZeroY} y2={macdZeroY} stroke="currentColor" strokeOpacity="0.14" strokeDasharray="3 3" />
+            <text x={width - padding.right + 6} y={macdZeroY + 4} fontSize="11" fill="currentColor" opacity="0.45">
+              MACD 0
+            </text>
+          </g>
+        ) : null}
 
         {costY != null ? (
           <g>
@@ -314,6 +446,87 @@ function CandlestickChart({
             />
             <text x={width - padding.right + 6} y={costY + 4} fontSize="11" fill="#f59e0b">
               成本 {costPrice?.toFixed(3)}
+            </text>
+          </g>
+        ) : null}
+
+        {visibleIndicatorLines.map((line, lineIndex) => {
+          const points = line.values
+            .map((value, index) => value == null ? null : `${getX(index)},${getPriceY(value)}`)
+            .filter((point): point is string => point != null)
+            .join(' ')
+          const lastIndex = findLastNumberIndex(line.values)
+          const lastValue = lastIndex >= 0 ? line.values[lastIndex] : null
+
+          return points ? (
+            <g key={line.key}>
+              <polyline
+                points={points}
+                fill="none"
+                stroke={line.color}
+                strokeWidth="1.6"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                strokeDasharray={'dashArray' in line ? line.dashArray : undefined}
+              />
+              {lastValue != null ? (
+                <text
+                  x={Math.min(getX(lastIndex) + 8, width - padding.right + 8)}
+                  y={Math.max(padding.top + 10, Math.min(getPriceY(lastValue) - 6 + lineIndex * 11, priceBottom - 6))}
+                  fontSize="11"
+                  fontWeight="600"
+                  fill={line.color}
+                >
+                  {line.label} {lastValue.toFixed(3)}
+                </text>
+              ) : null}
+            </g>
+          ) : null
+        })}
+
+        {visibleIndicators.macd ? (
+          <g>
+            {macd.histogram.map((value, index) => {
+              const x = getX(index)
+              const y = getMacdY(value)
+              const isUp = value >= 0
+              return (
+                <rect
+                  key={`macd-histogram-${data[index].fullDate}`}
+                  x={x - candleWidth / 2}
+                  y={Math.min(y, macdZeroY)}
+                  width={candleWidth}
+                  height={Math.max(Math.abs(y - macdZeroY), 1)}
+                  rx="1"
+                  fill={isUp ? '#ef4444' : '#10b981'}
+                  fillOpacity="0.56"
+                />
+              )
+            })}
+            <polyline
+              points={macd.dif.map((value, index) => `${getX(index)},${getMacdY(value)}`).join(' ')}
+              fill="none"
+              stroke="#0891b2"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+            <polyline
+              points={macd.dea.map((value, index) => `${getX(index)},${getMacdY(value)}`).join(' ')}
+              fill="none"
+              stroke="#f59e0b"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+            <text x={width - padding.right + 6} y={volumeTop + 14} fontSize="11" fill="#0891b2">
+              DIF {macd.dif[macd.dif.length - 1]?.toFixed(4)}
+            </text>
+            <text x={width - padding.right + 6} y={volumeTop + 28} fontSize="11" fill="#f59e0b">
+              DEA {macd.dea[macd.dea.length - 1]?.toFixed(4)}
+            </text>
+            <text x={width - padding.right + 6} y={volumeTop + 42} fontSize="11" fill={macd.histogram[macd.histogram.length - 1] >= 0 ? '#ef4444' : '#10b981'}>
+              柱 {macd.histogram[macd.histogram.length - 1]?.toFixed(4)}
             </text>
           </g>
         ) : null}
@@ -343,15 +556,17 @@ function CandlestickChart({
                 fill={candleColor}
                 fillOpacity={isUp ? 0.88 : 0.82}
               />
-              <rect
-                x={x - candleWidth / 2}
-                y={volumeY}
-                width={candleWidth}
-                height={Math.max(volumeHeightValue, 1)}
-                rx="1"
-                fill={candleColor}
-                fillOpacity="0.24"
-              />
+              {!visibleIndicators.macd ? (
+                <rect
+                  x={x - candleWidth / 2}
+                  y={volumeY}
+                  width={candleWidth}
+                  height={Math.max(volumeHeightValue, 1)}
+                  rx="1"
+                  fill={candleColor}
+                  fillOpacity="0.24"
+                />
+              ) : null}
               {xTickIndexes.includes(index) ? (
                 <text x={x} y={height - 6} textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">
                   {item.date}
@@ -372,6 +587,13 @@ function CandlestickChart({
 
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice' | 'profile'>('chart')
+  const [visibleIndicators, setVisibleIndicators] = useState<Record<IndicatorLineKey, boolean>>({
+    ma5: true,
+    ma10: true,
+    ma20: true,
+    boll: false,
+    macd: false,
+  })
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
   const [historyLoading, setHistoryLoading] = useState(true)
   const [profile, setProfile] = useState<EtfProfileResponse | null>(null)
@@ -456,12 +678,40 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     volume: k.volume,
     change: k.change_pct,
   }))
+  const latestClose = chartData.at(-1)?.close ?? null
+  const calculateBias = (ma: number | null | undefined) => {
+    if (latestClose == null || ma == null || ma <= 0) return null
+    return ((latestClose - ma) / ma) * 100
+  }
+  const biasIndicators = indicators ? {
+    bias5: calculateBias(indicators.ma5),
+    bias10: calculateBias(indicators.ma10),
+    bias20: calculateBias(indicators.ma20),
+  } : null
+  const formatBias = (value: number | null | undefined) => {
+    if (value == null || !Number.isFinite(value)) return 'N/A'
+    return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+  }
+  const biasClassName = (value: number | null | undefined) => {
+    if (value == null) return ''
+    return value >= 0 ? 'text-red-500' : 'text-green-500'
+  }
 
   const displayAdvice = advice || latestAdvice
   const profileErrors = profile ? visibleProfileErrors(profile.errors || []) : []
   const displayConfig = displayAdvice ? (adviceTypeConfig[displayAdvice.advice_type || 'hold'] || adviceTypeConfig.hold) : null
   const displayConfidence = displayAdvice ? (displayAdvice.confidence || 0) : 0
   const displayTime = displayAdvice?.created_at || null
+  const indicatorOptions: Array<{ key: IndicatorLineKey; label: string; colorClassName: string }> = [
+    { key: 'ma5', label: 'MA5', colorClassName: 'bg-blue-600' },
+    { key: 'ma10', label: 'MA10', colorClassName: 'bg-purple-600' },
+    { key: 'ma20', label: 'MA20', colorClassName: 'bg-orange-500' },
+    { key: 'boll', label: 'BOLL', colorClassName: 'bg-sky-500' },
+    { key: 'macd', label: 'MACD', colorClassName: 'bg-cyan-600' },
+  ]
+  const toggleIndicator = (key: IndicatorLineKey) => {
+    setVisibleIndicators((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -554,12 +804,28 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               {/* K线图 */}
               <Card>
                 <CardContent className="pt-4">
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <h3 className="text-sm font-semibold">近60日走势</h3>
-                    <Button size="sm" variant="ghost" onClick={fetchHistory} disabled={historyLoading}>
-                      <RefreshCw className={`h-3.5 w-3.5 mr-1 ${historyLoading ? 'animate-spin' : ''}`} />
-                      刷新
-                    </Button>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        {indicatorOptions.map((option) => (
+                          <label key={option.key} className="inline-flex cursor-pointer items-center gap-1.5">
+                            <input
+                              type="checkbox"
+                              checked={visibleIndicators[option.key]}
+                              onChange={() => toggleIndicator(option.key)}
+                              className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary"
+                            />
+                            <span className={`h-0.5 w-4 ${option.colorClassName}`} />
+                            <span>{option.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <Button size="sm" variant="ghost" onClick={fetchHistory} disabled={historyLoading}>
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${historyLoading ? 'animate-spin' : ''}`} />
+                        刷新
+                      </Button>
+                    </div>
                   </div>
                   {historyLoading ? (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
@@ -568,7 +834,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                     </div>
                   ) : chartData.length > 0 ? (
                     <div className="h-80">
-                      <CandlestickChart data={chartData} costPrice={p.cost_price} />
+                      <CandlestickChart data={chartData} costPrice={p.cost_price} visibleIndicators={visibleIndicators} />
                     </div>
                   ) : (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
@@ -598,6 +864,24 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                       <div className="space-y-1">
                         <span className="text-muted-foreground">MA20</span>
                         <p className="font-mono font-semibold">{indicators.ma20?.toFixed(3) ?? 'N/A'}</p>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-muted-foreground">BIAS5</span>
+                        <p className={`font-mono font-semibold ${biasClassName(biasIndicators?.bias5)}`}>
+                          {formatBias(biasIndicators?.bias5)}
+                        </p>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-muted-foreground">BIAS10</span>
+                        <p className={`font-mono font-semibold ${biasClassName(biasIndicators?.bias10)}`}>
+                          {formatBias(biasIndicators?.bias10)}
+                        </p>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-muted-foreground">BIAS20</span>
+                        <p className={`font-mono font-semibold ${biasClassName(biasIndicators?.bias20)}`}>
+                          {formatBias(biasIndicators?.bias20)}
+                        </p>
                       </div>
                       <div className="space-y-1">
                         <span className="text-muted-foreground">RSI(14)</span>
