@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { X, BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock, Database } from 'lucide-react'
+import { X, BarChart3, Activity, Calendar, Lightbulb, Loader2, RefreshCw, Clock, Database, Maximize2, Minimize2 } from 'lucide-react'
 import {
   marketApi, adviceApi,
   type PortfolioWithMarket, type MarketHistoryResponse, type AdviceResponse, type AdviceLogResponse, type EtfProfileResponse
@@ -42,6 +42,7 @@ type ParsedDecisionSummary = {
 }
 
 type IndicatorLineKey = 'ma5' | 'ma10' | 'ma20' | 'boll' | 'macd'
+type HistoryRangeDays = 60 | 120 | 365
 
 function splitAdviceItems(value: string) {
   return value
@@ -293,10 +294,12 @@ function CandlestickChart({
   data,
   costPrice,
   visibleIndicators,
+  className = 'h-80',
 }: {
   data: CandlePoint[]
   costPrice?: number | null
   visibleIndicators: Record<IndicatorLineKey, boolean>
+  className?: string
 }) {
   const width = 960
   const height = 320
@@ -355,7 +358,7 @@ function CandlestickChart({
   const costY = includeCostLine ? getPriceY(costPrice) : null
 
   return (
-    <div className="h-80 rounded-lg border bg-background/40 p-2">
+    <div className={`${className} rounded-lg border bg-background/40 p-2`}>
       <div className="mb-2 flex items-center justify-between gap-2 px-2 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="inline-flex items-center gap-1">
@@ -587,6 +590,8 @@ function CandlestickChart({
 
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice' | 'profile'>('chart')
+  const [historyDays, setHistoryDays] = useState<HistoryRangeDays>(60)
+  const [chartFullscreen, setChartFullscreen] = useState(false)
   const [visibleIndicators, setVisibleIndicators] = useState<Record<IndicatorLineKey, boolean>>({
     ma5: true,
     ma10: true,
@@ -605,6 +610,9 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
 
   useEffect(() => {
     fetchHistory()
+  }, [p.etf_code, historyDays])
+
+  useEffect(() => {
     fetchProfile()
     fetchLatestAdvice()
   }, [p.etf_code])
@@ -625,7 +633,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const fetchHistory = async () => {
     setHistoryLoading(true)
     try {
-      const res = await marketApi.getHistory(p.etf_code, 60)
+      const res = await marketApi.getHistory(p.etf_code, historyDays)
       setHistoryData(res.data)
     } catch (e) {
       console.error('Failed to fetch history:', e)
@@ -712,9 +720,101 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const toggleIndicator = (key: IndicatorLineKey) => {
     setVisibleIndicators((prev) => ({ ...prev, [key]: !prev[key] }))
   }
+  const historyRangeOptions: Array<{ days: HistoryRangeDays; label: string; title: string }> = [
+    { days: 60, label: '60日', title: '近60日走势' },
+    { days: 120, label: '120日', title: '近120日走势' },
+    { days: 365, label: '1年', title: '近1年走势' },
+  ]
+  const activeHistoryRange = historyRangeOptions.find((option) => option.days === historyDays) || historyRangeOptions[0]
+  const renderChartControls = (variant: 'compact' | 'fullscreen' = 'compact') => (
+    <div className="flex min-w-0 flex-wrap items-center gap-3">
+      <div className="inline-flex shrink-0 rounded-md border bg-background p-0.5 text-xs">
+        {historyRangeOptions.map((option) => (
+          <button
+            key={option.days}
+            type="button"
+            onClick={() => setHistoryDays(option.days)}
+            className={`h-7 px-2.5 font-medium transition-colors ${historyDays === option.days ? 'rounded bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
+        {indicatorOptions.map((option) => (
+          <label key={option.key} className="inline-flex cursor-pointer items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={visibleIndicators[option.key]}
+              onChange={() => toggleIndicator(option.key)}
+              className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary"
+            />
+            <span className={`h-0.5 w-4 ${option.colorClassName}`} />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button size="sm" variant="ghost" onClick={fetchHistory} disabled={historyLoading} className="h-8 px-2.5 text-xs">
+          <RefreshCw className={`h-3.5 w-3.5 mr-1 ${historyLoading ? 'animate-spin' : ''}`} />
+          刷新
+        </Button>
+        {variant === 'compact' ? (
+          <Button size="sm" variant="outline" onClick={() => setChartFullscreen(true)} className="h-8 px-2.5 text-xs">
+            <Maximize2 className="h-3.5 w-3.5 mr-1" />
+            全屏
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" onClick={() => setChartFullscreen(false)} className="h-8 px-2.5 text-xs">
+            <Minimize2 className="h-3.5 w-3.5 mr-1" />
+            退出
+          </Button>
+        )}
+      </div>
+    </div>
+  )
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      {chartFullscreen ? (
+        <div className="fixed inset-0 z-[60] bg-background p-4" onClick={(event) => event.stopPropagation()}>
+          <div className="flex h-full flex-col gap-4">
+            <div className="space-y-3 border-b pb-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-lg font-bold">{p.etf_code}</span>
+                  <span className="text-sm text-muted-foreground">{p.etf_name || '-'}</span>
+                </div>
+                <h3 className="mt-1 text-base font-semibold">{activeHistoryRange.title}</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  当前价 {p.current_price?.toFixed(3) || '-'}
+                  {p.change_pct != null ? ` / ${p.change_pct >= 0 ? '+' : ''}${p.change_pct.toFixed(2)}%` : ''}
+                </p>
+              </div>
+              <div>{renderChartControls('fullscreen')}</div>
+            </div>
+            <div className="min-h-0 flex-1">
+              {historyLoading ? (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                  加载中...
+                </div>
+              ) : chartData.length > 0 ? (
+                <CandlestickChart
+                  data={chartData}
+                  costPrice={p.cost_price}
+                  visibleIndicators={visibleIndicators}
+                  className="h-full"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  暂无K线数据
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div
         className="bg-background rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -804,28 +904,9 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               {/* K线图 */}
               <Card>
                 <CardContent className="pt-4">
-                  <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                    <h3 className="text-sm font-semibold">近60日走势</h3>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        {indicatorOptions.map((option) => (
-                          <label key={option.key} className="inline-flex cursor-pointer items-center gap-1.5">
-                            <input
-                              type="checkbox"
-                              checked={visibleIndicators[option.key]}
-                              onChange={() => toggleIndicator(option.key)}
-                              className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary"
-                            />
-                            <span className={`h-0.5 w-4 ${option.colorClassName}`} />
-                            <span>{option.label}</span>
-                          </label>
-                        ))}
-                      </div>
-                      <Button size="sm" variant="ghost" onClick={fetchHistory} disabled={historyLoading}>
-                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${historyLoading ? 'animate-spin' : ''}`} />
-                        刷新
-                      </Button>
-                    </div>
+                  <div className="mb-3 space-y-3">
+                    <h3 className="text-sm font-semibold">{activeHistoryRange.title}</h3>
+                    <div>{renderChartControls()}</div>
                   </div>
                   {historyLoading ? (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
@@ -833,9 +914,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                       加载中...
                     </div>
                   ) : chartData.length > 0 ? (
-                    <div className="h-80">
-                      <CandlestickChart data={chartData} costPrice={p.cost_price} visibleIndicators={visibleIndicators} />
-                    </div>
+                    <CandlestickChart data={chartData} costPrice={p.cost_price} visibleIndicators={visibleIndicators} />
                   ) : (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
                       暂无K线数据
