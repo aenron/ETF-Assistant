@@ -35,6 +35,10 @@ fake_advisor_service = types.ModuleType("services.advisor_service")
 
 
 class _FakeAdvisorService:
+    @staticmethod
+    def _prompt_time_context():
+        return "当前测试时间。"
+
     async def chat_json_with_logging(self, *args, **kwargs):  # pragma: no cover - patched in tests
         raise AssertionError("Unexpected AdvisorService call")
 
@@ -150,6 +154,93 @@ class MultiAgentServiceContractTests(unittest.TestCase):
         self.assertEqual(payload.debate_rounds[0].round_index, 2)
         self.assertEqual(payload.arbiter_summary.round_index, 2)
         self.assertEqual(payload.max_debate_rounds, 3)
+
+    def test_portfolio_context_includes_all_holdings_with_names(self):
+        class _UserResult:
+            def scalar_one_or_none(self):
+                return types.SimpleNamespace(account_balance=1234.56)
+
+        class _Session:
+            async def execute(self, statement):
+                return _UserResult()
+
+        holdings = [
+            types.SimpleNamespace(
+                etf_code="513300",
+                etf_name="纳斯达克ETF华夏",
+                shares=100.0,
+                cost_price=1.2345,
+                current_price=1.3456,
+                market_value=134.56,
+                pnl_pct=9.0,
+                today_pnl=None,
+                today_pnl_pct=None,
+            ),
+            types.SimpleNamespace(
+                etf_code="511380",
+                etf_name="可转债ETF",
+                shares=200.0,
+                cost_price=10.0,
+                current_price=10.1,
+                market_value=2020.0,
+                pnl_pct=1.0,
+                today_pnl=None,
+                today_pnl_pct=None,
+            ),
+            *[
+                types.SimpleNamespace(
+                    etf_code=f"15900{index}",
+                    etf_name=f"测试ETF{index}",
+                    shares=10.0,
+                    cost_price=1.0,
+                    current_price=1.0,
+                    market_value=10.0,
+                    pnl_pct=0.0,
+                    today_pnl=None,
+                    today_pnl_pct=None,
+                )
+                for index in range(1, 6)
+            ],
+        ]
+
+        async def run_test():
+            from services.portfolio_service import PortfolioService
+
+            with unittest.mock.patch.object(PortfolioService, "get_with_market", return_value=holdings):
+                return await MultiAgentService._build_portfolio_context(_Session(), user_id=7)
+
+        summary, holdings_preview, account_balance = asyncio.run(run_test())
+
+        self.assertEqual(len(holdings_preview), 7)
+        self.assertEqual(account_balance, 1234.56)
+        self.assertIn("513300 纳斯达克ETF华夏", holdings_preview[0])
+        self.assertIn("511380 可转债ETF", holdings_preview[1])
+        self.assertGreater(float(summary["total_assets"]), 0)
+
+    def test_search_and_code_extraction_use_full_holding_preview(self):
+        holdings_preview = [
+            "513300 纳斯达克ETF华夏 | 份额 100.00 | 成本 1.0000",
+            "511380 可转债ETF | 份额 100.00 | 成本 1.0000",
+            "159001 测试ETF1 | 份额 100.00 | 成本 1.0000",
+            "159002 测试ETF2 | 份额 100.00 | 成本 1.0000",
+            "159003 测试ETF3 | 份额 100.00 | 成本 1.0000",
+            "159004 测试ETF4 | 份额 100.00 | 成本 1.0000",
+            "159005 测试ETF5 | 份额 100.00 | 成本 1.0000",
+        ]
+
+        codes = MultiAgentService._extract_etf_codes(None, holdings_preview)
+        queries = MultiAgentService._build_search_queries(
+            MultiAgentScene.ETF,
+            None,
+            holdings_preview,
+            portfolio_summary={},
+        )
+
+        self.assertEqual(codes, ["513300", "511380", "159001", "159002", "159003", "159004", "159005"])
+        self.assertTrue(queries)
+        self.assertIn("513300", queries[0])
+        self.assertIn("159005", queries[0])
+        self.assertIn("纳斯达克ETF华夏", queries[0])
 
     def test_create_run_runs_initial_round_sequentially_and_stops_on_consensus(self):
         session = _FakeSession()

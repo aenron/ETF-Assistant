@@ -444,9 +444,11 @@ class MultiAgentService:
                 bullets.append(f"总盈亏：{float(total_pnl_pct):.2f}%")
         if account_balance is not None:
             bullets.append(f"可用资金：{account_balance:.2f}")
-        for item in holdings_preview:
+        for item in holdings_preview[:8]:
             bullets.append(item)
-        return bullets[:10]
+        if len(holdings_preview) > 8:
+            bullets.append(f"其余持仓：{len(holdings_preview) - 8} 个")
+        return bullets[:16]
 
     @classmethod
     async def _build_portfolio_context(
@@ -456,15 +458,26 @@ class MultiAgentService:
     ) -> tuple[dict | None, list[str], float | None]:
         from services.portfolio_service import PortfolioService
 
-        summary = await PortfolioService.get_summary(session, user_id=user_id)
-        holdings = await PortfolioService.get_all(session, user_id=user_id)
+        holdings = await PortfolioService.get_with_market(session, user_id=user_id)
         result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         account_balance = float(user.account_balance) if user and user.account_balance is not None else None
+        summary = PortfolioService.build_summary_from_portfolios(holdings, account_balance or 0.0)
 
         holdings_preview = []
-        for item in holdings[:3]:
-            holdings_preview.append(f"{item.etf_code} | 份额 {item.shares:.2f} | 成本 {item.cost_price:.4f}")
+        for item in holdings:
+            name = cls._normalize_text(item.etf_name) or "名称未知"
+            market_parts = []
+            if item.current_price is not None:
+                market_parts.append(f"现价 {float(item.current_price):.4f}")
+            if item.market_value is not None:
+                market_parts.append(f"市值 {float(item.market_value):.2f}")
+            if item.pnl_pct is not None:
+                market_parts.append(f"盈亏 {float(item.pnl_pct):+.2f}%")
+            market_text = f" | {' | '.join(market_parts)}" if market_parts else ""
+            holdings_preview.append(
+                f"{item.etf_code} {name} | 份额 {item.shares:.2f} | 成本 {item.cost_price:.4f}{market_text}"
+            )
 
         return summary.model_dump(), holdings_preview, account_balance
 
@@ -479,30 +492,46 @@ class MultiAgentService:
         question_text = cls._normalize_text(question)
         codes = []
         current_date = now_in_shanghai().strftime("%Y-%m-%d")
-        for item in holdings_preview[:2]:
+        for item in holdings_preview:
             code = cls._normalize_text(item.split("|", 1)[0])
-            if code:
-                codes.append(code)
+            code_match = re.search(r"(?<!\d)\d{6}(?!\d)", code)
+            if code_match and code_match.group(0) not in codes:
+                codes.append(code_match.group(0))
+            if len(codes) >= 7:
+                break
+
+        holding_context = " ".join(codes)
+        if holdings_preview:
+            holding_names = []
+            for item in holdings_preview[:5]:
+                head = cls._normalize_text(item.split("|", 1)[0])
+                if head:
+                    holding_names.append(head)
+            if holding_names:
+                holding_context = cls._normalize_text(f"{holding_context} {' '.join(holding_names)}")
 
         queries: list[str] = []
         if scene == MultiAgentScene.ETF:
             if question_text:
                 base = question_text
-                if codes:
-                    base = f"{base} {' '.join(codes)}"
+                if holding_context:
+                    base = f"{base} {holding_context}"
                 queries.append(f"{base} 最新 公告 新闻 政策 宏观 市场 {current_date}")
-            elif codes:
-                queries.append(f"{' '.join(codes)} 最新 公告 新闻 政策 宏观 市场 {current_date}")
+            elif holding_context:
+                queries.append(f"{holding_context} 最新 公告 新闻 政策 宏观 市场 {current_date}")
         elif scene == MultiAgentScene.ACCOUNT:
             base = question_text or "账户组合 再平衡 风险"
-            if codes:
-                base = f"{base} {' '.join(codes)}"
+            if holding_context:
+                base = f"{base} {holding_context}"
             queries.append(f"{base} 最新 政策 新闻 风险 市场 {current_date}")
         else:
             if question_text:
-                queries.append(f"{question_text} 最新 公告 新闻 政策 宏观 市场 {current_date}")
+                base = question_text
+                if holding_context:
+                    base = f"{base} {holding_context}"
+                queries.append(f"{base} 最新 公告 新闻 政策 宏观 市场 {current_date}")
             elif portfolio_summary:
-                queries.append(f"投资 最新 公告 新闻 政策 宏观 市场 {current_date}")
+                queries.append(f"投资 {holding_context} 最新 公告 新闻 政策 宏观 市场 {current_date}".strip())
 
         deduped: list[str] = []
         for query in queries:
@@ -521,15 +550,17 @@ class MultiAgentService:
     ) -> list[str]:
         codes: list[str] = []
         for item in holdings_preview:
-            code = cls._normalize_text(item.split("|", 1)[0])
-            if re.fullmatch(r"\d{6}", code) and code not in codes:
+            head = cls._normalize_text(item.split("|", 1)[0])
+            match = re.search(r"(?<!\d)\d{6}(?!\d)", head)
+            code = match.group(0) if match else ""
+            if code and code not in codes:
                 codes.append(code)
 
         for code in re.findall(r"(?<!\d)\d{6}(?!\d)", question or ""):
             if code not in codes:
                 codes.append(code)
 
-        return codes[:4]
+        return codes[:8]
 
     @classmethod
     async def _build_technical_context(
