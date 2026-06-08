@@ -77,6 +77,10 @@ class Settings(BaseSettings):
 
     # Tushare 行情补充数据源
     tushare_token: str = ""
+
+    # QMT Agent 行情数据源
+    qmt_agent_base_url: str = ""
+    qmt_agent_token: str = ""
     
     class Config:
         env_file = ".env"

@@ -259,7 +259,7 @@ class NotificationService:
         cls,
         session: AsyncSession,
         user_id: int,
-        provider: str,
+        provider: str = PROVIDER_BARK,
     ) -> tuple[bool, str, UserNotificationConfig]:
         config = await cls.get_or_init_config(session, user_id, provider)
         notifier = cls.build_notifier(config)

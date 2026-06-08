@@ -15,5 +15,6 @@ class Portfolio(Base):
     cost_price: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     buy_date: Mapped[date | None] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(Text)
+    dca_track_override: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())

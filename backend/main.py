@@ -6,13 +6,14 @@ from sqlalchemy import func, select, text
 from database import init_db, engine
 from database import async_session_maker
 from models.user import User
-from routers import portfolio_router, market_router, advice_router, assistant_router, admin_router, multi_agent_router
+from routers import portfolio_router, market_router, advice_router, assistant_router, admin_router, multi_agent_router, strategy_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from routers.notification_config import router as notification_config_router
 from config import settings
 from services.redis_service import RedisService
 from services.scheduler import apply_scheduler_job_configs, start_scheduler, shutdown_scheduler
+from services.strategy_service import StrategyService
 
 
 async def run_migrations():
@@ -25,6 +26,12 @@ async def run_migrations():
         ("multi_agent_run.title", "ALTER TABLE multi_agent_run ADD COLUMN title VARCHAR(120)"),
         ("multi_agent_run.max_debate_rounds", "ALTER TABLE multi_agent_run ADD COLUMN max_debate_rounds INTEGER DEFAULT 3 NOT NULL"),
         ("multi_agent_run.collapse_debate_by_default", "ALTER TABLE multi_agent_run ADD COLUMN collapse_debate_by_default BOOLEAN DEFAULT TRUE NOT NULL"),
+        ("portfolio.dca_track_override", "ALTER TABLE portfolio ADD COLUMN dca_track_override VARCHAR(20)"),
+        ("portfolio_dca_state.pending_notify_key", "ALTER TABLE portfolio_dca_state ADD COLUMN pending_notify_key VARCHAR(200)"),
+        ("portfolio_dca_state.pending_notify_reason", "ALTER TABLE portfolio_dca_state ADD COLUMN pending_notify_reason VARCHAR(100)"),
+        ("index_valuation.pb", "ALTER TABLE index_valuation ADD COLUMN pb NUMERIC(12, 4)"),
+        ("portfolio_dca_state.candidate_light", "ALTER TABLE portfolio_dca_state ADD COLUMN candidate_light VARCHAR(30)"),
+        ("portfolio_dca_state.candidate_confirm_count", "ALTER TABLE portfolio_dca_state ADD COLUMN candidate_confirm_count INTEGER"),
     ]
 
     for label, statement in migration_statements:
@@ -71,6 +78,7 @@ async def lifespan(app: FastAPI):
     if settings.scheduler_enabled:
         start_scheduler()
         await apply_scheduler_job_configs()
+        await StrategyService.restore_schedules()
         print("[Startup] 定时任务调度器已启用")
     else:
         print("[Startup] 定时任务调度器已禁用（SCHEDULER_ENABLED=false）")
@@ -108,6 +116,7 @@ app.include_router(llm_config_router)
 app.include_router(notification_config_router)
 app.include_router(admin_router)
 app.include_router(multi_agent_router)
+app.include_router(strategy_router)
 
 
 @app.get("/")

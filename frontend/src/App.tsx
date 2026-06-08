@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart } from 'lucide-react'
 import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
@@ -21,6 +21,9 @@ const PortfolioPage = lazy(() =>
 )
 const AdvicePage = lazy(() =>
   import('@/pages/AdvicePage').then((module) => ({ default: module.AdvicePage })),
+)
+const StrategyPage = lazy(() =>
+  import('@/pages/StrategyPage').then((module) => ({ default: module.StrategyPage })),
 )
 const NotificationSettingsPage = lazy(() =>
   import('@/pages/NotificationSettingsPage').then((module) => ({ default: module.NotificationSettingsPage })),
@@ -48,6 +51,7 @@ function AppContent() {
   const navItems = [
     { to: '/', label: '仪表盘', icon: LayoutDashboard },
     { to: '/portfolio', label: '持仓管理', icon: Briefcase },
+    { to: '/strategies', label: '交易策略', icon: LineChart },
     { to: '/advice', label: '决策历史', icon: Lightbulb },
     { to: '/multi-agent', label: '多智能体', icon: Bot },
   ]
@@ -166,6 +170,7 @@ function AppContent() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
             <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
+            <Route path="/strategies" element={<PrivateRoute><StrategyPage /></PrivateRoute>} />
             <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
             <Route path="/multi-agent" element={<PrivateRoute><MultiAgentWorkbenchPage /></PrivateRoute>} />
             <Route path="/notifications" element={<PrivateRoute><NotificationSettingsPage /></PrivateRoute>} />

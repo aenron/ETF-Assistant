@@ -132,6 +132,11 @@ class MarketService:
             print(f"[MarketService] 跳过缓存空数据: {code}")
             return quote
 
+        if not quote.name:
+            cached_quote = await cls.get_quote_from_cache(code)
+            if cached_quote and cached_quote.name:
+                quote = quote.model_copy(update={"name": cached_quote.name})
+
         quote_with_time = cls._with_refresh_time(quote, quote.refreshed_at)
         if settings.redis_enabled:
             cache_data = {
@@ -280,6 +285,89 @@ class MarketService:
             candidates.append(f"{clean}.BJ")
         candidates.extend([f"{clean}.SH", f"{clean}.SZ", f"{clean}.BJ"])
         return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    def _qmt_symbol(code: str) -> str:
+        clean = str(code or "").strip().upper()
+        if "." in clean:
+            return clean
+        if clean.startswith(("00", "30", "15", "16", "18", "12", "13", "39")):
+            return f"{clean}.SZ"
+        if clean.startswith(("60", "68", "51", "58", "50", "56", "110", "113", "118", "000")):
+            return f"{clean}.SH"
+        if clean.startswith(("43", "82", "83", "87", "88", "92")):
+            return f"{clean}.BJ"
+        return f"{clean}.SH"
+
+    @staticmethod
+    def _qmt_plain_code(symbol: str) -> str:
+        return str(symbol or "").split(".", 1)[0]
+
+    @staticmethod
+    def _qmt_enabled() -> bool:
+        return bool(settings.qmt_agent_base_url.strip() and settings.qmt_agent_token.strip())
+
+    @staticmethod
+    def _qmt_headers() -> Dict[str, str]:
+        return {"Authorization": f"Bearer {settings.qmt_agent_token.strip()}"}
+
+    @staticmethod
+    def _qmt_records(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            if isinstance(payload.get("records"), list):
+                return payload["records"]
+            item = payload.get("item")
+            if isinstance(item, dict):
+                if isinstance(item.get("records"), list):
+                    return item["records"]
+                if isinstance(item.get("data"), dict) and isinstance(item["data"].get("records"), list):
+                    return item["data"]["records"]
+            items = payload.get("items")
+            if isinstance(items, dict):
+                for value in items.values():
+                    records = MarketService._qmt_records(value)
+                    if records:
+                        return records
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _qmt_timestamp_to_date(value: Any) -> Optional[date]:
+        if value in (None, "", "-"):
+            return None
+        text = str(value).strip()
+        try:
+            if text.isdigit():
+                if len(text) >= 13:
+                    return datetime.fromtimestamp(int(text[:13]) / 1000).date()
+                if len(text) >= 10 and not text.startswith(("19", "20")):
+                    return datetime.fromtimestamp(int(text[:10])).date()
+                if len(text) >= 8:
+                    return date.fromisoformat(f"{text[:4]}-{text[4:6]}-{text[6:8]}")
+            return date.fromisoformat(text.split(" ")[0])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _merge_quote(existing: MarketQuote, incoming: MarketQuote) -> MarketQuote:
+        return existing.model_copy(
+            update={
+                "name": existing.name or incoming.name,
+                "price": existing.price if existing.price > 0 else incoming.price,
+                "change_pct": existing.change_pct if existing.change_pct is not None else incoming.change_pct,
+                "open_price": existing.open_price if existing.open_price is not None else incoming.open_price,
+                "high_price": existing.high_price if existing.high_price is not None else incoming.high_price,
+                "low_price": existing.low_price if existing.low_price is not None else incoming.low_price,
+                "volume": existing.volume if existing.volume is not None else incoming.volume,
+                "amount": existing.amount if existing.amount is not None else incoming.amount,
+                "refreshed_at": existing.refreshed_at or incoming.refreshed_at,
+            }
+        )
+
+    @staticmethod
+    def _quote_needs_enrichment(quote: MarketQuote | None) -> bool:
+        return quote is None or not quote.name
 
     @classmethod
     def _eastmoney_secid_candidates(cls, code: str) -> List[str]:
@@ -536,6 +624,53 @@ class MarketService:
     @classmethod
     async def _fetch_from_tushare_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         return await asyncio.to_thread(cls._fetch_tushare_quotes_sync, codes)
+
+    @classmethod
+    async def _fetch_from_qmt_agent(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        if not codes or not cls._qmt_enabled():
+            return {}
+
+        base_url = settings.qmt_agent_base_url.rstrip("/")
+        result: Dict[str, MarketQuote] = {}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                for code in codes:
+                    symbol = cls._qmt_symbol(code)
+                    response = await client.get(
+                        f"{base_url}/symbols/{symbol}/snapshot",
+                        headers=cls._qmt_headers(),
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    item = payload.get("item", payload) if isinstance(payload, dict) else {}
+                    if isinstance(item, dict) and symbol in item and isinstance(item[symbol], dict):
+                        item = item[symbol]
+                    price = cls._to_float(
+                        item.get("lastPrice")
+                        or item.get("last_price")
+                        or item.get("price")
+                        or item.get("close")
+                    )
+                    if price is None or price <= 0:
+                        continue
+                    prev_close = cls._to_float(item.get("preClose") or item.get("pre_close") or item.get("lastClose"))
+                    change_pct = cls._to_float(item.get("change_pct") or item.get("pct_chg"))
+                    if change_pct is None and prev_close and prev_close > 0:
+                        change_pct = (price - prev_close) / prev_close * 100
+                    result[code] = MarketQuote(
+                        code=code,
+                        name=str(item.get("name") or item.get("instrumentName") or ""),
+                        price=price,
+                        change_pct=round(change_pct or 0.0, 2),
+                        open_price=cls._to_float(item.get("open") or item.get("openPrice")),
+                        high_price=cls._to_float(item.get("high") or item.get("highPrice")),
+                        low_price=cls._to_float(item.get("low") or item.get("lowPrice")),
+                        volume=cls._to_int(item.get("volume") or item.get("vol")),
+                        amount=cls._to_float(item.get("amount")),
+                    )
+        except Exception as e:
+            print(f"[MarketService] QMT Agent实时行情请求失败: {e}")
+        return result
 
     @classmethod
     async def _fetch_from_eastmoney_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
@@ -809,6 +944,65 @@ class MarketService:
     @classmethod
     async def _fetch_history_kline_tushare(cls, code: str, days: int = 60) -> List[KLineItem]:
         return await asyncio.to_thread(cls._fetch_history_kline_tushare_sync, code, days)
+
+    @classmethod
+    async def _fetch_history_kline_qmt_agent(cls, code: str, days: int = 60) -> List[KLineItem]:
+        if not cls._qmt_enabled():
+            return []
+
+        symbol = cls._qmt_symbol(code)
+        base_url = settings.qmt_agent_base_url.rstrip("/")
+        params = {
+            "period": "1d",
+            "count": str(days),
+            "dividend_type": "front_ratio",
+            "fill_data": "true",
+        }
+        try:
+            print(f"[MarketService] >>> QMT Agent获取历史K线: {code} ({symbol})")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{base_url}/symbols/{symbol}/kline",
+                    params=params,
+                    headers=cls._qmt_headers(),
+                )
+                response.raise_for_status()
+                payload = response.json()
+
+            records = cls._qmt_records(payload)
+            result: List[KLineItem] = []
+            for record in records[-days:]:
+                trade_date = cls._qmt_timestamp_to_date(
+                    record.get("time") or record.get("date") or record.get("trade_date")
+                )
+                close = cls._to_float(record.get("close"))
+                open_price = cls._to_float(record.get("open"))
+                high = cls._to_float(record.get("high"))
+                low = cls._to_float(record.get("low"))
+                if trade_date is None or close is None or open_price is None or high is None or low is None:
+                    continue
+                prev_close = cls._to_float(record.get("preClose") or record.get("pre_close"))
+                if prev_close and prev_close > 0:
+                    change_pct = (close - prev_close) / prev_close * 100
+                elif result and result[-1].close_price > 0:
+                    change_pct = (close - result[-1].close_price) / result[-1].close_price * 100
+                else:
+                    change_pct = 0.0
+                result.append(KLineItem(
+                    trade_date=trade_date,
+                    open_price=open_price,
+                    close_price=close,
+                    high_price=high,
+                    low_price=low,
+                    volume=cls._to_int(record.get("volume") or record.get("vol")) or 0,
+                    change_pct=round(change_pct, 2),
+                ))
+            if result:
+                print(f"[MarketService] ✓ QMT Agent获取到 {len(result)} 条K线")
+            return result
+        except Exception as e:
+            print(f"[MarketService] QMT Agent历史K线获取失败: {code}, {e}")
+            return []
     
     @classmethod
     async def _fetch_history_kline_eastmoney(cls, code: str, days: int = 60) -> List[KLineItem]:
@@ -934,6 +1128,15 @@ class MarketService:
         cached = await cls.get_kline_from_cache(code, days)
         if cached:
             return cached
+
+        # QMT Agent：配置后优先使用本地 QMT/xtdata 的真实 K 线。
+        try:
+            result = await cls._fetch_history_kline_qmt_agent(code, days)
+            if result:
+                await cls.cache_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] QMT Agent历史K线异常: {e}")
         
         # 优先使用akshare
         try:
@@ -1078,60 +1281,74 @@ class MarketService:
         
         print(f"[MarketService] 开始获取 {len(codes)} 个品种行情: {codes}")
         result: Dict[str, MarketQuote] = {}
-        
-        # 优先使用原 ETF 批量接口，保持现有场内ETF性能。
-        etf_result = await cls._fetch_from_eastmoney_api(codes)
-        if etf_result:
-            print(f"[MarketService] ✓ 东方财富ETF批量API成功: {len(etf_result)} 个")
-            result.update(etf_result)
 
-        missing_codes = [code for code in codes if code not in result]
+        qmt_result = await cls._fetch_from_qmt_agent(codes)
+        if qmt_result:
+            print(f"[MarketService] ✓ QMT Agent实时行情成功: {len(qmt_result)} 个")
+            result.update(qmt_result)
+        
+        # 后续公共源可继续补齐 QMT 未返回的名称，但不覆盖 QMT 已有价格。
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
+        if missing_codes:
+            etf_result = await cls._fetch_from_eastmoney_api(missing_codes)
+            if etf_result:
+                print(f"[MarketService] ✓ 东方财富ETF批量API成功: {len(etf_result)} 个")
+                for code, quote in etf_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
+
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes:
             print(f"[MarketService] >>> 尝试 AkShare ETF实时列表: {missing_codes}")
             akshare_etf_result = await cls._fetch_from_akshare_etf_spot(missing_codes)
             if akshare_etf_result:
                 print(f"[MarketService] ✓ AkShare ETF实时列表成功: {len(akshare_etf_result)} 个")
-                result.update(akshare_etf_result)
+                for code, quote in akshare_etf_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
         
-        missing_codes = [code for code in codes if code not in result]
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes:
             print(f"[MarketService] >>> 尝试同花顺行业指数数据源: {missing_codes}")
             ths_result = await cls._fetch_from_ths_industry_api(missing_codes)
             if ths_result:
                 print(f"[MarketService] ✓ 同花顺行业指数成功: {len(ths_result)} 个")
-                result.update(ths_result)
+                for code, quote in ths_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
-        missing_codes = [code for code in codes if code not in result]
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes:
             print(f"[MarketService] >>> 尝试备用数据源: 新浪财经API {missing_codes}")
             sina_result = await cls._fetch_from_sina_api(missing_codes)
             if sina_result:
                 print(f"[MarketService] ✓ 新浪API成功: {len(sina_result)} 个")
-                result.update(sina_result)
+                for code, quote in sina_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
-        missing_codes = [code for code in codes if code not in result]
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes and settings.tushare_token.strip():
             print(f"[MarketService] >>> 尝试 Tushare 数据源: {missing_codes}")
             tushare_result = await cls._fetch_from_tushare_api(missing_codes)
             if tushare_result:
                 print(f"[MarketService] ✓ Tushare成功: {len(tushare_result)} 个")
-                result.update(tushare_result)
+                for code, quote in tushare_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
-        missing_codes = [code for code in codes if code not in result]
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes:
             print(f"[MarketService] >>> 尝试场外基金数据源: {missing_codes}")
             fund_result = await cls._fetch_from_otc_fund_api(missing_codes)
             if fund_result:
                 print(f"[MarketService] ✓ 场外基金估值API成功: {len(fund_result)} 个")
-                result.update(fund_result)
+                for code, quote in fund_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
-        missing_codes = [code for code in codes if code not in result]
+        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
         if missing_codes:
             print(f"[MarketService] >>> 最后尝试通用证券数据源: 东方财富单证券API {missing_codes}")
             broad_result = await cls._fetch_from_eastmoney_quote_api(missing_codes)
             if broad_result:
                 print(f"[MarketService] ✓ 东方财富通用证券API成功: {len(broad_result)} 个")
-                result.update(broad_result)
+                for code, quote in broad_result.items():
+                    result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
         if result:
             for code, quote in list(result.items()):

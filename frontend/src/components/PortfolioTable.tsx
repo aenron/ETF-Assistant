@@ -4,12 +4,14 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type AdviceLogResponse } from '@/services/api'
-import { Plus, Pencil, Trash2, Search, Lightbulb, RefreshCw, Eye, Clock } from 'lucide-react'
+import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type AdviceLogResponse, type MarketHistoryResponse, type PortfolioDcaSignalHistoryItem } from '@/services/api'
+import { Plus, Pencil, Trash2, Search, Lightbulb, RefreshCw, Eye, Clock, HelpCircle } from 'lucide-react'
 import { EtfDetailModal } from './EtfDetailModal'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AdviceEventContextPanel } from './AdviceEventContextPanel'
 import { formatBeijingTime } from '@/utils/time'
+import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 interface PortfolioTableProps {
   portfolios: PortfolioWithMarket[]
@@ -27,6 +29,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     cost_price: '',
     buy_date: '',
     note: '',
+    dca_track_override: '',
   })
   const [adviceLoading, setAdviceLoading] = useState<number | null>(null)
   const [currentAdvice, setCurrentAdvice] = useState<AdviceResponse | null>(null)
@@ -36,6 +39,12 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [latestAdvices, setLatestAdvices] = useState<Record<string, AdviceLogResponse>>({})
   const [deleteTarget, setDeleteTarget] = useState<PortfolioWithMarket | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [showDcaHelp, setShowDcaHelp] = useState(false)
+  const [dcaDetailPortfolio, setDcaDetailPortfolio] = useState<PortfolioWithMarket | null>(null)
+  const [dcaHistory, setDcaHistory] = useState<MarketHistoryResponse | null>(null)
+  const [dcaHistoryLoading, setDcaHistoryLoading] = useState(false)
+  const [dcaSignalHistory, setDcaSignalHistory] = useState<PortfolioDcaSignalHistoryItem[]>([])
+  const [dcaSignalHistoryLoading, setDcaSignalHistoryLoading] = useState(false)
 
   useEffect(() => {
     fetchLatestAdvices()
@@ -70,6 +79,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       cost_price: parseFloat(formData.cost_price),
       buy_date: formData.buy_date || undefined,
       note: formData.note || undefined,
+      dca_track_override: formData.dca_track_override || undefined,
     }
 
     if (editingId) {
@@ -80,7 +90,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
 
     setShowForm(false)
     setEditingId(null)
-    setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '' })
+    setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' })
     onRefresh()
   }
 
@@ -92,6 +102,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       cost_price: p.cost_price.toString(),
       buy_date: p.buy_date || '',
       note: p.note || '',
+      dca_track_override: p.dca_track_override || '',
     })
     setShowForm(true)
   }
@@ -196,11 +207,140 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     return value && value > 0 ? 'text-red-500' : value && value < 0 ? 'text-green-500' : ''
   }
 
+  const getDcaLightClass = (light: string | null | undefined) => {
+    if (light === 'green' || light === 'deep_green') return 'bg-emerald-500'
+    if (light === 'red') return 'bg-red-500'
+    return 'bg-amber-400'
+  }
+
+  const getDcaTextClass = (light: string | null | undefined) => {
+    if (light === 'green' || light === 'deep_green') return 'text-emerald-700'
+    if (light === 'red') return 'text-red-700'
+    return 'text-amber-700'
+  }
+
+  const formatDcaMeta = (p: PortfolioWithMarket) => {
+    if (p.dca_valuation_percentile != null) {
+      const peText = p.dca_valuation_pe != null ? `PE ${p.dca_valuation_pe.toFixed(2)} · ` : ''
+      const pbText = p.dca_valuation_pb != null ? `PB ${p.dca_valuation_pb.toFixed(2)} · ` : ''
+      return `${peText}${pbText}综合分位 ${p.dca_valuation_percentile.toFixed(1)}%`
+    }
+    return p.dca_next_trigger_price == null ? '暂无触发价' : `触发价 ${p.dca_next_trigger_price.toFixed(3)}`
+  }
+
+
+  const openDcaDetail = (event: React.MouseEvent, p: PortfolioWithMarket) => {
+    event.stopPropagation()
+    setDcaDetailPortfolio(p)
+  }
+
+  const formatDcaTrack = (track: string | null | undefined) => {
+    if (track === 'valuation') return '估值轨'
+    if (track === 'trend') return '趋势轨'
+    if (track === 'disabled') return '已关闭'
+    return '自动识别'
+  }
+
+
+  const formatDcaLight = (light: string | null | undefined) => {
+    if (light === 'deep_green') return '深绿'
+    if (light === 'green') return '绿灯'
+    if (light === 'yellow') return '黄灯'
+    if (light === 'red') return '红灯'
+    return '无'
+  }
+
+  const metricPercent = (value: number | null | undefined, fallback = 0) => {
+    if (value == null || Number.isNaN(value)) return fallback
+    return Math.max(0, Math.min(100, value))
+  }
+
+
+  const lightScore = (light: string | null | undefined) => {
+    if (light === 'deep_green') return 4
+    if (light === 'green') return 3
+    if (light === 'yellow') return 2
+    if (light === 'red') return 1
+    return 0
+  }
+
+  const lightTimelineData = dcaSignalHistory
+    .slice()
+    .reverse()
+    .map((item) => ({
+      date: formatBeijingTime(item.scanned_at, { month: '2-digit', day: '2-digit' }, '-'),
+      formal: lightScore(item.persisted_light),
+      signal: lightScore(item.signal_light),
+      label: `${formatDcaLight(item.persisted_light)} / ${formatDcaLight(item.signal_light)}`,
+    }))
+
+  const buildMiniChartData = (history: MarketHistoryResponse | null) => {
+    const data = history?.data || []
+    return data.map((item, index) => {
+      const ma20Window = data.slice(Math.max(0, index - 19), index + 1)
+      const ma20 = ma20Window.length === 20
+        ? ma20Window.reduce((sum, current) => sum + current.close_price, 0) / 20
+        : null
+      return {
+        date: item.trade_date.slice(5),
+        close: item.close_price,
+        ma20,
+      }
+    })
+  }
+
+  useEffect(() => {
+    if (!dcaDetailPortfolio) {
+      setDcaHistory(null)
+      return
+    }
+    let cancelled = false
+    setDcaHistoryLoading(true)
+    setDcaSignalHistoryLoading(true)
+    marketApi.getHistory(dcaDetailPortfolio.etf_code, 60)
+      .then((res) => {
+        if (!cancelled) setDcaHistory(res.data)
+      })
+      .catch((error) => {
+        console.error('Failed to fetch DCA mini chart history:', error)
+        if (!cancelled) setDcaHistory(null)
+      })
+      .finally(() => {
+        if (!cancelled) setDcaHistoryLoading(false)
+      })
+    portfolioApi.getDcaHistory(dcaDetailPortfolio.id, 30)
+      .then((res) => {
+        if (!cancelled) setDcaSignalHistory(res.data)
+      })
+      .catch((error) => {
+        console.error('Failed to fetch DCA signal history:', error)
+        if (!cancelled) setDcaSignalHistory([])
+      })
+      .finally(() => {
+        if (!cancelled) setDcaSignalHistoryLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [dcaDetailPortfolio?.etf_code])
+
   return (
     <Card>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <CardTitle>持仓列表</CardTitle>
-        <Button className="w-full sm:w-auto" onClick={() => { setShowForm(true); setEditingId(null); setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '' }); }}>
+        <div className="flex items-center gap-2">
+          <CardTitle>持仓列表</CardTitle>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            title="定投灯说明"
+            onClick={() => setShowDcaHelp(true)}
+          >
+            <HelpCircle className="h-4 w-4" />
+          </Button>
+        </div>
+        <Button className="w-full sm:w-auto" onClick={() => { setShowForm(true); setEditingId(null); setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' }); }}>
           <Plus className="h-4 w-4 mr-2" />
           新增持仓
         </Button>
@@ -264,6 +404,19 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 />
               </div>
               <div>
+                <label className="text-sm font-medium">资产轨道</label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={formData.dca_track_override}
+                  onChange={(e) => setFormData({ ...formData, dca_track_override: e.target.value })}
+                >
+                  <option value="">自动识别</option>
+                  <option value="valuation">估值轨</option>
+                  <option value="trend">趋势轨</option>
+                  <option value="disabled">关闭定投灯</option>
+                </select>
+              </div>
+              <div>
                 <label className="text-sm font-medium">备注</label>
                 <Input
                   value={formData.note}
@@ -288,6 +441,15 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   <div className="min-w-0">
                     <div className="font-mono text-base font-semibold">{p.etf_code}</div>
                     <div className="mt-1 text-sm text-muted-foreground">{p.etf_name || '-'}</div>
+                    <button
+                      type="button"
+                      className={`mt-2 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium transition-colors hover:bg-muted ${getDcaTextClass(p.dca_light)}`}
+                      title={p.dca_reason || undefined}
+                      onClick={(event) => openDcaDetail(event, p)}
+                    >
+                      <span className={`h-2.5 w-2.5 rounded-full ${getDcaLightClass(p.dca_light)}`} />
+                      <span>{p.dca_label || '定投灯待计算'}</span>
+                    </button>
                   </div>
                   {latestAdvice ? (
                     <Badge
@@ -385,11 +547,11 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 <th className="text-left py-3 px-2">代码</th>
                 <th className="text-left py-3 px-2">名称</th>
                 <th className="text-right py-3 px-2">份额</th>
-                <th className="text-right py-3 px-2">成本价</th>
-                <th className="text-right py-3 px-2">现价</th>
+                <th className="text-right py-3 px-2">成本/现价</th>
                 <th className="text-right py-3 px-2">市值</th>
                 <th className="text-right py-3 px-2">盈亏</th>
                 <th className="text-right py-3 px-2">今日涨跌</th>
+                <th className="text-left py-3 px-2">定投灯</th>
                 <th className="text-center py-3 px-2">AI建议</th>
                 <th className="text-center py-3 px-2">操作</th>
               </tr>
@@ -402,10 +564,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   <td className="py-3 px-2 font-mono">{p.etf_code}</td>
                   <td className="py-3 px-2">{p.etf_name || '-'}</td>
                   <td className="py-3 px-2 text-right">{p.shares.toLocaleString()}</td>
-                  <td className="py-3 px-2 text-right">{p.cost_price.toFixed(4)}</td>
                   <td className="py-3 px-2 text-right">
                     <div className="flex flex-col items-end">
-                      <span>{p.current_price?.toFixed(3) || '-'}</span>
+                      <span>{p.cost_price.toFixed(4)} / {p.current_price?.toFixed(3) || '-'}</span>
                       <span className="text-[10px] text-muted-foreground">
                         {formatMarketRefreshedAt(p.market_refreshed_at)}
                       </span>
@@ -417,6 +578,19 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </td>
                   <td className={`py-3 px-2 text-right ${getPnlColorClass(p.today_pnl)}`}>
                     {formatPnl(p.today_pnl, p.today_pnl_pct)}
+                  </td>
+                  <td className="py-3 px-2" title={p.dca_reason || undefined} onClick={e => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className={`inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium transition-colors hover:bg-muted ${getDcaTextClass(p.dca_light)}`}
+                      onClick={(event) => openDcaDetail(event, p)}
+                    >
+                      <span className={`h-2.5 w-2.5 rounded-full ${getDcaLightClass(p.dca_light)}`} />
+                      <span>{p.dca_label || '待计算'}</span>
+                    </button>
+                    <div className="mt-1 max-w-44 truncate text-[10px] text-muted-foreground">
+                      {p.dca_budget_label || p.dca_action || '-'} · {formatDcaMeta(p)}
+                    </div>
                   </td>
                   <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>
                     {latestAdvice ? (
@@ -490,6 +664,335 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
         </div>
 
         {/* 建议弹窗 */}
+        <Dialog open={showDcaHelp} onOpenChange={setShowDcaHelp}>
+          <DialogContent className="max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>定投红绿灯说明</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 text-sm text-slate-700">
+              <section className="rounded-lg border bg-slate-50 p-4">
+                <h3 className="font-semibold text-slate-900">灯色含义</h3>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <div><span className="font-medium text-emerald-700">深绿</span>：估值极低或机会强，允许更高倍率加仓。</div>
+                  <div><span className="font-medium text-emerald-700">绿灯</span>：满足加仓条件，可执行增强定投。</div>
+                  <div><span className="font-medium text-amber-700">黄灯</span>：条件不完整，只做基础定投或观察。</div>
+                  <div><span className="font-medium text-red-700">红灯</span>：估值过高或趋势走弱，暂停新增定投。</div>
+                </div>
+              </section>
+
+              <section className="rounded-lg border p-4">
+                <h3 className="font-semibold text-slate-900">估值轨</h3>
+                <p className="mt-2 text-muted-foreground">用于沪深300、中证500、中证A500、科创50等宽基资产。系统保存历史 PE/PB，计算当前估值在历史中的位置。</p>
+                <div className="mt-3 rounded-md bg-muted/40 p-3 font-mono text-xs text-slate-700">综合分位 = 0.6 * PE分位 + 0.4 * PB分位</div>
+                <p className="mt-2 text-muted-foreground">样本不足时不会给强信号；PB 缺失时会退化为 PE 分位。</p>
+              </section>
+
+              <section className="rounded-lg border p-4">
+                <h3 className="font-semibold text-slate-900">宽基 MA20 确认</h3>
+                <p className="mt-2 text-muted-foreground">低估不等于马上加仓。若价格低于 MA20 且 MA20 下行，系统会把低估信号降为黄灯，等待趋势企稳；若价格站回 MA20 或趋势未明显走坏，才保留绿灯或深绿。</p>
+              </section>
+
+              <section className="rounded-lg border p-4">
+                <h3 className="font-semibold text-slate-900">趋势轨</h3>
+                <p className="mt-2 text-muted-foreground">用于行业主题、商品、海外 ETF 等更依赖趋势的资产。核心判断是价格是否高于 MA20、MA20 是否上行。</p>
+              </section>
+
+              <section className="rounded-lg border p-4">
+                <h3 className="font-semibold text-slate-900">ATR 波动率过滤</h3>
+                <p className="mt-2 text-muted-foreground">趋势轨不会在价格过度偏离时追高。系统计算 ATR14，只有价格距离 MA20 不超过 1.5 倍 ATR 时，才认为是可接受的右侧回踩；超过则黄灯等待回落。</p>
+              </section>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={!!dcaDetailPortfolio} onOpenChange={(open) => !open && setDcaDetailPortfolio(null)}>
+          <DialogContent className="max-h-[88vh] w-[calc(100vw-2rem)] max-w-3xl overflow-y-auto">
+            {dcaDetailPortfolio && (
+              <>
+                <DialogHeader>
+                  <DialogTitle>定投灯决策详情</DialogTitle>
+                </DialogHeader>
+                <Tabs defaultValue="current" className="mt-2">
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="current">当前详情</TabsTrigger>
+                    <TabsTrigger value="history">历史记录</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="current" className="space-y-4 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-base font-semibold">{dcaDetailPortfolio.etf_code}</span>
+                    <span className="text-muted-foreground">{dcaDetailPortfolio.etf_name || '-'}</span>
+                    <Badge variant="outline" className={`${getDcaTextClass(dcaDetailPortfolio.dca_light)} border-current`}>
+                      {dcaDetailPortfolio.dca_label || '定投灯待计算'}
+                    </Badge>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">资产轨道</div>
+                      <div className="mt-1 font-medium">{formatDcaTrack(dcaDetailPortfolio.dca_track)}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">建议动作</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_action || '-'}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">资金倍率</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_budget_label || (dcaDetailPortfolio.dca_budget_multiplier != null ? `${dcaDetailPortfolio.dca_budget_multiplier}x` : '-')}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">下一触发价</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_next_trigger_price?.toFixed(3) || '-'}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">正式灯色</div>
+                      <div className={`mt-1 font-medium ${getDcaTextClass(dcaDetailPortfolio.dca_light)}`}>{formatDcaLight(dcaDetailPortfolio.dca_light)}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">候选灯色</div>
+                      <div className={`mt-1 font-medium ${getDcaTextClass(dcaDetailPortfolio.dca_candidate_light)}`}>{formatDcaLight(dcaDetailPortfolio.dca_candidate_light)}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">确认进度</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_candidate_confirm_count ? `${Math.min(dcaDetailPortfolio.dca_candidate_confirm_count, 2)}/2` : '-'}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">信号评分</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_quality_score?.toFixed(1) || '-'}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">浅绿估值触发价</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_green_trigger_price?.toFixed(3) || '-'}</div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/30 p-3">
+                      <div className="text-xs text-muted-foreground">深绿估值触发价</div>
+                      <div className="mt-1 font-medium">{dcaDetailPortfolio.dca_deep_green_trigger_price?.toFixed(3) || '-'}</div>
+                    </div>
+                  </div>
+
+                  <section className="rounded-lg border p-4">
+                    <h3 className="font-semibold">决策路径</h3>
+                    {dcaDetailPortfolio.dca_decision_steps?.length ? (
+                      <ol className="mt-3 space-y-2">
+                        {dcaDetailPortfolio.dca_decision_steps.map((step, index) => (
+                          <li key={`${step}-${index}`} className="flex gap-2 text-sm text-muted-foreground">
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-medium text-slate-700">{index + 1}</span>
+                            <span>{step}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="mt-2 text-muted-foreground">暂无结构化决策路径</p>
+                    )}
+                  </section>
+
+                  <section className="rounded-lg border p-4">
+                    <h3 className="font-semibold">决策原因</h3>
+                    <p className="mt-2 leading-6 text-muted-foreground">{dcaDetailPortfolio.dca_reason || '暂无详细原因'}</p>
+                  </section>
+
+                  <section className="rounded-lg border p-4">
+                    <h3 className="font-semibold">估值拆解</h3>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">PE / PE分位</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_valuation_pe?.toFixed(2) || '-'} / {dcaDetailPortfolio.dca_valuation_pe_percentile?.toFixed(1) || '-'}%</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">PB / PB分位</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_valuation_pb?.toFixed(2) || '-'} / {dcaDetailPortfolio.dca_valuation_pb_percentile?.toFixed(1) || '-'}%</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">综合分位</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_valuation_percentile?.toFixed(1) || '-'}%</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">估值样本</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_valuation_sample_size ?? '-'}</div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border p-4">
+                    <h3 className="font-semibold">趋势指标</h3>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">MA20</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_trend_ma20?.toFixed(3) || '-'}</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">MA20斜率</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_trend_ma20_slope_pct?.toFixed(2) || '-'}%</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">距离MA20</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_trend_distance_pct?.toFixed(2) || '-'}%</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">ATR14</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_trend_atr14?.toFixed(3) || '-'}</div>
+                      </div>
+                      <div className="rounded-md bg-muted/40 p-3">
+                        <div className="text-xs text-muted-foreground">ATR容忍区间</div>
+                        <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_trend_atr_band_pct?.toFixed(2) || '-'}%</div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="font-semibold">近 60 日迷你图</h3>
+                      <span className="text-xs text-muted-foreground">收盘价 / MA20 / 触发价 / 当前价</span>
+                    </div>
+                    <div className="mt-4 h-56 rounded-md border bg-white p-2">
+                      {dcaHistoryLoading ? (
+                        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">加载走势中...</div>
+                      ) : buildMiniChartData(dcaHistory).length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={buildMiniChartData(dcaHistory)} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
+                            <XAxis dataKey="date" tick={{ fontSize: 10 }} interval="preserveStartEnd" minTickGap={24} />
+                            <YAxis tick={{ fontSize: 10 }} domain={["dataMin", "dataMax"]} />
+                            <Tooltip formatter={(value: number, name: string) => [Number(value).toFixed(3), name === 'close' ? '收盘价' : 'MA20']} labelFormatter={(label) => `日期 ${label}`} />
+                            <Line type="monotone" dataKey="close" name="收盘价" stroke="#2563eb" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+                            <Line type="monotone" dataKey="ma20" name="MA20" stroke="#f59e0b" strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                            {dcaDetailPortfolio.dca_next_trigger_price != null && (
+                              <ReferenceLine y={dcaDetailPortfolio.dca_next_trigger_price} stroke="#10b981" strokeDasharray="4 4" label={{ value: '触发价', fontSize: 10, fill: '#059669' }} />
+                            )}
+                            {dcaDetailPortfolio.current_price != null && (
+                              <ReferenceLine y={dcaDetailPortfolio.current_price} stroke="#ef4444" strokeDasharray="3 3" label={{ value: '当前价', fontSize: 10, fill: '#dc2626' }} />
+                            )}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">暂无走势数据</div>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border p-4">
+                    <h3 className="font-semibold">图表数据</h3>
+                    <div className="mt-4 space-y-4">
+                      {dcaDetailPortfolio.dca_valuation_percentile != null && (
+                        <div>
+                          <div className="mb-1 flex items-center justify-between text-xs">
+                            <span>综合估值分位</span>
+                            <span>{dcaDetailPortfolio.dca_valuation_percentile.toFixed(1)}%</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full rounded-full bg-emerald-500" style={{ width: `${metricPercent(dcaDetailPortfolio.dca_valuation_percentile)}%` }} />
+                          </div>
+                        </div>
+                      )}
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">PE / PB</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.dca_valuation_pe?.toFixed(2) || '-'} / {dcaDetailPortfolio.dca_valuation_pb?.toFixed(2) || '-'}</div>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">成本 / 现价</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.cost_price.toFixed(4)} / {dcaDetailPortfolio.current_price?.toFixed(3) || '-'}</div>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">持仓盈亏</div>
+                          <div className={`mt-1 font-mono ${getPnlColorClass(dcaDetailPortfolio.pnl)}`}>{formatPnl(dcaDetailPortfolio.pnl, dcaDetailPortfolio.pnl_pct)}</div>
+                        </div>
+                      </div>
+                      {dcaDetailPortfolio.dca_quality_score != null && (
+                        <div>
+                          <div className="mb-1 flex items-center justify-between text-xs">
+                            <span>信号质量评分</span>
+                            <span>{dcaDetailPortfolio.dca_quality_score.toFixed(1)}</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full rounded-full bg-violet-500" style={{ width: `${metricPercent(dcaDetailPortfolio.dca_quality_score)}%` }} />
+                          </div>
+                        </div>
+                      )}
+                      {dcaDetailPortfolio.current_price != null && dcaDetailPortfolio.dca_next_trigger_price != null && (
+                        <div>
+                          <div className="mb-1 flex items-center justify-between text-xs">
+                            <span>现价相对触发价</span>
+                            <span>{dcaDetailPortfolio.current_price.toFixed(3)} / {dcaDetailPortfolio.dca_next_trigger_price.toFixed(3)}</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full rounded-full bg-blue-500" style={{ width: `${metricPercent(dcaDetailPortfolio.current_price / dcaDetailPortfolio.dca_next_trigger_price * 100) }%` }} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                </TabsContent>
+                  <TabsContent value="history" className="space-y-3 text-sm">
+                    {dcaSignalHistoryLoading ? (
+                      <div className="rounded-lg border py-10 text-center text-muted-foreground">加载历史记录中...</div>
+                    ) : dcaSignalHistory.length > 0 ? (
+                      <div className="space-y-3">
+                        <div className="rounded-lg border p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <h3 className="font-semibold">灯色时间轴</h3>
+                            <span className="text-xs text-muted-foreground">正式灯色 / 本次信号</span>
+                          </div>
+                          <div className="mt-3 h-44">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={lightTimelineData} margin={{ top: 8, right: 12, left: -22, bottom: 0 }}>
+                                <XAxis dataKey="date" tick={{ fontSize: 10 }} minTickGap={18} />
+                                <YAxis tick={{ fontSize: 10 }} domain={[0, 4]} ticks={[1, 2, 3, 4]} tickFormatter={(value) => ['', '红', '黄', '绿', '深绿'][Number(value)] || ''} />
+                                <Tooltip formatter={(value: number, name: string) => [formatDcaLight(value === 4 ? 'deep_green' : value === 3 ? 'green' : value === 2 ? 'yellow' : value === 1 ? 'red' : null), name === 'formal' ? '正式灯色' : '本次信号']} />
+                                <Line type="stepAfter" dataKey="formal" name="正式灯色" stroke="#2563eb" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+                                <Line type="stepAfter" dataKey="signal" name="本次信号" stroke="#f59e0b" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                        {dcaSignalHistory.map((item) => {
+                          const metrics = item.metrics || {}
+                          return (
+                            <div key={item.id} className="rounded-lg border p-4">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Badge variant="outline" className={`${getDcaTextClass(item.persisted_light)} border-current`}>
+                                    正式 {formatDcaLight(item.persisted_light)}
+                                  </Badge>
+                                  <span className="text-xs text-muted-foreground">信号 {formatDcaLight(item.signal_light)}</span>
+                                  {item.candidate_light && (
+                                    <span className={`text-xs ${getDcaTextClass(item.candidate_light)}`}>
+                                      候选 {formatDcaLight(item.candidate_light)} {item.candidate_confirm_count || 0}/2
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-xs text-muted-foreground">{formatBeijingTime(item.scanned_at)}</span>
+                              </div>
+                              <div className="mt-3 grid gap-2 text-xs sm:grid-cols-4">
+                                <div className="rounded bg-muted/40 p-2">现价 <span className="font-mono">{item.price?.toFixed(3) || '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">触发价 <span className="font-mono">{item.trigger_price?.toFixed(3) || '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">倍率 <span className="font-mono">{item.budget_multiplier != null ? `${item.budget_multiplier}x` : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">分位 <span className="font-mono">{metrics.valuation_percentile != null ? `${Number(metrics.valuation_percentile).toFixed(1)}%` : '-'}</span></div>
+                              </div>
+                              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-4">
+                                <div className="rounded bg-muted/40 p-2">MA20 <span className="font-mono">{metrics.trend_ma20 != null ? Number(metrics.trend_ma20).toFixed(3) : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">MA20斜率 <span className="font-mono">{metrics.trend_ma20_slope_pct != null ? `${Number(metrics.trend_ma20_slope_pct).toFixed(2)}%` : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">ATR14 <span className="font-mono">{metrics.trend_atr14 != null ? Number(metrics.trend_atr14).toFixed(3) : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">轨道 <span>{formatDcaTrack(metrics.track)}</span></div>
+                              </div>
+                              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
+                                <div className="rounded bg-muted/40 p-2">评分 <span className="font-mono">{metrics.quality_score != null ? Number(metrics.quality_score).toFixed(1) : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">浅绿价 <span className="font-mono">{metrics.green_trigger_price != null ? Number(metrics.green_trigger_price).toFixed(3) : '-'}</span></div>
+                                <div className="rounded bg-muted/40 p-2">深绿价 <span className="font-mono">{metrics.deep_green_trigger_price != null ? Number(metrics.deep_green_trigger_price).toFixed(3) : '-'}</span></div>
+                              </div>
+                              <p className="mt-3 text-xs leading-5 text-muted-foreground">{item.reason || '-'}</p>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border py-10 text-center text-muted-foreground">暂无扫描历史</div>
+                    )}
+                  </TabsContent>
+                </Tabs>
+              </>
+            )}
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={showAdviceModal && !!currentAdvice} onOpenChange={setShowAdviceModal}>
           <DialogContent className="flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-4xl flex-col gap-0 overflow-hidden p-0">
             {currentAdvice && (

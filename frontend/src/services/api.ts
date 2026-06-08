@@ -38,6 +38,7 @@ export interface PortfolioCreate {
   cost_price: number
   buy_date?: string
   note?: string
+  dca_track_override?: string
 }
 
 export interface PortfolioUpdate {
@@ -45,6 +46,7 @@ export interface PortfolioUpdate {
   cost_price?: number
   buy_date?: string
   note?: string
+  dca_track_override?: string
 }
 
 export interface PortfolioWithMarket {
@@ -54,6 +56,7 @@ export interface PortfolioWithMarket {
   cost_price: number
   buy_date: string | null
   note: string | null
+  dca_track_override: string | null
   created_at: string
   updated_at: string
   etf_name: string | null
@@ -66,6 +69,50 @@ export interface PortfolioWithMarket {
   today_pnl: number | null
   today_pnl_pct: number | null
   holding_days: number | null
+  dca_track: string | null
+  dca_light: string | null
+  dca_label: string | null
+  dca_action: string | null
+  dca_reason: string | null
+  dca_next_trigger_price: number | null
+  dca_valuation_percentile: number | null
+  dca_valuation_pe: number | null
+  dca_valuation_pb: number | null
+  dca_valuation_pe_percentile: number | null
+  dca_valuation_pb_percentile: number | null
+  dca_valuation_sample_size: number | null
+  dca_trend_ma20: number | null
+  dca_trend_ma20_slope_pct: number | null
+  dca_trend_distance_pct: number | null
+  dca_trend_atr14: number | null
+  dca_trend_atr_band_pct: number | null
+  dca_decision_steps: string[] | null
+  dca_candidate_light: string | null
+  dca_candidate_confirm_count: number | null
+  dca_quality_score: number | null
+  dca_green_trigger_price: number | null
+  dca_deep_green_trigger_price: number | null
+  dca_budget_multiplier: number | null
+  dca_budget_label: string | null
+}
+
+
+export interface PortfolioDcaSignalHistoryItem {
+  id: number
+  portfolio_id: number
+  etf_code: string
+  signal_light: string | null
+  persisted_light: string | null
+  candidate_light: string | null
+  candidate_confirm_count: number | null
+  label: string | null
+  action: string | null
+  reason: string | null
+  budget_multiplier: number | null
+  trigger_price: number | null
+  price: number | null
+  metrics: Record<string, any> | null
+  scanned_at: string
 }
 
 export interface PortfolioSummary {
@@ -429,11 +476,65 @@ export interface SchedulerActionResponse {
   job_id?: string
 }
 
+export interface StrategyInfo {
+  id: 'tfss_v1'
+  name: string
+  description: string
+  enabled: boolean
+}
+
+export interface StrategySignalResult {
+  etf_code: string
+  etf_name: string | null
+  signal: 'entry' | 'hold' | 'reduce' | 'exit' | 'avoid' | 'insufficient_data'
+  signal_label: string
+  confidence: number
+  close_price: number | null
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  ma20_slope: number | null
+  volume: number | null
+  volume_ma10: number | null
+  atr14: number | null
+  atr_stop_price: number | null
+  momentum20: number | null
+  rotation_rank: number | null
+  rotation_top: boolean | null
+  engine_phase: string | null
+  grid_action: string | null
+  protection_action: string | null
+  macd_dif: number | null
+  macd_dea: number | null
+  macd_histogram: number | null
+  rsi14: number | null
+  bias20: number | null
+  reasons: string[]
+  risk_flags: string[]
+}
+
+export interface StrategyRunResponse {
+  strategy_id: 'tfss_v1'
+  strategy_name: string
+  run_at: string
+  total: number
+  results: StrategySignalResult[]
+}
+
+export interface StrategyScheduleResponse {
+  strategy_id: 'tfss_v1'
+  enabled: boolean
+  cron: string
+  job_id: string
+  next_run_time: string | null
+}
+
 // API 服务
 export const portfolioApi = {
   getList: () => api.get<PortfolioWithMarket[]>('/portfolio'),
   getSummary: () => api.get<PortfolioSummary>('/portfolio/summary'),
   getById: (id: number) => api.get<PortfolioWithMarket>(`/portfolio/${id}`),
+  getDcaHistory: (id: number, limit = 30) => api.get<PortfolioDcaSignalHistoryItem[]>(`/portfolio/${id}/dca-history`, { params: { limit } }),
   create: (data: PortfolioCreate) => api.post('/portfolio', data),
   update: (id: number, data: PortfolioUpdate) => api.put(`/portfolio/${id}`, data),
   delete: (id: number) => api.delete(`/portfolio/${id}`),
@@ -486,6 +587,16 @@ export const assistantApi = {
         include_portfolio_context: includePortfolioContext,
       }),
     }),
+}
+
+export const strategyApi = {
+  list: () => api.get<StrategyInfo[]>('/strategies'),
+  run: (strategyId: 'tfss_v1' = 'tfss_v1') => api.post<StrategyRunResponse>('/strategies/run', { strategy_id: strategyId }),
+  getLatest: () => api.get<StrategyRunResponse | null>('/strategies/latest'),
+  getSchedule: () => api.get<StrategyScheduleResponse>('/strategies/schedule'),
+  setSchedule: (enabled: boolean) => api.post<StrategyScheduleResponse>('/strategies/schedule', {
+    enabled,
+  }),
 }
 
 export const notificationConfigApi = {

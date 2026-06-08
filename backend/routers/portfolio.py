@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
 from database import get_session
 from schemas.portfolio import (
-    PortfolioCreate, PortfolioUpdate, PortfolioResponse, PortfolioWithMarket, PortfolioSummary
+    PortfolioCreate, PortfolioUpdate, PortfolioResponse, PortfolioDcaSignalHistoryResponse, PortfolioWithMarket, PortfolioSummary
 )
 from services.portfolio_service import PortfolioService
 from routers.auth import get_current_user
@@ -29,6 +29,20 @@ async def get_portfolio_summary(
 ):
     """获取持仓汇总"""
     return await PortfolioService.get_summary(db, user_id=current_user.id)
+
+
+@router.get("/{portfolio_id}/dca-history", response_model=List[PortfolioDcaSignalHistoryResponse])
+async def get_portfolio_dca_history(
+    portfolio_id: int,
+    limit: int = Query(default=30, ge=1, le=100),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """获取持仓红绿灯扫描历史"""
+    result = await PortfolioService.get_dca_signal_history(db, portfolio_id, user_id=current_user.id, limit=limit)
+    if result is None:
+        raise HTTPException(status_code=404, detail="持仓不存在")
+    return result
 
 
 @router.get("/{portfolio_id}", response_model=PortfolioResponse)

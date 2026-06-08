@@ -13,6 +13,9 @@ function describeJob(job: SchedulerJob) {
   if (job.id === 'weekly_account_analysis') return '每周五收盘后为所有活跃用户生成账户级分析，并推送摘要。'
   if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'A股交易时段刷新活跃用户持仓 ETF 的行情缓存。'
   if (job.id === 'etf_profile_refresh') return '交易日 09:15 和 13:15 刷新活跃用户持仓 ETF 的资料快照、资产配置、公告和基金持仓。'
+  if (job.id === 'dca_signal_update') return '交易日 14:40 按用户计算持仓红绿灯，并持久化状态与待通知事件。'
+  if (job.id === 'dca_signal_notify') return '交易日 14:45 读取已持久化的红绿灯变化，按用户和红绿灯分组发送通知。'
+  if (job.id === 'dca_signal_daily_summary') return '交易日 14:46 发送红绿灯全量日报，按深绿、绿、黄、红展示全部持仓。'
   return '后台调度任务'
 }
 
@@ -21,6 +24,9 @@ function jobTone(job: SchedulerJob) {
   if (job.id === 'weekly_account_analysis') return 'border-violet-200 bg-violet-50 text-violet-700'
   if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   if (job.id === 'etf_profile_refresh') return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (job.id === 'dca_signal_update') return 'border-cyan-200 bg-cyan-50 text-cyan-700'
+  if (job.id === 'dca_signal_notify') return 'border-lime-200 bg-lime-50 text-lime-700'
+  if (job.id === 'dca_signal_daily_summary') return 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700'
   return 'border-slate-200 bg-slate-50 text-slate-700'
 }
 

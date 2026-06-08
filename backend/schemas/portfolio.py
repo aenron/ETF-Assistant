@@ -3,7 +3,7 @@ import math
 from pydantic import field_validator
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, List
 
 from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
@@ -40,6 +40,7 @@ class PortfolioBase(ShanghaiBaseModel):
     cost_price: float
     buy_date: Optional[date] = None
     note: Optional[str] = None
+    dca_track_override: Optional[str] = None
 
 
 class PortfolioCreate(PortfolioBase):
@@ -51,6 +52,7 @@ class PortfolioUpdate(ShanghaiBaseModel):
     cost_price: Optional[float] = None
     buy_date: Optional[date] = None
     note: Optional[str] = None
+    dca_track_override: Optional[str] = None
 
 
 class PortfolioResponse(PortfolioBase, ShanghaiOrmModel):
@@ -70,6 +72,31 @@ class PortfolioWithMarket(PortfolioResponse):
     today_pnl: Optional[float] = None
     today_pnl_pct: Optional[float] = None
     holding_days: Optional[int] = None
+    dca_track: Optional[str] = None
+    dca_light: Optional[str] = None
+    dca_label: Optional[str] = None
+    dca_action: Optional[str] = None
+    dca_reason: Optional[str] = None
+    dca_next_trigger_price: Optional[float] = None
+    dca_valuation_percentile: Optional[float] = None
+    dca_valuation_pe: Optional[float] = None
+    dca_valuation_pb: Optional[float] = None
+    dca_valuation_pe_percentile: Optional[float] = None
+    dca_valuation_pb_percentile: Optional[float] = None
+    dca_valuation_sample_size: Optional[int] = None
+    dca_trend_ma20: Optional[float] = None
+    dca_trend_ma20_slope_pct: Optional[float] = None
+    dca_trend_distance_pct: Optional[float] = None
+    dca_trend_atr14: Optional[float] = None
+    dca_trend_atr_band_pct: Optional[float] = None
+    dca_decision_steps: Optional[List[str]] = None
+    dca_candidate_light: Optional[str] = None
+    dca_candidate_confirm_count: Optional[int] = None
+    dca_quality_score: Optional[float] = None
+    dca_green_trigger_price: Optional[float] = None
+    dca_deep_green_trigger_price: Optional[float] = None
+    dca_budget_multiplier: Optional[float] = None
+    dca_budget_label: Optional[str] = None
 
     @field_validator(
         "current_price",
@@ -79,6 +106,21 @@ class PortfolioWithMarket(PortfolioResponse):
         "pnl_pct",
         "today_pnl",
         "today_pnl_pct",
+        "dca_next_trigger_price",
+        "dca_valuation_percentile",
+        "dca_valuation_pe",
+        "dca_valuation_pb",
+        "dca_valuation_pe_percentile",
+        "dca_valuation_pb_percentile",
+        "dca_trend_ma20",
+        "dca_trend_ma20_slope_pct",
+        "dca_trend_distance_pct",
+        "dca_trend_atr14",
+        "dca_trend_atr_band_pct",
+        "dca_quality_score",
+        "dca_green_trigger_price",
+        "dca_deep_green_trigger_price",
+        "dca_budget_multiplier",
         mode="before",
     )
     @classmethod
@@ -113,3 +155,26 @@ class PortfolioSummary(ShanghaiBaseModel):
         if not isinstance(value, dict):
             return {}
         return {str(key): _finite_float(item) for key, item in value.items()}
+
+
+class PortfolioDcaSignalHistoryResponse(ShanghaiBaseModel):
+    id: int
+    portfolio_id: int
+    etf_code: str
+    signal_light: Optional[str] = None
+    persisted_light: Optional[str] = None
+    candidate_light: Optional[str] = None
+    candidate_confirm_count: Optional[int] = None
+    label: Optional[str] = None
+    action: Optional[str] = None
+    reason: Optional[str] = None
+    budget_multiplier: Optional[float] = None
+    trigger_price: Optional[float] = None
+    price: Optional[float] = None
+    metrics: Optional[dict] = None
+    scanned_at: datetime
+
+    @field_validator("budget_multiplier", "trigger_price", "price", mode="before")
+    @classmethod
+    def clean_history_optional_float(cls, value):
+        return _optional_finite_float(value)
