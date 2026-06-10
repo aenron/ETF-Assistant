@@ -285,6 +285,8 @@ export function PortfolioSummaryCard({
       : `前两大类占比 ${topTwoRatio.toFixed(1)}%，持仓分布相对均衡。`
   const totalPnlAttribution = buildPnlAttributionData(portfolios, 'total')
   const todayPnlAttribution = buildPnlAttributionData(portfolios, 'today')
+  const holdingCount = summary.holding_count ?? portfolios.length
+  const missingQuoteCount = summary.missing_quote_count ?? portfolios.filter((portfolio) => portfolio.current_price == null).length
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -364,7 +366,13 @@ export function PortfolioSummaryCard({
         </CardContent>
       </Card>
 
-      {summary.total_cost === 0 && summary.total_market_value === 0 ? (
+      {holdingCount > 0 && missingQuoteCount > 0 ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 md:col-span-2 lg:col-span-5">
+          部分行情未计入汇总：{missingQuoteCount} 个持仓暂无行情缓存，当前总市值、总金额和盈亏仅统计已有行情的持仓。
+        </div>
+      ) : null}
+
+      {holdingCount === 0 ? (
         <Card className="md:col-span-2 lg:col-span-5">
           <CardContent className="py-12 text-center">
             <p className="text-muted-foreground mb-4">暂无持仓数据</p>

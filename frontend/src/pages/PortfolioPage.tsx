@@ -20,6 +20,8 @@ export function PortfolioPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [analyzingAll, setAnalyzingAll] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [messageTone, setMessageTone] = useState<'success' | 'error' | 'neutral'>('neutral')
 
   const latestMarketRefreshAt = portfolios
     .map((portfolio) => portfolio.market_refreshed_at)
@@ -63,18 +65,23 @@ export function PortfolioPage() {
 
   const handleAnalyzeAll = async () => {
     if (portfolios.length === 0) {
-      alert('当前没有可分析的持仓')
+      setMessageTone('neutral')
+      setMessage('当前没有可分析的持仓')
       return
     }
     setAnalyzingAll(true)
+    setMessageTone('neutral')
+    setMessage('正在生成账户分析...')
     try {
       const codes = portfolios.map((p) => p.etf_code)
       await adviceApi.generate(codes)
-      alert('一键分析任务已完成，最新建议已缓存，可前往决策历史查看')
+      setMessageTone('success')
+      setMessage('一键分析任务已完成，最新建议已缓存，可前往决策历史查看')
       await fetchData()
     } catch (error) {
       console.error('Failed to analyze all portfolios:', error)
-      alert('一键分析失败，请稍后重试')
+      setMessageTone('error')
+      setMessage('一键分析失败，请稍后重试')
     } finally {
       setAnalyzingAll(false)
     }
@@ -82,17 +89,22 @@ export function PortfolioPage() {
 
   const handleRefreshMarket = async () => {
     setRefreshing(true)
+    setMessageTone('neutral')
+    setMessage('正在刷新行情缓存...')
     try {
       const res = await marketApi.refreshAll()
       if (res.data.success) {
         await fetchData()
-        alert(res.data.message || '行情刷新成功')
+        setMessageTone('success')
+        setMessage(res.data.message || '行情刷新成功')
       } else {
-        alert(res.data.message || '刷新失败')
+        setMessageTone('error')
+        setMessage(res.data.message || '刷新失败')
       }
     } catch (error) {
       console.error('Failed to refresh market:', error)
-      alert('刷新行情失败')
+      setMessageTone('error')
+      setMessage('刷新行情失败')
     } finally {
       setRefreshing(false)
     }
@@ -101,6 +113,12 @@ export function PortfolioPage() {
   useEffect(() => {
     fetchData()
   }, [])
+
+  const messageClassName = messageTone === 'success'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : messageTone === 'error'
+      ? 'border-red-200 bg-red-50 text-red-700'
+      : 'border-slate-200 bg-slate-50 text-slate-700'
 
   return (
     <div className="space-y-6">
@@ -130,6 +148,8 @@ export function PortfolioPage() {
           </Button>
         </div>
       </div>
+
+      {message && <div className={`rounded-lg border px-4 py-3 text-sm ${messageClassName}`}>{message}</div>}
 
       <PortfolioSummaryCard
         summary={summary}
