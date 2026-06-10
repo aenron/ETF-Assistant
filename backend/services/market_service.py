@@ -808,7 +808,8 @@ class MarketService:
                             open_price=None,
                             high_price=None,
                             low_price=None,
-                            volume=None,
+                            volume=cls._to_int(item.get("f5")),
+                            amount=cls._to_float(item.get("f6")),
                         )
                 return result
         except Exception as e:
@@ -875,6 +876,7 @@ class MarketService:
                                     high_price=high,
                                     low_price=low,
                                     volume=int(parts[8]) if len(parts) > 8 and parts[8] else None,
+                                    amount=cls._to_float(parts[9]) if len(parts) > 9 and parts[9] else None,
                                 )
             return result
         except Exception as e:

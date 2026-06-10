@@ -19,6 +19,7 @@ from models.scheduler_job_config import SchedulerJobConfig
 from models.user import User
 from services.advisor_service import AdvisorService
 from services.market_service import MarketService
+from services.industry_fundamental_service import IndustryFundamentalService
 from services.macro_service import MacroDataService
 from services.portfolio_service import PortfolioService
 from services.notification_service import NotificationMessage, NotificationService
@@ -777,6 +778,16 @@ async def refresh_etf_profiles():
     print(f"[Scheduler] ETF资料刷新完成，成功刷新 {success_count}/{len(codes)} 只ETF")
 
 
+async def refresh_industry_fundamentals():
+    """定时刷新行业 ROE、利润增速和盈利预测缓存。"""
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行行业基本面刷新任务...")
+    try:
+        result = await IndustryFundamentalService.refresh_all()
+        print(f"[Scheduler] 行业基本面刷新完成，成功刷新 {len(result)} 个行业")
+    except Exception as e:
+        print(f"[Scheduler] 行业基本面刷新任务失败: {e}")
+
+
 async def refresh_macro_data():
     """定时采集宏观指标并生成自动美林时钟状态。"""
     print(f"[Scheduler] {now_in_shanghai()} 开始执行宏观数据刷新任务...")
@@ -899,6 +910,20 @@ def setup_scheduler():
     )
 
 
+    # 每周一盘前刷新行业基本面低频数据。
+    scheduler.add_job(
+        refresh_industry_fundamentals,
+        trigger=CronTrigger(
+            day_of_week='mon',
+            hour=8,
+            minute=10,
+            timezone='Asia/Shanghai'
+        ),
+        id='industry_fundamental_refresh',
+        name='行业基本面刷新',
+        replace_existing=True
+    )
+
     # 每周一盘前刷新低频宏观指标和美林时钟状态。
     scheduler.add_job(
         refresh_macro_data,
@@ -920,6 +945,7 @@ def setup_scheduler():
     print("[Scheduler] 定时任务已配置: 工作日 14:40 自动更新定投红绿灯数据")
     print("[Scheduler] 定时任务已配置: 工作日 14:45 自动推送定投红绿灯变化通知")
     print("[Scheduler] 定时任务已配置: 工作日 14:46 自动推送定投红绿灯日报")
+    print("[Scheduler] 定时任务已配置: 每周一 08:10 自动刷新行业基本面")
     print("[Scheduler] 定时任务已配置: 每周一 08:30 自动刷新宏观指标和美林时钟")
 
 

@@ -13,6 +13,7 @@ from schemas.portfolio import (
     PortfolioDcaSignalHistoryResponse, PortfolioWithMarket, PortfolioSummary
 )
 from services.etf_classification_service import EtfClassificationService
+from services.industry_fundamental_service import IndustryFundamentalService
 from services.market_service import MarketService
 from services.redis_service import RedisService
 from config import settings
@@ -1294,7 +1295,39 @@ class PortfolioService:
         }
 
     @classmethod
-    def _build_factor_score(cls, code: str, name: str | None, quote, dca_signal: dict) -> dict:
+    def _build_market_factor_metrics(cls, quote, dca_signal: dict) -> dict[str, float | None]:
+        price = cls._optional_finite_float(getattr(quote, "price", None) if quote else None)
+        amount = cls._optional_finite_float(getattr(quote, "amount", None) if quote else None)
+        volume = cls._optional_finite_float(getattr(quote, "volume", None) if quote else None)
+        volume_ratio = cls._optional_finite_float(dca_signal.get("dca_trend_volume_ratio"))
+        ma20 = cls._optional_finite_float(dca_signal.get("dca_trend_ma20"))
+        momentum20 = ((price - ma20) / ma20 * 100) if price is not None and ma20 and ma20 > 0 else None
+
+        liquidity_score = None
+        if amount is not None and amount > 0:
+            if amount >= 500_000_000:
+                liquidity_score = 90.0
+            elif amount >= 100_000_000:
+                liquidity_score = 75.0
+            elif amount >= 30_000_000:
+                liquidity_score = 60.0
+            elif amount >= 10_000_000:
+                liquidity_score = 45.0
+            else:
+                liquidity_score = 30.0
+        elif volume is not None and volume > 0:
+            liquidity_score = 50.0
+
+        return {
+            "amount": amount,
+            "volume": volume,
+            "volume_ratio": volume_ratio,
+            "momentum20": momentum20,
+            "liquidity_score": liquidity_score,
+        }
+
+    @classmethod
+    def _build_factor_score(cls, code: str, name: str | None, quote, dca_signal: dict, fundamentals: dict | None = None) -> dict:
         classification = EtfClassificationService.classify(code, name)
         display_name = name or ""
         broad_keywords = ("沪深300", "中证500", "中证1000", "上证50", "A50", "深证100", "中证A500", "A500", "宽基", "全指", "红利", "股息")
@@ -1317,6 +1350,9 @@ class PortfolioService:
                 "action": "不适用",
                 "reason": "该 ETF 暂按宽基、跨境、商品或债券处理，不参与行业四因子评分。",
                 "factors": [],
+                "momentum20": None,
+                "amount": None,
+                "liquidity_score": None,
             }
 
         macro_score = 55.0
@@ -1337,33 +1373,47 @@ class PortfolioService:
             technical_score = 72.0 if light in {"deep_green", "green"} else 35.0 if light == "red" else 50.0
         factors.append(f"技术：复用红绿灯质量分 {technical_score:.1f}。")
 
+        market_metrics = cls._build_market_factor_metrics(quote, dca_signal)
         change_pct = cls._optional_finite_float(getattr(quote, "change_pct", None) if quote else None)
-        volume_ratio = cls._optional_finite_float(dca_signal.get("dca_trend_volume_ratio"))
+        volume_ratio = cls._optional_finite_float(market_metrics.get("volume_ratio"))
+        amount = cls._optional_finite_float(market_metrics.get("amount"))
+        momentum20 = cls._optional_finite_float(market_metrics.get("momentum20"))
+        liquidity_score = cls._optional_finite_float(market_metrics.get("liquidity_score"))
         sentiment_score = 50.0
         if change_pct is not None:
             sentiment_score += max(-18.0, min(18.0, change_pct * 3))
             factors.append(f"情绪：当日涨跌 {change_pct:.2f}%。")
+        if momentum20 is not None:
+            sentiment_score += max(-12.0, min(12.0, momentum20 * 0.8))
+            factors.append(f"动量：价格相对MA20 {momentum20:.2f}%。")
         if volume_ratio is not None:
             sentiment_score += max(-10.0, min(10.0, (volume_ratio - 1) * 12))
             factors.append(f"情绪：量能约 {volume_ratio:.2f} 倍。")
         else:
             factors.append("情绪：量能数据不足，按中性处理。")
+        if amount is not None:
+            factors.append(f"流动性：实时成交额约 {amount / 100_000_000:.2f} 亿元。")
+        if liquidity_score is not None:
+            sentiment_score = sentiment_score * 0.75 + liquidity_score * 0.25
 
-        prosperity_score = 50.0
-        hot_keywords = ("人工智能", "AI", "机器人", "算力", "半导体", "芯片", "新能源", "储能", "创新药", "军工")
-        defensive_keywords = ("消费", "食品", "饮料", "白酒", "医药", "医疗", "银行")
-        cyclical_keywords = ("证券", "券商", "保险", "金融", "地产", "煤炭", "有色", "化工", "能源")
-        if any(keyword.lower() in display_name.lower() for keyword in hot_keywords):
-            prosperity_score += 12
-            factors.append("景气度：命中高景气主题关键词，代理分上调。")
-        elif any(keyword in display_name for keyword in defensive_keywords):
-            prosperity_score += 6
-            factors.append("景气度：命中防御消费/医药/银行关键词，代理分小幅上调。")
-        elif any(keyword in display_name for keyword in cyclical_keywords):
-            prosperity_score += 4
-            factors.append("景气度：命中周期金融/资源关键词，等待宏观确认。")
+        prosperity_score = cls._optional_finite_float((fundamentals or {}).get("score")) or 50.0
+        if fundamentals:
+            industry_name = fundamentals.get("industry_name") or fundamentals.get("industry_key") or "行业"
+            factors.append(f"景气度：{industry_name} 基本面分 {prosperity_score:.1f}。")
+            roe = cls._optional_finite_float(fundamentals.get("roe"))
+            profit_growth = cls._optional_finite_float(fundamentals.get("net_profit_growth"))
+            forecast_growth = cls._optional_finite_float(fundamentals.get("forecast_eps_growth"))
+            positive_ratio = cls._optional_finite_float(fundamentals.get("positive_rating_ratio"))
+            if roe is not None:
+                factors.append(f"ROE：代表成份股均值约 {roe:.2f}%。")
+            if profit_growth is not None:
+                factors.append(f"利润：代表成份股净利润同比约 {profit_growth:.2f}%。")
+            if forecast_growth is not None:
+                factors.append(f"盈利预测：未来一年 EPS 预测增速约 {forecast_growth:.2f}%。")
+            if positive_ratio is not None:
+                factors.append(f"机构预期：买入/增持占比约 {positive_ratio:.1f}%。")
         else:
-            factors.append("景气度：暂无行业基本面数据，按中性代理分处理。")
+            factors.append("景气度：暂无行业基本面缓存，按中性处理。")
 
         macro_score = max(0.0, min(100.0, macro_score))
         technical_score = max(0.0, min(100.0, technical_score))
@@ -1387,12 +1437,15 @@ class PortfolioService:
             "prosperity_score": round(prosperity_score, 1),
             "rating": rating,
             "action": action,
-            "reason": "行业四因子评分为宏观、技术、情绪、景气度的加权结果；当前景气度为关键词代理，后续可接真实行业基本面数据。",
+            "reason": "行业四因子评分为宏观、技术、情绪、景气度的加权结果；情绪接入实时成交额、量能和动量，景气度接入行业 ROE、利润增速和盈利预测。",
             "factors": factors,
+            "momentum20": round(momentum20, 3) if momentum20 is not None else None,
+            "amount": round(amount, 2) if amount is not None else None,
+            "liquidity_score": round(liquidity_score, 1) if liquidity_score is not None else None,
         }
 
     @classmethod
-    def _build_cross_border_risk(cls, code: str, name: str | None, market_value: float | None = None, total_market_value: float | None = None) -> dict:
+    def _build_cross_border_risk(cls, code: str, name: str | None, market_value: float | None = None, total_market_value: float | None = None, quote=None) -> dict:
         classification = EtfClassificationService.classify(code, name)
         risk_tags = list(classification.risk_tags)
         is_cross_border = "跨境" in risk_tags
@@ -1406,14 +1459,22 @@ class PortfolioService:
                 "action": "常规执行",
                 "reason": "非跨境 ETF，按常规红绿灯和宏观轮动规则执行。",
                 "warnings": [],
+                "iopv": None,
+                "premium_rate": None,
             }
 
         current_weight = (market_value / total_market_value) if market_value and total_market_value and total_market_value > 0 else None
+        price = cls._optional_finite_float(getattr(quote, "price", None) if quote else None)
+        iopv = cls._optional_finite_float(getattr(quote, "iopv", None) if quote else None)
+        premium_rate = ((price - iopv) / iopv * 100) if price is not None and iopv and iopv > 0 else None
         warnings = [
             "跨境 ETF 受海外交易时段影响，A 股交易时间内净值可能滞后。",
             "需要关注人民币汇率波动，汇率会放大或抵消底层资产收益。",
-            "当前系统暂未接入实时 IOPV/溢价率，红绿灯为价格趋势信号，不代表可追高买入。",
         ]
+        if premium_rate is None:
+            warnings.append("当前行情源未返回实时 IOPV，溢价率不可用，红绿灯不代表可追高买入。")
+        else:
+            warnings.append(f"实时溢价率约 {premium_rate:.2f}%。")
         risk_level = "medium"
         adjustment = 0.8
         action = "降倍率执行"
@@ -1423,6 +1484,17 @@ class PortfolioService:
             adjustment = 0.6
             action = "小额分批"
             warnings.append("该类跨境成长 ETF 波动和估值弹性较高，绿灯也建议分批执行。")
+
+        if premium_rate is not None and premium_rate >= 5:
+            risk_level = "high"
+            adjustment = 0.0
+            action = "不新增"
+            warnings.append("溢价率高于 5%，暂停新增，等待溢价回落。")
+        elif premium_rate is not None and premium_rate >= 2:
+            risk_level = "high"
+            adjustment = min(adjustment, 0.4)
+            action = "显著降倍率"
+            warnings.append("溢价率高于 2%，只允许小额分批。")
 
         if current_weight is not None and current_weight >= classification.max_position_hint:
             risk_level = "high"
@@ -1439,6 +1511,8 @@ class PortfolioService:
             "action": action,
             "reason": "跨境 ETF 需要叠加汇率、时差、溢价和 T+0 交易风险约束。",
             "warnings": warnings,
+            "iopv": round(iopv, 4) if iopv is not None else None,
+            "premium_rate": round(premium_rate, 3) if premium_rate is not None else None,
         }
 
     @classmethod
@@ -1509,6 +1583,18 @@ class PortfolioService:
             if price is not None and price > 0:
                 estimated_total_market_value += cls._finite_float(p.shares) * price
 
+        industry_key_by_code = {
+            p.etf_code: IndustryFundamentalService.resolve_industry_key(
+                p.etf_code,
+                (quotes.get(p.etf_code).name if quotes.get(p.etf_code) else None) or etf_name_by_code.get(p.etf_code),
+            )
+            for p in portfolios
+        }
+        fundamental_by_key = await IndustryFundamentalService.get_many(
+            [key for key in industry_key_by_code.values() if key],
+            allow_fetch=compute_dca,
+        )
+
         results = []
         for p in portfolios:
             quote = quotes.get(p.etf_code)
@@ -1529,9 +1615,10 @@ class PortfolioService:
                 dca_signal["dca_candidate_light"] = None
                 dca_signal["dca_candidate_confirm_count"] = None
             estimated_market_value = cls._finite_float(p.shares) * price if price is not None and price > 0 else None
-            cross_border_risk = cls._build_cross_border_risk(p.etf_code, display_name, estimated_market_value, estimated_total_market_value)
+            cross_border_risk = cls._build_cross_border_risk(p.etf_code, display_name, estimated_market_value, estimated_total_market_value, quote)
             dca_signal = cls._apply_cross_border_risk_to_signal(dca_signal, cross_border_risk)
-            factor_score = cls._build_factor_score(p.etf_code, display_name, quote, dca_signal)
+            industry_key = industry_key_by_code.get(p.etf_code)
+            factor_score = cls._build_factor_score(p.etf_code, display_name, quote, dca_signal, fundamental_by_key.get(industry_key) if industry_key else None)
             if quote and price is not None and price > 0:
                 shares = cls._finite_float(p.shares)
                 cost_price = cls._finite_float(p.cost_price)

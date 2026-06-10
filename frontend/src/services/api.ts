@@ -62,6 +62,9 @@ export interface PortfolioFactorScore {
   action: string
   reason: string
   factors: string[]
+  momentum20: number | null
+  amount: number | null
+  liquidity_score: number | null
 }
 
 export interface PortfolioCrossBorderRisk {
@@ -73,6 +76,8 @@ export interface PortfolioCrossBorderRisk {
   action: string
   reason: string
   warnings: string[]
+  iopv: number | null
+  premium_rate: number | null
 }
 
 export interface PortfolioWithMarket {

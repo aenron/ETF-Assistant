@@ -71,6 +71,9 @@ class PortfolioFactorScore(ShanghaiBaseModel):
     action: str = "不适用"
     reason: str = "仅行业或主题 ETF 参与四因子评分。"
     factors: list[str] = []
+    momentum20: Optional[float] = None
+    amount: Optional[float] = None
+    liquidity_score: Optional[float] = None
 
 
 class PortfolioCrossBorderRisk(ShanghaiBaseModel):
@@ -82,6 +85,8 @@ class PortfolioCrossBorderRisk(ShanghaiBaseModel):
     action: str = "常规执行"
     reason: str = "非跨境 ETF，按常规持仓规则处理。"
     warnings: list[str] = []
+    iopv: Optional[float] = None
+    premium_rate: Optional[float] = None
 
 
 class PortfolioWithMarket(PortfolioResponse):

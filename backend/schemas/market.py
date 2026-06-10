@@ -52,6 +52,8 @@ class MarketQuote(ShanghaiBaseModel):
     low_price: Optional[float] = None
     volume: Optional[int] = None
     amount: Optional[float] = None
+    iopv: Optional[float] = None
+    premium_rate: Optional[float] = None
     refreshed_at: Optional[datetime] = None
 
     @field_validator("price", "change_pct", mode="before")
@@ -59,7 +61,7 @@ class MarketQuote(ShanghaiBaseModel):
     def clean_required_float(cls, value):
         return _finite_float(value)
 
-    @field_validator("open_price", "high_price", "low_price", "amount", mode="before")
+    @field_validator("open_price", "high_price", "low_price", "amount", "iopv", "premium_rate", mode="before")
     @classmethod
     def clean_optional_float(cls, value):
         return _optional_finite_float(value)
