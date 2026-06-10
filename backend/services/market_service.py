@@ -455,13 +455,19 @@ class MarketService:
                 "low_price": existing.low_price if existing.low_price is not None else incoming.low_price,
                 "volume": existing.volume if existing.volume is not None else incoming.volume,
                 "amount": existing.amount if existing.amount is not None else incoming.amount,
+                "iopv": existing.iopv if existing.iopv is not None else incoming.iopv,
+                "premium_rate": existing.premium_rate if existing.premium_rate is not None else incoming.premium_rate,
                 "refreshed_at": existing.refreshed_at or incoming.refreshed_at,
             }
         )
 
     @staticmethod
     def _quote_needs_enrichment(quote: MarketQuote | None) -> bool:
-        return quote is None or not quote.name
+        if quote is None or not quote.name:
+            return True
+        # Listed ETF quotes from QMT/Eastmoney often lack IOPV. Keep enriching so
+        # AkShare ETF spot can add IOPV/premium without replacing the primary price.
+        return quote.iopv is None and quote.premium_rate is None
 
     @classmethod
     def _eastmoney_secid_candidates(cls, code: str) -> List[str]:

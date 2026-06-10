@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 
@@ -11,7 +12,7 @@ from services.industry_fundamental_service import IndustryFundamentalService
 from services.market_service import MarketService
 
 
-class RealDataSourceTests(unittest.TestCase):
+class RealDataSourceTests(unittest.IsolatedAsyncioTestCase):
     def test_parse_etf_spot_dataframe_includes_iopv_and_premium(self) -> None:
         df = pd.DataFrame([
             {
@@ -57,6 +58,37 @@ class RealDataSourceTests(unittest.TestCase):
             IndustryFundamentalService.resolve_industry_key("512800", "银行ETF"),
             "bank",
         )
+
+    async def test_quote_enrichment_keeps_price_and_adds_iopv(self) -> None:
+        from schemas.market import MarketQuote
+
+        qmt_quote = MarketService._merge_quote(
+            existing=MarketQuote(code="513300", name="纳斯达克ETF", price=1.05, change_pct=1.2),
+            incoming=MarketQuote(code="513300", name="纳斯达克ETF", price=1.04, change_pct=1.1, iopv=1.0, premium_rate=5.0),
+        )
+
+        self.assertEqual(qmt_quote.price, 1.05)
+        self.assertEqual(qmt_quote.iopv, 1.0)
+        self.assertEqual(qmt_quote.premium_rate, 5.0)
+
+    async def test_fetch_quotes_continues_to_akshare_when_quote_lacks_iopv(self) -> None:
+        from schemas.market import MarketQuote
+
+        qmt_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.05, change_pct=1.2)
+        iopv_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.04, change_pct=1.1, iopv=1.0, premium_rate=5.0)
+
+        with (
+            patch.object(MarketService, "_fetch_from_qmt_agent", new=AsyncMock(return_value={"513300": qmt_quote})),
+            patch.object(MarketService, "_fetch_from_eastmoney_api", new=AsyncMock(return_value={})),
+            patch.object(MarketService, "_fetch_from_akshare_etf_spot", new=AsyncMock(return_value={"513300": iopv_quote})) as akshare_fetch,
+            patch.object(MarketService, "cache_quote", new=AsyncMock(side_effect=lambda _code, quote: quote)),
+        ):
+            result = await MarketService._fetch_quotes_from_akshare(["513300"])
+
+        akshare_fetch.assert_awaited_once_with(["513300"])
+        self.assertEqual(result["513300"].price, 1.05)
+        self.assertEqual(result["513300"].iopv, 1.0)
+        self.assertEqual(result["513300"].premium_rate, 5.0)
 
 
 if __name__ == "__main__":
