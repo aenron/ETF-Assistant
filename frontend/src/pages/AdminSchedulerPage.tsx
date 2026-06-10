@@ -13,9 +13,10 @@ function describeJob(job: SchedulerJob) {
   if (job.id === 'weekly_account_analysis') return '每周五收盘后为所有活跃用户生成账户级分析，并推送摘要。'
   if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'A股交易时段刷新活跃用户持仓 ETF 的行情缓存。'
   if (job.id === 'etf_profile_refresh') return '交易日 09:15 和 13:15 刷新活跃用户持仓 ETF 的资料快照、资产配置、公告和基金持仓。'
-  if (job.id === 'dca_signal_update') return '交易日 14:40 按用户计算持仓红绿灯，并持久化状态与待通知事件。'
+  if (job.id === 'dca_signal_update') return '交易日 10:30 和 14:40 按用户计算持仓红绿灯，并持久化状态、历史快照与待通知事件。'
   if (job.id === 'dca_signal_notify') return '交易日 14:45 读取已持久化的红绿灯变化，按用户和红绿灯分组发送通知。'
   if (job.id === 'dca_signal_daily_summary') return '交易日 14:46 发送红绿灯全量日报，按深绿、绿、黄、红展示全部持仓。'
+  if (job.id === 'macro_data_refresh') return '每周一 08:30 自动采集宏观指标，并生成美林投资时钟状态。'
   return '后台调度任务'
 }
 

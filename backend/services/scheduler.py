@@ -14,13 +14,15 @@ from models.etf_info import EtfInfo
 from models.portfolio import Portfolio
 from models.portfolio_dca_signal_history import PortfolioDcaSignalHistory
 from models.portfolio_dca_state import PortfolioDcaState
+from models.dca_signal_config import DcaSignalConfig
 from models.scheduler_job_config import SchedulerJobConfig
 from models.user import User
 from services.advisor_service import AdvisorService
 from services.market_service import MarketService
+from services.macro_service import MacroDataService
 from services.portfolio_service import PortfolioService
 from services.notification_service import NotificationMessage, NotificationService
-from utils.timezone import now_in_shanghai
+from utils.timezone import now_in_shanghai, now_in_utc_naive
 
 
 scheduler = AsyncIOScheduler()
@@ -161,6 +163,12 @@ def _dca_history_metrics(portfolio) -> dict:
         "trend_distance_pct": portfolio.dca_trend_distance_pct,
         "trend_atr14": portfolio.dca_trend_atr14,
         "trend_atr_band_pct": portfolio.dca_trend_atr_band_pct,
+        "trend_ma60": getattr(portfolio, "dca_trend_ma60", None),
+        "trend_ma60_slope_pct": getattr(portfolio, "dca_trend_ma60_slope_pct", None),
+        "trend_ma120": getattr(portfolio, "dca_trend_ma120", None),
+        "trend_ma120_slope_pct": getattr(portfolio, "dca_trend_ma120_slope_pct", None),
+        "trend_volume_ratio": getattr(portfolio, "dca_trend_volume_ratio", None),
+        "trend_atr_multiplier": getattr(portfolio, "dca_trend_atr_multiplier", None),
         "decision_steps": portfolio.dca_decision_steps,
         "quality_score": portfolio.dca_quality_score,
         "green_trigger_price": portfolio.dca_green_trigger_price,
@@ -184,7 +192,7 @@ def _add_dca_history(db, state: PortfolioDcaState, portfolio, user_id: int) -> N
         trigger_price=_to_decimal(portfolio.dca_next_trigger_price),
         price=_to_decimal(portfolio.current_price),
         metrics=_dca_history_metrics(portfolio),
-        scanned_at=now_in_shanghai().replace(tzinfo=None),
+        scanned_at=now_in_utc_naive(),
     ))
 
 def _dca_notify_key(portfolio) -> str:
@@ -229,15 +237,15 @@ def _update_dca_state(state: PortfolioDcaState, portfolio) -> None:
     state.last_budget_multiplier = _to_decimal(portfolio.dca_budget_multiplier)
     state.last_trigger_price = _to_decimal(portfolio.dca_next_trigger_price)
     state.last_price = _to_decimal(portfolio.current_price)
-    state.last_scanned_at = now_in_shanghai().replace(tzinfo=None)
+    state.last_scanned_at = now_in_utc_naive()
 
 
 def _update_dca_scan_time(state: PortfolioDcaState, portfolio) -> None:
     state.etf_code = portfolio.etf_code
-    state.last_scanned_at = now_in_shanghai().replace(tzinfo=None)
+    state.last_scanned_at = now_in_utc_naive()
 
 
-def _apply_dca_debounce(state: PortfolioDcaState, portfolio) -> tuple[bool, str | None]:
+def _apply_dca_debounce(state: PortfolioDcaState, portfolio, confirm_count: int = 2) -> tuple[bool, str | None]:
     current_light = portfolio.dca_light
     if state.last_light is None:
         state.candidate_light = None
@@ -257,25 +265,29 @@ def _apply_dca_debounce(state: PortfolioDcaState, portfolio) -> tuple[bool, str 
         state.candidate_light = current_light
         state.candidate_confirm_count = 1
 
-    if (state.candidate_confirm_count or 0) >= 2:
+    safe_confirm_count = max(1, int(confirm_count or 2))
+    if (state.candidate_confirm_count or 0) >= safe_confirm_count:
         previous_light = state.last_light
         state.candidate_light = None
         state.candidate_confirm_count = 0
         _update_dca_state(state, portfolio)
-        return True, f"红绿灯连续2次确认变化：{previous_light or '-'} -> {current_light or '-'}"
+        return True, f"红绿灯连续{safe_confirm_count}次确认变化：{previous_light or '-'} -> {current_light or '-'}"
 
     _update_dca_scan_time(state, portfolio)
-    return False, f"红绿灯变化待二次确认：{state.last_light or '-'} -> {current_light or '-'}"
+    return False, f"红绿灯变化待确认：{state.last_light or '-'} -> {current_light or '-'}，{state.candidate_confirm_count or 0}/{safe_confirm_count}"
 
 
 async def update_user_dca_signals(user_id: int):
     """计算并持久化单个用户的红绿灯状态，只标记待通知事件，不发送通知。"""
     async with async_session_maker() as db:
-        portfolios = await PortfolioService.get_with_market(db, user_id=user_id)
+        portfolios = await PortfolioService.get_with_market(db, user_id=user_id, compute_dca=True)
         if not portfolios:
             return []
 
         ids = [portfolio.id for portfolio in portfolios]
+        config_result = await db.execute(select(DcaSignalConfig).where(DcaSignalConfig.id == 1))
+        config = config_result.scalar_one_or_none()
+        light_confirm_count = config.light_confirm_count if config else 2
         result = await db.execute(select(PortfolioDcaState).where(PortfolioDcaState.portfolio_id.in_(ids)))
         states = {state.portfolio_id: state for state in result.scalars().all()}
         events = []
@@ -295,7 +307,7 @@ async def update_user_dca_signals(user_id: int):
                 states[portfolio.id] = state
                 is_new_state = True
             elif state.last_light != portfolio.dca_light:
-                changed, debounce_reason = _apply_dca_debounce(state, portfolio)
+                changed, debounce_reason = _apply_dca_debounce(state, portfolio, light_confirm_count)
                 if changed:
                     reason = debounce_reason or "红绿灯连续2次确认变化"
                     notify_key = _dca_notify_key(portfolio)
@@ -356,7 +368,41 @@ def _format_dca_state_line(state: PortfolioDcaState, etf_name: str | None) -> st
     price = f"现价 {float(state.last_price):.3f}" if state.last_price is not None else "现价 -"
     trigger = f"触发价 {float(state.last_trigger_price):.3f}" if state.last_trigger_price is not None else "触发价 -"
     reason = state.pending_notify_reason or "定投信号变化"
-    return f"{state.etf_code} {etf_name or ''}: {state.last_label or '-'} | {meta} | {price} | {trigger} | {reason}"
+    display_name = etf_name or "名称未知"
+    return f"{state.etf_code} {display_name}: {state.last_label or '-'} | {meta} | {price} | {trigger} | {reason}"
+
+
+async def _resolve_dca_etf_names(rows) -> dict[str, str]:
+    """为 DCA 通知解析 ETF 名称，优先使用数据库，其次使用行情缓存和实时行情。"""
+    name_by_code: dict[str, str] = {}
+    missing_codes: list[str] = []
+    for state, _, etf_info in rows:
+        code = state.etf_code
+        if code in name_by_code:
+            continue
+        name = etf_info.name if etf_info else None
+        if name:
+            name_by_code[code] = name
+        else:
+            missing_codes.append(code)
+
+    missing_codes = list(dict.fromkeys(missing_codes))
+    if not missing_codes:
+        return name_by_code
+
+    cached_quotes = await MarketService.get_cached_quotes_for_codes(missing_codes)
+    for code, quote in cached_quotes.items():
+        if quote.name and code not in name_by_code:
+            name_by_code[code] = quote.name
+
+    still_missing = [code for code in missing_codes if code not in name_by_code]
+    if still_missing:
+        quotes = await MarketService.get_quotes_for_codes(still_missing)
+        for code, quote in quotes.items():
+            if quote.name and code not in name_by_code:
+                name_by_code[code] = quote.name
+
+    return name_by_code
 
 
 async def notify_user_dca_signals(user_id: int):
@@ -386,6 +432,7 @@ async def notify_user_dca_signals(user_id: int):
         grouped = defaultdict(list)
         for state, portfolio, etf_info in rows:
             grouped[state.last_light or "unknown"].append((state, portfolio, etf_info))
+        name_by_code = await _resolve_dca_etf_names(rows)
 
         group_order = ["deep_green", "green", "yellow", "red", "unknown"]
         group_titles = {
@@ -406,7 +453,7 @@ async def notify_user_dca_signals(user_id: int):
             for state, portfolio, etf_info in items:
                 if shown_count >= max_items:
                     continue
-                lines.append(_format_dca_state_line(state, etf_info.name if etf_info else None))
+                lines.append(_format_dca_state_line(state, name_by_code.get(state.etf_code)))
                 shown_count += 1
             lines.append("")
         if len(rows) > shown_count:
@@ -475,6 +522,7 @@ async def send_user_dca_daily_summary(user_id: int):
         grouped = defaultdict(list)
         for state, portfolio, etf_info in rows:
             grouped[state.last_light or "unknown"].append((state, portfolio, etf_info))
+        name_by_code = await _resolve_dca_etf_names(rows)
 
         group_order = ["deep_green", "green", "yellow", "red", "unknown"]
         group_titles = {
@@ -496,7 +544,7 @@ async def send_user_dca_daily_summary(user_id: int):
             for state, portfolio, etf_info in items:
                 if shown_count >= max_items:
                     continue
-                lines.append(_format_dca_state_line(state, etf_info.name if etf_info else None))
+                lines.append(_format_dca_state_line(state, name_by_code.get(state.etf_code)))
                 shown_count += 1
         if len(rows) > shown_count:
             lines.append("")
@@ -729,6 +777,26 @@ async def refresh_etf_profiles():
     print(f"[Scheduler] ETF资料刷新完成，成功刷新 {success_count}/{len(codes)} 只ETF")
 
 
+async def refresh_macro_data():
+    """定时采集宏观指标并生成自动美林时钟状态。"""
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行宏观数据刷新任务...")
+    async with async_session_maker() as db:
+        try:
+            state, indicators, errors = await MacroDataService.refresh(db)
+            if not indicators:
+                await db.rollback()
+                print(f"[Scheduler] 宏观数据刷新失败: {errors}")
+                return
+            await db.commit()
+            print(
+                f"[Scheduler] 宏观数据刷新完成，指标 {len(indicators)} 个，"
+                f"阶段 {state.cycle_phase if state else '-'}，错误 {len(errors)} 个"
+            )
+        except Exception as e:
+            await db.rollback()
+            print(f"[Scheduler] 宏观数据刷新任务失败: {e}")
+
+
 def setup_scheduler():
     """配置定时任务"""
     # 工作日收盘后 15:05 执行持仓分析
@@ -775,15 +843,14 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    # 工作日 14:40 计算并持久化定投红绿灯状态。
+    # 工作日 10:30 盘中轻量扫描，14:40 尾盘主扫描；均会持久化红绿灯状态与历史快照。
+    dca_signal_update_trigger = OrTrigger([
+        CronTrigger(day_of_week='mon-fri', hour=10, minute=30, timezone='Asia/Shanghai'),
+        CronTrigger(day_of_week='mon-fri', hour=14, minute=40, timezone='Asia/Shanghai'),
+    ])
     scheduler.add_job(
         update_all_dca_signals,
-        trigger=CronTrigger(
-            day_of_week='mon-fri',
-            hour=14,
-            minute=40,
-            timezone='Asia/Shanghai'
-        ),
+        trigger=dca_signal_update_trigger,
         id='dca_signal_update',
         name='定投红绿灯数据更新',
         replace_existing=True
@@ -831,6 +898,21 @@ def setup_scheduler():
         replace_existing=True
     )
 
+
+    # 每周一盘前刷新低频宏观指标和美林时钟状态。
+    scheduler.add_job(
+        refresh_macro_data,
+        trigger=CronTrigger(
+            day_of_week='mon',
+            hour=8,
+            minute=30,
+            timezone='Asia/Shanghai'
+        ),
+        id='macro_data_refresh',
+        name='宏观数据刷新',
+        replace_existing=True
+    )
+
     print("[Scheduler] 定时任务已配置: 工作日 15:05 自动执行收盘持仓分析")
     print("[Scheduler] 定时任务已配置: 每周五 15:10 自动执行本周账户分析并推送")
     print("[Scheduler] 定时任务已配置: A股集合竞价开始后每5分钟自动刷新行情缓存，15:00收盘补刷一次")
@@ -838,6 +920,7 @@ def setup_scheduler():
     print("[Scheduler] 定时任务已配置: 工作日 14:40 自动更新定投红绿灯数据")
     print("[Scheduler] 定时任务已配置: 工作日 14:45 自动推送定投红绿灯变化通知")
     print("[Scheduler] 定时任务已配置: 工作日 14:46 自动推送定投红绿灯日报")
+    print("[Scheduler] 定时任务已配置: 每周一 08:30 自动刷新宏观指标和美林时钟")
 
 
 def start_scheduler():

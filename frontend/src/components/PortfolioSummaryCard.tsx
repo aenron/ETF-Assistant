@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import { type PortfolioSummary, type PortfolioWithMarket } from '@/services/api'
 import { TrendingUp, TrendingDown, Wallet, PieChart } from 'lucide-react'
 import { PieChart as RechartsPie, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
@@ -11,6 +12,7 @@ interface PortfolioSummaryCardProps {
   onAccountBalanceChange?: (balance: number) => void
   showPnlAttribution?: boolean
   showDistribution?: boolean
+  showExposureAnalysis?: boolean
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -37,6 +39,38 @@ const PNL_COLORS = ['#2563eb', '#16a34a', '#ea580c', '#7c3aed', '#0891b2', '#dc2
 
 function formatCurrency(value: number) {
   return `¥${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+
+function rebalanceStatusClass(status: string) {
+  if (status === 'executable') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (status === 'blocked') return 'border-red-200 bg-red-50 text-red-700'
+  if (status === 'reduce') return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (status === 'wait_signal') return 'border-sky-200 bg-sky-50 text-sky-700'
+  return 'border-slate-200 bg-slate-50 text-slate-600'
+}
+
+function ExposureList({ title, items }: { title: string; items: Array<{ name: string; market_value: number; ratio: number }> }) {
+  const visible = items.slice(0, 5)
+  return (
+    <div className="rounded-lg border bg-muted/20 p-4">
+      <div className="text-sm font-semibold">{title}</div>
+      <div className="mt-3 space-y-3">
+        {visible.length ? visible.map((item) => (
+          <div key={`${title}-${item.name}`} className="space-y-1.5">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="font-medium">{item.name}</span>
+              <span className="text-muted-foreground">{item.ratio.toFixed(1)}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, Math.max(0, item.ratio))}%` }} />
+            </div>
+            <div className="text-xs text-muted-foreground">{formatCurrency(item.market_value)}</div>
+          </div>
+        )) : <div className="text-sm text-muted-foreground">暂无数据</div>}
+      </div>
+    </div>
+  )
 }
 
 function buildPnlAttributionData(
@@ -201,6 +235,7 @@ export function PortfolioSummaryCard({
   onAccountBalanceChange,
   showPnlAttribution = false,
   showDistribution = true,
+  showExposureAnalysis = true,
 }: PortfolioSummaryCardProps) {
   if (!summary) {
     return (
@@ -409,6 +444,109 @@ export function PortfolioSummaryCard({
                   })}
                 </div>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {showExposureAnalysis && summary.exposure_analysis && (
+        <Card className="md:col-span-2 lg:col-span-5">
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">持仓暴露分析</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-3">
+              <ExposureList title="资产桶" items={summary.exposure_analysis.asset_bucket} />
+              <ExposureList title="地域" items={summary.exposure_analysis.region} />
+              <ExposureList title="风格" items={summary.exposure_analysis.style} />
+            </div>
+            {summary.exposure_analysis.risk_tags.length > 0 && (
+              <div className="rounded-lg border bg-muted/20 p-4">
+                <div className="text-sm font-semibold">风险标签</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {summary.exposure_analysis.risk_tags.map((item) => (
+                    <span key={item.name} className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground">
+                      {item.name} {item.ratio.toFixed(1)}%
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="space-y-2">
+              {summary.exposure_analysis.alerts.map((alert) => (
+                <div key={alert.message} className={`rounded-lg border px-3 py-2 text-sm ${alert.level === 'high' ? 'border-red-200 bg-red-50 text-red-700' : alert.level === 'medium' ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+                  {alert.message}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+
+      {showExposureAnalysis && summary.rebalance_plan && (
+        <Card className="md:col-span-2 lg:col-span-5">
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">再平衡建议</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-lg border bg-muted/20 p-4">
+                <div className="text-xs text-muted-foreground">总资产口径</div>
+                <div className="mt-1 text-lg font-semibold">{formatCurrency(summary.rebalance_plan.total_assets)}</div>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-4">
+                <div className="text-xs text-muted-foreground">单项调仓上限</div>
+                <div className="mt-1 text-lg font-semibold">{formatCurrency(summary.rebalance_plan.single_adjustment_limit)}</div>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-4 sm:col-span-2">
+                <div className="text-xs text-muted-foreground">执行原则</div>
+                <div className="mt-1 text-sm text-muted-foreground">目标仓位会随宏观时钟动态调整，执行状态同时考虑红绿灯、跨境风控和四因子。</div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="border-b text-left text-muted-foreground">
+                  <tr>
+                    <th className="py-2 pl-4 pr-3">资产桶</th>
+                    <th className="py-2 pr-3">当前</th>
+                    <th className="py-2 pr-3">目标</th>
+                    <th className="py-2 pr-3">偏离</th>
+                    <th className="py-2 pr-3">建议金额</th>
+                    <th className="py-2 pr-4">执行状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.rebalance_plan.items.map((item) => (
+                    <tr key={item.name} className="border-b last:border-0">
+                      <td className="py-3 pl-4 pr-3 font-medium">{item.name}</td>
+                      <td className="py-3 pr-3">
+                        <div className="font-mono">{item.current_ratio.toFixed(1)}%</div>
+                        <div className="text-xs text-muted-foreground">{formatCurrency(item.current_value)}</div>
+                      </td>
+                      <td className="py-3 pr-3 font-mono">{item.target_ratio.toFixed(1)}%</td>
+                      <td className={`py-3 pr-3 font-mono ${item.deviation_ratio > 0 ? 'text-amber-700' : item.deviation_ratio < 0 ? 'text-blue-700' : ''}`}>
+                        {item.deviation_ratio > 0 ? '+' : ''}{item.deviation_ratio.toFixed(1)}%
+                      </td>
+                      <td className={`py-3 pr-3 font-mono ${item.suggested_amount > 0 ? 'text-red-600' : item.suggested_amount < 0 ? 'text-green-600' : 'text-muted-foreground'}`}>
+                        {item.suggested_amount > 0 ? '+' : ''}{formatCurrency(item.suggested_amount)}
+                      </td>
+                      <td className="py-3 pr-4">
+                        <Badge variant="outline" className={rebalanceStatusClass(item.execution_status)}>{item.execution_label}</Badge>
+                        <div className="mt-2 text-xs text-muted-foreground">{item.action}</div>
+                        <div className="mt-1 max-w-[360px] text-xs leading-5 text-muted-foreground">{item.reason}</div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="space-y-2">
+              {summary.rebalance_plan.notes.map((note) => (
+                <div key={note} className="rounded-lg border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">{note}</div>
+              ))}
             </div>
           </CardContent>
         </Card>

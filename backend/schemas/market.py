@@ -121,3 +121,16 @@ class EtfSearchResult(ShanghaiBaseModel):
     name: str
     category: Optional[str] = None
     exchange: Optional[str] = None
+
+
+class EtfClassificationResponse(ShanghaiBaseModel):
+    """ETF 标签分类结果"""
+    code: str
+    name: str
+    asset_bucket: str
+    region: str
+    style: str
+    risk_tags: list[str]
+    macro_weights: dict[str, float]
+    max_position_hint: float
+    reason: str

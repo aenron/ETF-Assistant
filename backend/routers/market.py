@@ -1,11 +1,14 @@
+import asyncio
 from fastapi import APIRouter, Query, Depends
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_session
-from schemas.market import MarketQuote, MarketDailyResponse, KLineItem, EtfSearchResult
+from schemas.market import MarketQuote, MarketDailyResponse, KLineItem, EtfSearchResult, EtfClassificationResponse
 from services.market_service import MarketService
+from services.etf_classification_service import EtfClassificationService
 from services.portfolio_service import PortfolioService
+from services.scheduler import update_user_dca_signals
 from routers.auth import get_current_user
 from models.user import User
 
@@ -18,20 +21,26 @@ router = APIRouter(
 
 @router.get("/quote/{code}", response_model=MarketQuote)
 async def get_quote(code: str):
-    """获取单个证券/基金实时行情"""
-    quotes = await MarketService.get_quotes_for_codes([code])
-    if code not in quotes:
-        return {"error": "未找到该品种"}
-    return MarketQuote.model_validate(quotes[code])
+    """获取单个证券/基金行情。默认只读缓存，避免普通页面查询阻塞。"""
+    quote = await MarketService.get_quote_from_cache(code)
+    if quote:
+        return MarketQuote.model_validate(quote)
+
+    asyncio.create_task(MarketService.refresh_quote(code))
+    return MarketQuote(code=code, name="", price=0, change_pct=0)
 
 
 @router.post("/refresh/{code}")
-async def refresh_quote(code: str):
-    """强制刷新单个证券/基金行情"""
+async def refresh_quote(
+    code: str,
+    current_user: User = Depends(get_current_user),
+):
+    """强制刷新单个证券/基金行情，并更新当前用户红绿灯信号。"""
     quote = await MarketService.refresh_quote(code)
     if quote:
         clean_quote = MarketQuote.model_validate(quote).model_dump(mode="json")
-        return {"success": True, "quote": clean_quote}
+        dca_events = await update_user_dca_signals(current_user.id)
+        return {"success": True, "quote": clean_quote, "dca_events": len(dca_events)}
     return {"success": False, "message": f"刷新 {code} 行情失败"}
 
 
@@ -49,10 +58,12 @@ async def refresh_all_quotes(
         return {"success": True, "message": "无持仓数据", "refreshed": 0}
     
     quotes = await MarketService.refresh_quotes(codes)
+    dca_events = await update_user_dca_signals(current_user.id)
     return {
         "success": True,
-        "message": f"已刷新 {len(quotes)} 个品种行情",
+        "message": f"已刷新 {len(quotes)} 个品种行情，并更新红绿灯信号",
         "refreshed": len(quotes),
+        "dca_events": len(dca_events),
         "codes": codes,
     }
 
@@ -62,11 +73,15 @@ async def get_history(
     code: str, 
     days: int = Query(default=60, ge=1, le=365)
 ):
-    """获取历史K线和技术指标"""
+    """获取历史K线和技术指标。
+
+    详情页首次打开需要直接拿到图表数据；这里使用 get_history_kline 的缓存/数据库/外部源
+    降级链路，而不是只读 Redis 后异步预热。
+    """
     kline_data = await MarketService.get_history_kline(code, days=days)
-    quotes = await MarketService.get_quotes_for_codes([code])
-    quote = quotes.get(code)
-    
+
+    quote = await MarketService.get_quote_from_cache(code)
+
     # 计算技术指标
     indicators = MarketService.calculate_technical_indicators(kline_data)
     
@@ -82,6 +97,19 @@ async def get_history(
 async def search_etf(q: str = Query(default="", min_length=1)):
     """搜索ETF"""
     return await MarketService.search_etf(q)
+
+
+@router.get("/etf/{code}/classification", response_model=EtfClassificationResponse)
+async def get_etf_classification(
+    code: str,
+    name: str | None = Query(default=None),
+):
+    """获取 ETF 资产桶、地域、风格、风险标签和宏观权重。"""
+    display_name = name
+    if not display_name:
+        quote = await MarketService.get_quote_from_cache(code)
+        display_name = quote.name if quote and quote.name else ""
+    return EtfClassificationService.classify(code, display_name)
 
 
 @router.get("/etf/{code}/profile")

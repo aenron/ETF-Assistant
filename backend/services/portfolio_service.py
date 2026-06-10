@@ -7,11 +7,12 @@ from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Portfolio, EtfInfo, IndexValuation, PortfolioDcaSignalHistory, PortfolioDcaState
+from models import Portfolio, EtfInfo, IndexValuation, PortfolioDcaSignalHistory, PortfolioDcaState, DcaIndexMapping, DcaSignalConfig, MacroCycleState
 from schemas.portfolio import (
     PortfolioCreate, PortfolioUpdate, PortfolioResponse,
     PortfolioDcaSignalHistoryResponse, PortfolioWithMarket, PortfolioSummary
 )
+from services.etf_classification_service import EtfClassificationService
 from services.market_service import MarketService
 from services.redis_service import RedisService
 from config import settings
@@ -24,6 +25,54 @@ class PortfolioService:
     SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
     DCA_VALUATION_CACHE_PREFIX = "dca:valuation:"
     DCA_VALUATION_CACHE_EXPIRE_SECONDS = 86400
+
+
+    REBALANCE_TARGET_RATIOS = {
+        "A股宽基": 30.0,
+        "A股成长": 15.0,
+        "港股中概": 10.0,
+        "美股成长": 12.0,
+        "黄金商品": 12.0,
+        "债券现金": 18.0,
+        "其他": 3.0,
+    }
+    REBALANCE_IGNORE_DEVIATION_PCT = 3.0
+    REBALANCE_SINGLE_ADJUSTMENT_LIMIT_PCT = 10.0
+
+    DEFAULT_DCA_CONFIG = {
+        "valuation_deep_green_percentile": 15.0,
+        "valuation_green_percentile": 30.0,
+        "valuation_red_percentile": 80.0,
+        "valuation_min_sample_size": 250,
+        "trend_short_ma_days": 20,
+        "trend_medium_ma_days": 60,
+        "trend_long_ma_days": 120,
+        "trend_history_days": 140,
+        "trend_slope_shift_days": 5,
+        "trend_volume_ma_days": 20,
+        "trend_volume_confirm_ratio": 0.8,
+        "trend_volume_expand_ratio": 1.2,
+        "trend_atr_days": 14,
+        "trend_atr_base_multiplier": 1.5,
+        "trend_atr_mid_multiplier": 1.8,
+        "trend_atr_high_multiplier": 2.0,
+        "trend_atr_mid_volatility_pct": 2.5,
+        "trend_atr_high_volatility_pct": 4.0,
+        "light_confirm_count": 2,
+    }
+
+    @classmethod
+    async def _get_dca_config(cls, session: AsyncSession) -> dict[str, Any]:
+        result = await session.execute(select(DcaSignalConfig).where(DcaSignalConfig.id == 1))
+        config = result.scalar_one_or_none()
+        if not config:
+            return dict(cls.DEFAULT_DCA_CONFIG)
+        data = dict(cls.DEFAULT_DCA_CONFIG)
+        for key in data:
+            value = getattr(config, key, None)
+            if value is not None:
+                data[key] = float(value) if key not in {"valuation_min_sample_size", "trend_short_ma_days", "trend_medium_ma_days", "trend_long_ma_days", "trend_history_days", "trend_slope_shift_days", "trend_volume_ma_days", "trend_atr_days", "light_confirm_count"} else int(value)
+        return data
 
     @classmethod
     def _shanghai_now(cls) -> datetime:
@@ -68,7 +117,226 @@ class PortfolioService:
         return parsed
 
     @staticmethod
-    def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket], available_cash: float = 0.0) -> PortfolioSummary:
+    def _exposure_items(values: dict[str, float], total_value: float) -> list[dict[str, float | str]]:
+        return [
+            {
+                "name": name,
+                "market_value": PortfolioService._finite_float(value),
+                "ratio": PortfolioService._finite_float(value / total_value * 100 if total_value > 0 else 0),
+            }
+            for name, value in sorted(values.items(), key=lambda item: item[1], reverse=True)
+            if value > 0
+        ]
+
+    @staticmethod
+    def _build_exposure_alerts(asset_bucket: dict[str, float], region: dict[str, float], style: dict[str, float], risk_tags: dict[str, float], total_value: float) -> list[dict[str, str]]:
+        alerts: list[dict[str, str]] = []
+        if total_value <= 0:
+            return alerts
+
+        def ratio(value: float) -> float:
+            return value / total_value * 100
+
+        for name, value in sorted(asset_bucket.items(), key=lambda item: item[1], reverse=True)[:1]:
+            pct = ratio(value)
+            if pct >= 70:
+                alerts.append({"level": "high", "message": f"{name} 占比 {pct:.1f}%，资产桶集中度偏高。"})
+            elif pct >= 50:
+                alerts.append({"level": "medium", "message": f"{name} 占比 {pct:.1f}%，建议关注单一资产桶波动。"})
+
+        for name, value in sorted(region.items(), key=lambda item: item[1], reverse=True)[:1]:
+            pct = ratio(value)
+            if pct >= 75:
+                alerts.append({"level": "high", "message": f"{name} 地域暴露 {pct:.1f}%，国别/区域集中度较高。"})
+            elif pct >= 60:
+                alerts.append({"level": "medium", "message": f"{name} 地域暴露 {pct:.1f}%，区域分散度仍可优化。"})
+
+        growth_value = style.get("成长", 0.0)
+        if ratio(growth_value) >= 45:
+            alerts.append({"level": "medium", "message": f"成长风格占比 {ratio(growth_value):.1f}%，对利率和风险偏好较敏感。"})
+
+        cross_border = risk_tags.get("跨境", 0.0)
+        if ratio(cross_border) >= 35:
+            alerts.append({"level": "medium", "message": f"跨境 ETF 占比 {ratio(cross_border):.1f}%，需关注汇率、溢价和时差风险。"})
+
+        high_vol = risk_tags.get("高波动", 0.0)
+        if ratio(high_vol) >= 35:
+            alerts.append({"level": "medium", "message": f"高波动 ETF 占比 {ratio(high_vol):.1f}%，建议控制单次调仓幅度。"})
+
+        if not alerts:
+            alerts.append({"level": "low", "message": "当前持仓暴露未发现明显集中风险。"})
+        return alerts
+
+    @staticmethod
+    def _normalize_target_ratios(targets: dict[str, float]) -> dict[str, float]:
+        total = sum(max(0.0, value) for value in targets.values())
+        if total <= 0:
+            return dict(PortfolioService.REBALANCE_TARGET_RATIOS)
+        return {name: value / total * 100 for name, value in targets.items()}
+
+    @staticmethod
+    def _macro_adjusted_rebalance_targets(macro_states: dict[str, str] | None = None) -> tuple[dict[str, float], list[str]]:
+        targets = dict(PortfolioService.REBALANCE_TARGET_RATIOS)
+        notes: list[str] = []
+        states = macro_states or {}
+        cn = states.get("cn")
+        us = states.get("us")
+        global_phase = states.get("global")
+        if cn == "recovery":
+            targets["A股宽基"] += 4
+            targets["A股成长"] += 3
+            targets["债券现金"] -= 4
+            notes.append("中国复苏：A股宽基和A股成长目标仓位上调。")
+        elif cn == "overheating":
+            targets["A股成长"] -= 3
+            targets["黄金商品"] += 3
+            targets["债券现金"] += 2
+            notes.append("中国过热：成长目标下调，商品和现金缓冲上调。")
+        elif cn == "stagflation":
+            targets["A股成长"] -= 5
+            targets["A股宽基"] -= 3
+            targets["黄金商品"] += 4
+            targets["债券现金"] += 4
+            notes.append("中国滞涨：权益目标下调，黄金和现金缓冲上调。")
+        elif cn == "recession":
+            targets["A股宽基"] -= 4
+            targets["A股成长"] -= 5
+            targets["债券现金"] += 7
+            notes.append("中国衰退：权益目标下调，债券现金目标上调。")
+
+        if us == "recovery":
+            targets["美股成长"] += 3
+            notes.append("美国复苏：美股成长目标小幅上调。")
+        elif us in {"overheating", "stagflation"}:
+            targets["美股成长"] -= 4
+            targets["黄金商品"] += 2
+            targets["债券现金"] += 2
+            notes.append("美国过热/滞涨：美股成长目标下调，防御资产上调。")
+        elif us == "recession":
+            targets["美股成长"] -= 3
+            targets["债券现金"] += 3
+            notes.append("美国衰退：跨境权益目标下调。")
+
+        if global_phase == "recovery":
+            targets["港股中概"] += 2
+            targets["美股成长"] += 1
+            notes.append("全球风险偏好修复：跨境权益目标小幅上调。")
+        elif global_phase in {"stagflation", "recession"}:
+            targets["港股中概"] -= 3
+            targets["美股成长"] -= 2
+            targets["黄金商品"] += 4
+            targets["债券现金"] += 2
+            notes.append("全球滞涨/衰退：跨境权益目标下调，黄金和现金缓冲上调。")
+        return PortfolioService._normalize_target_ratios(targets), notes
+
+    @staticmethod
+    def _bucket_execution_context(portfolios: List[PortfolioWithMarket]) -> dict[str, dict[str, Any]]:
+        context: dict[str, dict[str, Any]] = {}
+        for p in portfolios:
+            bucket = EtfClassificationService.classify(p.etf_code, p.etf_name).asset_bucket
+            item = context.setdefault(bucket, {"red": 0, "green": 0, "yellow": 0, "cross_stop": 0, "factor_scores": []})
+            light = p.dca_light or p.dca_candidate_light
+            if light == "red":
+                item["red"] += 1
+            elif light in {"green", "deep_green"}:
+                item["green"] += 1
+            elif light == "yellow":
+                item["yellow"] += 1
+            risk = getattr(p, "cross_border_risk", None)
+            if risk and getattr(risk, "action", None) == "不新增":
+                item["cross_stop"] += 1
+            factor = getattr(p, "factor_score", None)
+            if factor and getattr(factor, "enabled", False):
+                score = PortfolioService._optional_finite_float(getattr(factor, "total_score", None))
+                if score is not None:
+                    item["factor_scores"].append(score)
+        return context
+
+    @staticmethod
+    def _build_rebalance_plan(asset_bucket: dict[str, float], available_cash: float, total_assets: float, portfolios: List[PortfolioWithMarket] | None = None, macro_states: dict[str, str] | None = None) -> dict:
+        targets, macro_notes = PortfolioService._macro_adjusted_rebalance_targets(macro_states)
+        execution_context = PortfolioService._bucket_execution_context(portfolios or [])
+        current_values = {name: PortfolioService._finite_float(value) for name, value in asset_bucket.items()}
+        if available_cash > 0:
+            current_values["债券现金"] = current_values.get("债券现金", 0.0) + PortfolioService._finite_float(available_cash)
+        for name in targets:
+            current_values.setdefault(name, 0.0)
+
+        single_limit = total_assets * PortfolioService.REBALANCE_SINGLE_ADJUSTMENT_LIMIT_PCT / 100 if total_assets > 0 else 0.0
+        items = []
+        for name, target_ratio in targets.items():
+            current_value = current_values.get(name, 0.0)
+            current_ratio = current_value / total_assets * 100 if total_assets > 0 else 0.0
+            deviation = current_ratio - target_ratio
+            raw_amount = (target_ratio - current_ratio) / 100 * total_assets if total_assets > 0 else 0.0
+            suggested_amount = max(-single_limit, min(single_limit, raw_amount)) if single_limit > 0 else 0.0
+            ctx = execution_context.get(name, {})
+            avg_factor = sum(ctx.get("factor_scores", [])) / len(ctx.get("factor_scores", [])) if ctx.get("factor_scores") else None
+            execution_status = "hold"
+            execution_label = "保持观察"
+            if abs(deviation) < PortfolioService.REBALANCE_IGNORE_DEVIATION_PCT:
+                action = "保持"
+                suggested_amount = 0.0
+                reason = f"当前 {current_ratio:.1f}%，接近动态目标 {target_ratio:.1f}%。"
+            elif deviation < 0:
+                action = "增配"
+                if ctx.get("cross_stop", 0) > 0:
+                    execution_status = "blocked"
+                    execution_label = "禁止新增"
+                    suggested_amount = 0.0
+                    reason = f"当前低于动态目标 {abs(deviation):.1f} 个百分点，但该资产桶存在跨境风控禁止新增，先不执行。"
+                elif ctx.get("red", 0) > 0 and ctx.get("green", 0) == 0:
+                    execution_status = "wait_signal"
+                    execution_label = "等待买点"
+                    suggested_amount = 0.0
+                    reason = f"当前低于动态目标 {abs(deviation):.1f} 个百分点，但持仓红灯占优，等待红绿灯修复。"
+                elif avg_factor is not None and avg_factor < 45:
+                    execution_status = "wait_signal"
+                    execution_label = "等待四因子修复"
+                    suggested_amount = 0.0
+                    reason = f"当前低于动态目标 {abs(deviation):.1f} 个百分点，但行业四因子均分 {avg_factor:.1f} 偏弱。"
+                elif ctx.get("green", 0) > 0:
+                    execution_status = "executable"
+                    execution_label = "可立即执行"
+                    reason = f"当前低于动态目标 {abs(deviation):.1f} 个百分点，且资产桶内存在绿灯标的，可用新增资金分批补足。"
+                else:
+                    execution_status = "wait_signal"
+                    execution_label = "等待买点"
+                    reason = f"当前低于动态目标 {abs(deviation):.1f} 个百分点，方向可增配，但需等待红绿灯确认。"
+            else:
+                action = "减配"
+                execution_status = "reduce"
+                execution_label = "建议减配"
+                reason = f"当前高于动态目标 {deviation:.1f} 个百分点，后续新增资金优先避开该资产桶。"
+            items.append({
+                "name": name,
+                "current_value": PortfolioService._finite_float(current_value),
+                "current_ratio": PortfolioService._finite_float(current_ratio),
+                "target_ratio": PortfolioService._finite_float(target_ratio),
+                "deviation_ratio": PortfolioService._finite_float(deviation),
+                "suggested_amount": PortfolioService._finite_float(suggested_amount),
+                "action": action,
+                "execution_status": execution_status,
+                "execution_label": execution_label,
+                "reason": reason,
+            })
+
+        items.sort(key=lambda item: (item["execution_status"] == "hold", -abs(item["deviation_ratio"])))
+        notes = [
+            "目标仓位已根据宏观时钟动态调整。",
+            *macro_notes,
+            f"单项建议调仓金额已限制在总资产 {PortfolioService.REBALANCE_SINGLE_ADJUSTMENT_LIMIT_PCT:.0f}% 以内。",
+            "可执行状态同时考虑红绿灯、跨境风控和行业四因子评分。",
+        ]
+        return {
+            "total_assets": PortfolioService._finite_float(total_assets),
+            "single_adjustment_limit": PortfolioService._finite_float(single_limit),
+            "items": items,
+            "notes": notes,
+        }
+
+    @staticmethod
+    def build_summary_from_portfolios(portfolios: List[PortfolioWithMarket], available_cash: float = 0.0, macro_states: dict[str, str] | None = None) -> PortfolioSummary:
         """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
         total_market_value = 0.0
         total_cost = 0.0
@@ -76,6 +344,10 @@ class PortfolioService:
         today_previous_value = 0.0
         has_today_pnl = False
         category_distribution = {}
+        asset_bucket_exposure: dict[str, float] = {}
+        region_exposure: dict[str, float] = {}
+        style_exposure: dict[str, float] = {}
+        risk_tag_exposure: dict[str, float] = {}
 
         for p in portfolios:
             market_value = PortfolioService._optional_finite_float(p.market_value)
@@ -95,11 +367,26 @@ class PortfolioService:
                     category_distribution[category] = 0.0
                 category_distribution[category] += market_value
 
+                classification = EtfClassificationService.classify(p.etf_code, p.etf_name)
+                asset_bucket_exposure[classification.asset_bucket] = asset_bucket_exposure.get(classification.asset_bucket, 0.0) + market_value
+                region_exposure[classification.region] = region_exposure.get(classification.region, 0.0) + market_value
+                style_exposure[classification.style] = style_exposure.get(classification.style, 0.0) + market_value
+                for tag in classification.risk_tags:
+                    risk_tag_exposure[tag] = risk_tag_exposure.get(tag, 0.0) + market_value
+
         total_pnl = total_market_value - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         today_pnl_value = today_pnl if has_today_pnl else None
         today_pnl_pct = (today_pnl / today_previous_value * 100) if has_today_pnl and today_previous_value > 0 else None
         total_assets = total_market_value + PortfolioService._finite_float(available_cash)
+        exposure_analysis = {
+            "asset_bucket": PortfolioService._exposure_items(asset_bucket_exposure, total_market_value),
+            "region": PortfolioService._exposure_items(region_exposure, total_market_value),
+            "style": PortfolioService._exposure_items(style_exposure, total_market_value),
+            "risk_tags": PortfolioService._exposure_items(risk_tag_exposure, total_market_value),
+            "alerts": PortfolioService._build_exposure_alerts(asset_bucket_exposure, region_exposure, style_exposure, risk_tag_exposure, total_market_value),
+        }
+        rebalance_plan = PortfolioService._build_rebalance_plan(asset_bucket_exposure, PortfolioService._finite_float(available_cash), total_assets, portfolios, macro_states)
 
         return PortfolioSummary(
             total_market_value=PortfolioService._finite_float(total_market_value),
@@ -113,6 +400,8 @@ class PortfolioService:
                 for category, value in category_distribution.items()
             },
             total_assets=PortfolioService._finite_float(total_assets),
+            exposure_analysis=exposure_analysis,
+            rebalance_plan=rebalance_plan,
         )
     
     @staticmethod
@@ -218,7 +507,7 @@ class PortfolioService:
 
 
     @staticmethod
-    def _broad_index_symbol(name: str) -> str | None:
+    def _fallback_broad_index_symbol(name: str) -> str | None:
         candidates = [
             ("中证A500", "000510"),
             ("A500", "000510"),
@@ -235,6 +524,34 @@ class PortfolioService:
         return None
 
     @classmethod
+    async def _resolve_broad_index_symbol(cls, session: AsyncSession, code: str, name: str) -> tuple[str | None, str]:
+        normalized_code = (code or "").strip()
+        if normalized_code:
+            result = await session.execute(
+                select(DcaIndexMapping)
+                .where(DcaIndexMapping.enabled == True, DcaIndexMapping.etf_code == normalized_code)
+                .order_by(DcaIndexMapping.id.asc())
+                .limit(1)
+            )
+            mapping = result.scalar_one_or_none()
+            if mapping:
+                return mapping.index_symbol, f"配置映射：{normalized_code}->{mapping.index_symbol}"
+
+        result = await session.execute(
+            select(DcaIndexMapping)
+            .where(DcaIndexMapping.enabled == True, DcaIndexMapping.keyword.is_not(None))
+            .order_by(DcaIndexMapping.id.asc())
+        )
+        for mapping in result.scalars().all():
+            if mapping.keyword and mapping.keyword in name:
+                return mapping.index_symbol, f"关键词映射：{mapping.keyword}->{mapping.index_symbol}"
+
+        fallback = cls._fallback_broad_index_symbol(name)
+        if fallback:
+            return fallback, f"内置映射：{fallback}"
+        return None, "未配置宽基估值指数映射"
+
+    @classmethod
     async def _cache_valuation_result(cls, index_symbol: str, valuation: dict[str, Any]) -> None:
         if not settings.redis_enabled:
             return
@@ -245,7 +562,7 @@ class PortfolioService:
         )
 
     @classmethod
-    async def _valuation_from_db(cls, session: AsyncSession, index_symbol: str) -> dict[str, Any] | None:
+    async def _valuation_from_db(cls, session: AsyncSession, index_symbol: str, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
         result = await session.execute(
             select(IndexValuation)
             .where(IndexValuation.index_symbol == index_symbol)
@@ -264,6 +581,9 @@ class PortfolioService:
         ]
         if not rows or not pe_values:
             return None
+        config = config or PortfolioService.DEFAULT_DCA_CONFIG
+        green_percentile = float(config.get("valuation_green_percentile", 30.0)) / 100
+        deep_green_percentile = float(config.get("valuation_deep_green_percentile", 15.0)) / 100
 
         latest = rows[0]
         current_pe = float(latest.pe) if latest.pe is not None else pe_values[0]
@@ -275,10 +595,10 @@ class PortfolioService:
         percentile = pe_percentile * 0.6 + pb_percentile * 0.4 if pb_percentile is not None else pe_percentile
         sorted_pe = sorted(pe_values)
         sorted_pb = sorted(pb_values)
-        pe_green = sorted_pe[max(0, min(len(sorted_pe) - 1, int(len(sorted_pe) * 0.30) - 1))] if sorted_pe else None
-        pe_deep_green = sorted_pe[max(0, min(len(sorted_pe) - 1, int(len(sorted_pe) * 0.15) - 1))] if sorted_pe else None
-        pb_green = sorted_pb[max(0, min(len(sorted_pb) - 1, int(len(sorted_pb) * 0.30) - 1))] if sorted_pb else None
-        pb_deep_green = sorted_pb[max(0, min(len(sorted_pb) - 1, int(len(sorted_pb) * 0.15) - 1))] if sorted_pb else None
+        pe_green = sorted_pe[max(0, min(len(sorted_pe) - 1, int(len(sorted_pe) * green_percentile) - 1))] if sorted_pe else None
+        pe_deep_green = sorted_pe[max(0, min(len(sorted_pe) - 1, int(len(sorted_pe) * deep_green_percentile) - 1))] if sorted_pe else None
+        pb_green = sorted_pb[max(0, min(len(sorted_pb) - 1, int(len(sorted_pb) * green_percentile) - 1))] if sorted_pb else None
+        pb_deep_green = sorted_pb[max(0, min(len(sorted_pb) - 1, int(len(sorted_pb) * deep_green_percentile) - 1))] if sorted_pb else None
         return {
             "pe": round(current_pe, 2),
             "pb": round(current_pb, 2) if current_pb is not None else None,
@@ -297,7 +617,7 @@ class PortfolioService:
         }
 
     @classmethod
-    async def _sync_broad_valuation_from_akshare(cls, session: AsyncSession, index_symbol: str) -> dict[str, Any] | None:
+    async def _sync_broad_valuation_from_akshare(cls, session: AsyncSession, index_symbol: str, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
         try:
             import akshare as ak
 
@@ -373,7 +693,7 @@ class PortfolioService:
             )
             await session.execute(stmt)
             await session.flush()
-            valuation = await cls._valuation_from_db(session, index_symbol)
+            valuation = await cls._valuation_from_db(session, index_symbol, config)
             if valuation:
                 valuation["source"] = source
             return valuation
@@ -382,19 +702,19 @@ class PortfolioService:
             return None
 
     @classmethod
-    async def _fetch_broad_valuation(cls, session: AsyncSession, index_symbol: str) -> dict[str, Any] | None:
+    async def _fetch_broad_valuation(cls, session: AsyncSession, index_symbol: str, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
         cache_key = f"{cls.DCA_VALUATION_CACHE_PREFIX}{index_symbol}"
         if settings.redis_enabled:
             cached = await RedisService.get(cache_key)
             if cached and isinstance(cached.get("data"), dict):
                 return cached["data"]
 
-        valuation = await cls._valuation_from_db(session, index_symbol)
+        valuation = await cls._valuation_from_db(session, index_symbol, config)
         if valuation:
             await cls._cache_valuation_result(index_symbol, valuation)
             return valuation
 
-        valuation = await cls._sync_broad_valuation_from_akshare(session, index_symbol)
+        valuation = await cls._sync_broad_valuation_from_akshare(session, index_symbol, config)
         if valuation:
             await cls._cache_valuation_result(index_symbol, valuation)
         return valuation
@@ -406,12 +726,15 @@ class PortfolioService:
         return round(current_price * target_value / current_value, 3)
 
     @staticmethod
-    def _dca_quality_score(signal: dict) -> float:
+    def _dca_quality_score(signal: dict, config: dict[str, Any] | None = None) -> float:
+        config = config or PortfolioService.DEFAULT_DCA_CONFIG
+        min_sample_size = int(config.get("valuation_min_sample_size", 250))
+        red_threshold = float(config.get("valuation_red_percentile", 80.0))
         score = 50.0
         percentile = PortfolioService._optional_finite_float(signal.get("dca_valuation_percentile"))
         if percentile is not None:
             score += max(0.0, 50.0 - percentile) * 0.7
-            if percentile > 80:
+            if percentile > red_threshold:
                 score -= 25
         distance_pct = PortfolioService._optional_finite_float(signal.get("dca_trend_distance_pct"))
         slope_pct = PortfolioService._optional_finite_float(signal.get("dca_trend_ma20_slope_pct"))
@@ -422,7 +745,7 @@ class PortfolioService:
             score += 10 if abs(distance_pct) <= atr_band_pct else -10
         sample_size = signal.get("dca_valuation_sample_size")
         if isinstance(sample_size, int):
-            if sample_size < 250:
+            if sample_size < min_sample_size:
                 score -= 20
             elif sample_size >= 750:
                 score += 5
@@ -433,7 +756,12 @@ class PortfolioService:
         return round(max(0.0, min(100.0, score)), 1)
 
     @staticmethod
-    def _valuation_dca_signal(valuation: dict[str, Any] | None) -> dict:
+    def _valuation_dca_signal(valuation: dict[str, Any] | None, config: dict[str, Any] | None = None) -> dict:
+        config = config or PortfolioService.DEFAULT_DCA_CONFIG
+        min_sample_size = int(config.get("valuation_min_sample_size", 250))
+        deep_green_threshold = float(config.get("valuation_deep_green_percentile", 15.0))
+        green_threshold = float(config.get("valuation_green_percentile", 30.0))
+        red_threshold = float(config.get("valuation_red_percentile", 80.0))
         if not valuation:
             return {
                 "dca_track": "valuation",
@@ -487,7 +815,7 @@ class PortfolioService:
             "dca_budget_multiplier": 1.0,
             "dca_budget_label": "基础定投 1x",
         }
-        if sample_size < 250:
+        if sample_size < min_sample_size:
             return {
                 **base,
                 "dca_light": "yellow",
@@ -496,7 +824,7 @@ class PortfolioService:
                 "dca_decision_steps": [*base["dca_decision_steps"], "样本检查：历史样本不足", "最终动作：基础定投 1x"],
                 "dca_reason": f"当前{metric_text}，接口仅返回{sample_size}条近期估值，不能作为长期历史百分位判断，{sample_text}",
             }
-        if percentile < 15:
+        if percentile < deep_green_threshold:
             return {
                 **base,
                 "dca_light": "deep_green",
@@ -507,7 +835,7 @@ class PortfolioService:
                 "dca_decision_steps": [*base["dca_decision_steps"], "估值区间：深绿，极度低估", "最终动作：增强定投 3x"],
                 "dca_reason": f"当前{metric_text}，{percentile_text}，{sample_text}",
             }
-        if percentile < 30:
+        if percentile < green_threshold:
             return {
                 **base,
                 "dca_light": "green",
@@ -518,7 +846,7 @@ class PortfolioService:
                 "dca_decision_steps": [*base["dca_decision_steps"], "估值区间：浅绿，合理低估", "最终动作：增强定投 1.5x"],
                 "dca_reason": f"当前{metric_text}，{percentile_text}，{sample_text}",
             }
-        if percentile > 80:
+        if percentile > red_threshold:
             return {
                 **base,
                 "dca_light": "red",
@@ -540,12 +868,17 @@ class PortfolioService:
 
 
     @classmethod
-    async def _apply_broad_trend_confirmation(cls, code: str, current_price: float, signal: dict) -> dict:
+    async def _apply_broad_trend_confirmation(cls, code: str, current_price: float, signal: dict, config: dict[str, Any] | None = None) -> dict:
         if signal.get("dca_track") != "valuation" or signal.get("dca_light") not in {"deep_green", "green"}:
             return signal
+        config = config or cls.DEFAULT_DCA_CONFIG
+        short_ma_days = int(config["trend_short_ma_days"])
+        slope_shift_days = int(config["trend_slope_shift_days"])
+        history_days = int(config["trend_history_days"])
+        min_kline_days = short_ma_days + slope_shift_days + 3
 
-        klines = await MarketService.get_history_kline(code, days=60)
-        if len(klines) < 23:
+        klines = await MarketService.get_history_kline(code, days=history_days)
+        if len(klines) < min_kline_days:
             return {
                 **signal,
                 "dca_light": "yellow",
@@ -558,8 +891,8 @@ class PortfolioService:
             }
 
         closes = [float(item.close_price) for item in klines]
-        ma20 = sum(closes[-20:]) / 20
-        prev_ma20 = sum(closes[-23:-3]) / 20
+        ma20 = sum(closes[-short_ma_days:]) / short_ma_days
+        prev_ma20 = sum(closes[-(short_ma_days + slope_shift_days + 3):-(slope_shift_days + 3)]) / short_ma_days
         ma20_slope_pct = (ma20 - prev_ma20) / prev_ma20 * 100 if prev_ma20 > 0 else 0.0
         distance_pct = (current_price - ma20) / ma20 * 100 if ma20 > 0 else 0.0
         next_trigger = round(ma20, 3) if ma20 > 0 else signal.get("dca_next_trigger_price")
@@ -591,7 +924,7 @@ class PortfolioService:
         }
 
     @classmethod
-    def _finalize_dca_signal(cls, signal: dict, current_price: float | None = None, valuation: dict[str, Any] | None = None) -> dict:
+    def _finalize_dca_signal(cls, signal: dict, current_price: float | None = None, valuation: dict[str, Any] | None = None, config: dict[str, Any] | None = None) -> dict:
         if valuation and current_price is not None and current_price > 0:
             pe = cls._optional_finite_float(valuation.get("pe"))
             pb = cls._optional_finite_float(valuation.get("pb"))
@@ -603,7 +936,7 @@ class PortfolioService:
             deep_candidates = [value for value in [pe_deep_price, pb_deep_price] if value is not None]
             signal["dca_green_trigger_price"] = round(sum(green_candidates) / len(green_candidates), 3) if green_candidates else None
             signal["dca_deep_green_trigger_price"] = round(sum(deep_candidates) / len(deep_candidates), 3) if deep_candidates else None
-        signal["dca_quality_score"] = cls._dca_quality_score(signal)
+        signal["dca_quality_score"] = cls._dca_quality_score(signal, config)
         return signal
 
     @classmethod
@@ -615,6 +948,7 @@ class PortfolioService:
         current_price: float | None,
         track_override: str | None = None,
     ) -> dict:
+        config = await cls._get_dca_config(session)
         display_name = name or ""
         track = (track_override or "auto").strip()
         if track == "disabled":
@@ -650,33 +984,58 @@ class PortfolioService:
             }
 
         if is_core_broad:
-            index_symbol = cls._broad_index_symbol(display_name)
-            valuation = await cls._fetch_broad_valuation(session, index_symbol) if index_symbol else None
-            signal = cls._valuation_dca_signal(valuation)
-            signal = await cls._apply_broad_trend_confirmation(code, current_price, signal)
-            return cls._finalize_dca_signal(signal, current_price, valuation)
+            index_symbol, mapping_reason = await cls._resolve_broad_index_symbol(session, code, display_name)
+            valuation = await cls._fetch_broad_valuation(session, index_symbol, config) if index_symbol else None
+            signal = cls._valuation_dca_signal(valuation, config)
+            signal["dca_decision_steps"] = [f"估值指数：{mapping_reason}", *(signal.get("dca_decision_steps") or [])]
+            signal = await cls._apply_broad_trend_confirmation(code, current_price, signal, config)
+            return cls._finalize_dca_signal(signal, current_price, valuation, config)
 
-        klines = await MarketService.get_history_kline(code, days=60)
-        if len(klines) < 23:
+        klines = await MarketService.get_history_kline(code, days=int(config["trend_history_days"]))
+        short_ma_days = int(config["trend_short_ma_days"])
+        medium_ma_days = int(config["trend_medium_ma_days"])
+        long_ma_days = int(config["trend_long_ma_days"])
+        slope_shift_days = int(config["trend_slope_shift_days"])
+        volume_ma_days = int(config["trend_volume_ma_days"])
+        atr_days = int(config["trend_atr_days"])
+        min_kline_days = short_ma_days + slope_shift_days + 3
+        if len(klines) < min_kline_days:
             return {
                 "dca_track": "trend",
                 "dca_light": "yellow",
                 "dca_label": "黄灯：趋势数据不足",
                 "dca_action": "暂缓定投",
-                "dca_reason": "少于23根日K，无法稳定计算MA20斜率",
+                "dca_reason": "历史K线不足，无法稳定计算短期均线斜率",
                 "dca_next_trigger_price": None,
                 "dca_budget_multiplier": 1.0,
                 "dca_budget_label": "基础定投 1x",
-                "dca_decision_steps": ["资产轨道：趋势轨", "趋势数据：少于23根日K", "最终动作：暂缓定投"],
+                "dca_decision_steps": ["资产轨道：趋势轨", "趋势数据：历史K线不足", "最终动作：暂缓定投"],
                 "dca_quality_score": 50.0,
             }
 
         closes = [float(item.close_price) for item in klines]
-        ma20 = sum(closes[-20:]) / 20
-        prev_ma20 = sum(closes[-23:-3]) / 20
+        ma20 = sum(closes[-short_ma_days:]) / short_ma_days
+        prev_ma20 = sum(closes[-(short_ma_days + slope_shift_days + 3):-(slope_shift_days + 3)]) / short_ma_days
         ma20_slope_pct = (ma20 - prev_ma20) / prev_ma20 * 100 if prev_ma20 > 0 else 0.0
+        ma60 = sum(closes[-medium_ma_days:]) / medium_ma_days if len(closes) >= medium_ma_days else None
+        prev_ma60 = sum(closes[-(medium_ma_days + slope_shift_days):-slope_shift_days]) / medium_ma_days if len(closes) >= medium_ma_days + slope_shift_days else None
+        ma60_slope_pct = (ma60 - prev_ma60) / prev_ma60 * 100 if ma60 is not None and prev_ma60 and prev_ma60 > 0 else None
+        ma120 = sum(closes[-long_ma_days:]) / long_ma_days if len(closes) >= long_ma_days else None
+        prev_ma120 = sum(closes[-(long_ma_days + slope_shift_days):-slope_shift_days]) / long_ma_days if len(closes) >= long_ma_days + slope_shift_days else None
+        ma120_slope_pct = (ma120 - prev_ma120) / prev_ma120 * 100 if ma120 is not None and prev_ma120 and prev_ma120 > 0 else None
         distance = current_price - ma20
         distance_pct = distance / ma20 * 100 if ma20 > 0 else 0.0
+        ma60_distance_pct = (current_price - ma60) / ma60 * 100 if ma60 and ma60 > 0 else None
+        ma120_distance_pct = (current_price - ma120) / ma120 * 100 if ma120 and ma120 > 0 else None
+
+        volumes = [float(getattr(item, "volume", 0) or 0) for item in klines]
+        current_volume = volumes[-1] if volumes else 0.0
+        volume_ma20_values = [value for value in volumes[-volume_ma_days:] if value > 0]
+        volume_ma20 = sum(volume_ma20_values) / len(volume_ma20_values) if volume_ma20_values else None
+        volume_ratio = current_volume / volume_ma20 if volume_ma20 and current_volume > 0 else None
+        volume_text = f"量能为20日均量的{volume_ratio:.2f}倍" if volume_ratio is not None else "成交量数据不足"
+        volume_confirmed = volume_ratio is None or volume_ratio >= float(config["trend_volume_confirm_ratio"])
+        volume_expanded = volume_ratio is not None and volume_ratio >= float(config["trend_volume_expand_ratio"])
 
         true_ranges = []
         for index in range(1, len(klines)):
@@ -686,14 +1045,25 @@ class PortfolioService:
             if high <= 0 or low <= 0 or prev_close <= 0:
                 continue
             true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-        atr14 = sum(true_ranges[-14:]) / 14 if len(true_ranges) >= 14 else None
-        atr_band = atr14 * 1.5 if atr14 is not None else ma20 * 0.03
+        atr14 = sum(true_ranges[-atr_days:]) / atr_days if len(true_ranges) >= atr_days else None
+        atr_pct = atr14 / ma20 * 100 if atr14 is not None and ma20 > 0 else None
+        atr_multiplier = float(config["trend_atr_high_multiplier"]) if atr_pct is not None and atr_pct >= float(config["trend_atr_high_volatility_pct"]) else float(config["trend_atr_mid_multiplier"]) if atr_pct is not None and atr_pct >= float(config["trend_atr_mid_volatility_pct"]) else float(config["trend_atr_base_multiplier"])
+        atr_band = atr14 * atr_multiplier if atr14 is not None else ma20 * 0.03
         atr_band_pct = atr_band / ma20 * 100 if ma20 > 0 else 0.0
         next_trigger = round(ma20 + atr_band, 3) if ma20 > 0 else None
-        atr_text = f"ATR14 {atr14:.3f}，1.5倍ATR约{atr_band_pct:.1f}%" if atr14 is not None else "ATR数据不足，使用3%固定阈值"
+        atr_text = f"ATR14 {atr14:.3f}，{atr_multiplier:g}倍ATR约{atr_band_pct:.1f}%" if atr14 is not None else "ATR数据不足，使用3%固定阈值"
+        medium_trend_ok = ma60 is None or current_price >= ma60 or (ma60_slope_pct is not None and ma60_slope_pct >= 0)
+        medium_trend_weak = ma60 is not None and current_price < ma60 and (ma60_slope_pct is None or ma60_slope_pct < 0)
+        long_trend_weak = ma120 is not None and current_price < ma120 and (ma120_slope_pct is None or ma120_slope_pct < 0)
+        medium_trend_text = (
+            f"MA60 {ma60:.3f}，距离{ma60_distance_pct:.1f}%" if ma60 is not None and ma60_distance_pct is not None else "MA60数据不足"
+        )
+        long_trend_text = (
+            f"MA120 {ma120:.3f}，距离{ma120_distance_pct:.1f}%" if ma120 is not None and ma120_distance_pct is not None else "MA120数据不足"
+        )
 
         if current_price > ma20 and ma20_slope_pct > 0:
-            if distance <= atr_band:
+            if distance <= atr_band and medium_trend_ok and volume_confirmed:
                 return {
                     "dca_track": "trend",
                     "dca_light": "green",
@@ -701,61 +1071,130 @@ class PortfolioService:
                     "dca_action": "允许定投加仓",
                     "dca_budget_multiplier": 1.5,
                     "dca_budget_label": "增强定投 1.5x",
-                    "dca_reason": f"价格高于MA20且MA20上行，距离MA20约{distance_pct:.1f}%，处于波动容忍区间内，{atr_text}",
+                    "dca_reason": f"价格高于MA20且MA20上行，距离MA20约{distance_pct:.1f}%，处于波动容忍区间内；{medium_trend_text}；{volume_text}；{atr_text}",
                     "dca_next_trigger_price": next_trigger,
                     "dca_trend_ma20": round(ma20, 4),
                     "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
                     "dca_trend_distance_pct": round(distance_pct, 3),
                     "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
                     "dca_trend_atr_band_pct": round(atr_band_pct, 3),
-                    "dca_decision_steps": ["资产轨道：趋势轨", "趋势判断：价格高于MA20且MA20上行", "波动过滤：价格处于1.5倍ATR容忍区间内", "最终动作：增强定投 1.5x"],
-                "dca_quality_score": 50.0,
+                    "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+                    "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+                    "dca_trend_ma120": round(ma120, 4) if ma120 is not None else None,
+                    "dca_trend_ma120_slope_pct": round(ma120_slope_pct, 3) if ma120_slope_pct is not None else None,
+                    "dca_trend_volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                    "dca_trend_atr_multiplier": atr_multiplier,
+                    "dca_decision_steps": ["资产轨道：趋势轨", "短期趋势：价格高于MA20且MA20上行", "中期过滤：MA60未明显走弱", "量能确认：成交量未明显萎缩", f"波动过滤：价格处于{atr_multiplier:g}倍ATR容忍区间内", "最终动作：增强定投 1.5x"],
+                    "dca_quality_score": 72.0 if volume_expanded else 68.0,
                 }
             return {
                 "dca_track": "trend",
                 "dca_light": "yellow",
-                "dca_label": "黄灯：趋势偏强但偏离",
-                "dca_action": "等待回踩再加仓",
+                "dca_label": "黄灯：等待回踩" if distance > atr_band else "黄灯：趋势确认不足",
+                "dca_action": "等待回踩到趋势触发价附近" if distance > atr_band else "等待中期趋势和量能确认",
                 "dca_budget_multiplier": 1.0,
                 "dca_budget_label": "基础定投 1x",
-                "dca_reason": f"MA20上行但价格距离MA20约{distance_pct:.1f}%，已超过波动容忍区间，不宜追高，{atr_text}",
+                "dca_reason": f"MA20上行，价格距离MA20约{distance_pct:.1f}%；{medium_trend_text}；{volume_text}；{atr_text}。{'价格偏离过大，不宜追高' if distance > atr_band else '中期趋势或量能确认不足，暂不增强加仓'}",
                 "dca_next_trigger_price": next_trigger,
                 "dca_trend_ma20": round(ma20, 4),
                 "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
                 "dca_trend_distance_pct": round(distance_pct, 3),
                 "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
                 "dca_trend_atr_band_pct": round(atr_band_pct, 3),
-                "dca_decision_steps": ["资产轨道：趋势轨", "趋势判断：价格高于MA20且MA20上行", "波动过滤：价格超过1.5倍ATR容忍区间", "最终动作：等待回踩"],
-                "dca_quality_score": 50.0,
+                "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+                "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+                "dca_trend_ma120": round(ma120, 4) if ma120 is not None else None,
+                "dca_trend_ma120_slope_pct": round(ma120_slope_pct, 3) if ma120_slope_pct is not None else None,
+                "dca_trend_volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "dca_trend_atr_multiplier": atr_multiplier,
+                "dca_decision_steps": ["资产轨道：趋势轨", "短期趋势：价格高于MA20且MA20上行", "中期过滤：MA60偏弱" if not medium_trend_ok else "中期过滤：MA60未明显走弱", "量能确认：成交量偏弱" if not volume_confirmed else "量能确认：成交量可接受", f"波动过滤：{'价格超过' if distance > atr_band else '价格未超过'}{atr_multiplier:g}倍ATR容忍区间", "最终动作：等待回踩或确认"],
+                "dca_quality_score": 54.0 if (not medium_trend_ok or not volume_confirmed) else 58.0,
             }
 
-        if current_price < ma20 and ma20_slope_pct < 0:
+        if current_price < ma20 and (ma20_slope_pct < 0 or medium_trend_weak or long_trend_weak):
+            deep_break = abs(distance) > atr_band or medium_trend_weak or long_trend_weak
             return {
                 "dca_track": "trend",
                 "dca_light": "red",
-                "dca_label": "红灯：下行趋势",
-                "dca_action": "暂停定投",
+                "dca_label": "红灯：中期转弱" if long_trend_weak else "红灯：破位下行" if deep_break else "红灯：弱势下行",
+                "dca_action": "暂停定投，等待重新站回MA60" if (medium_trend_weak or long_trend_weak) else "暂停定投，等待重新站回MA20" if deep_break else "暂停增强定投，观察MA20修复",
                 "dca_budget_multiplier": 0.0,
                 "dca_budget_label": "暂停 0x",
-                "dca_reason": "价格低于MA20且MA20斜率向下，禁止左侧抄底",
+                "dca_reason": f"价格低于MA20，距离MA20约{distance_pct:.1f}%；{medium_trend_text}；{long_trend_text}；{'中长期均线转弱' if long_trend_weak else 'MA60过滤转弱' if medium_trend_weak else '短期趋势下行'}，禁止左侧抄底",
+                "dca_next_trigger_price": round(ma60, 3) if (medium_trend_weak or long_trend_weak) and ma60 else round(ma20, 3) if ma20 > 0 else next_trigger,
+                "dca_trend_ma20": round(ma20, 4),
+                "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
+                "dca_trend_distance_pct": round(distance_pct, 3),
+                "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
+                "dca_trend_atr_band_pct": round(atr_band_pct, 3),
+                "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+                "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+                "dca_trend_ma120": round(ma120, 4) if ma120 is not None else None,
+                "dca_trend_ma120_slope_pct": round(ma120_slope_pct, 3) if ma120_slope_pct is not None else None,
+                "dca_trend_volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "dca_trend_atr_multiplier": atr_multiplier,
+                "dca_decision_steps": ["资产轨道：趋势轨", "短期趋势：价格低于MA20", "中期过滤：跌破MA60且MA60走弱" if medium_trend_weak else "中期过滤：MA60未明显转弱", "长期过滤：跌破MA120且MA120走弱" if long_trend_weak else "长期过滤：MA120未明显转弱或数据不足", "风险分层：中期转弱" if long_trend_weak else "风险分层：破位下行" if deep_break else "风险分层：弱势下行", "最终动作：暂停定投"],
+                "dca_quality_score": 18.0 if long_trend_weak else 24.0 if medium_trend_weak else 25.0 if deep_break else 32.0,
+            }
+
+        if current_price < ma20 and ma20_slope_pct >= 0:
+            return {
+                "dca_track": "trend",
+                "dca_light": "yellow",
+                "dca_label": "黄灯：趋势修复中",
+                "dca_action": "等待价格站回MA20",
+                "dca_budget_multiplier": 1.0,
+                "dca_budget_label": "基础定投 1x",
+                "dca_reason": f"MA20已不再下行，但价格仍低于MA20，距离MA20约{distance_pct:.1f}%；{medium_trend_text}；{volume_text}，需要先站回MA20确认修复",
+                "dca_next_trigger_price": round(ma60, 3) if (medium_trend_weak or long_trend_weak) and ma60 else round(ma20, 3) if ma20 > 0 else next_trigger,
+                "dca_trend_ma20": round(ma20, 4),
+                "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
+                "dca_trend_distance_pct": round(distance_pct, 3),
+                "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
+                "dca_trend_atr_band_pct": round(atr_band_pct, 3),
+                "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+                "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+                "dca_trend_ma120": round(ma120, 4) if ma120 is not None else None,
+                "dca_trend_ma120_slope_pct": round(ma120_slope_pct, 3) if ma120_slope_pct is not None else None,
+                "dca_trend_volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "dca_trend_atr_multiplier": atr_multiplier,
+                "dca_decision_steps": ["资产轨道：趋势轨", "短期趋势：MA20未继续下行", "位置判断：价格仍低于MA20", "中期过滤：MA60偏弱" if medium_trend_weak else "中期过滤：MA60未明显转弱", "量能确认：成交量偏弱" if not volume_confirmed else "量能确认：成交量可接受", "最终动作：等待站回MA20"],
+                "dca_quality_score": 48.0,
+            }
+
+        if current_price >= ma20 and ma20_slope_pct <= 0:
+            return {
+                "dca_track": "trend",
+                "dca_light": "yellow",
+                "dca_label": "黄灯：站上但未转强",
+                "dca_action": "等待MA20斜率转正",
+                "dca_budget_multiplier": 1.0,
+                "dca_budget_label": "基础定投 1x",
+                "dca_reason": f"价格已站上MA20，但MA20斜率仍未转正（{ma20_slope_pct:.2f}%）；{medium_trend_text}；{volume_text}，趋势强度不足，暂不增强加仓",
                 "dca_next_trigger_price": next_trigger,
                 "dca_trend_ma20": round(ma20, 4),
                 "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
                 "dca_trend_distance_pct": round(distance_pct, 3),
                 "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
                 "dca_trend_atr_band_pct": round(atr_band_pct, 3),
-                "dca_decision_steps": ["资产轨道：趋势轨", "趋势判断：价格低于MA20且MA20下行", "最终动作：暂停定投"],
-                "dca_quality_score": 50.0,
+                "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+                "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+                "dca_trend_ma120": round(ma120, 4) if ma120 is not None else None,
+                "dca_trend_ma120_slope_pct": round(ma120_slope_pct, 3) if ma120_slope_pct is not None else None,
+                "dca_trend_volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "dca_trend_atr_multiplier": atr_multiplier,
+                "dca_decision_steps": ["资产轨道：趋势轨", "位置判断：价格已站上MA20", "短期趋势：MA20斜率未转正", "中期过滤：MA60偏弱" if medium_trend_weak else "中期过滤：MA60未明显转弱", "量能确认：成交量偏弱" if not volume_confirmed else "量能确认：成交量可接受", "最终动作：等待趋势转强"],
+                "dca_quality_score": 52.0,
             }
 
         return {
             "dca_track": "trend",
             "dca_light": "yellow",
-            "dca_label": "黄灯：趋势未确认",
+            "dca_label": "黄灯：均线缠绕",
             "dca_action": "观察等待",
             "dca_budget_multiplier": 1.0,
             "dca_budget_label": "基础定投 1x",
-            "dca_reason": f"价格在MA20附近或趋势方向不一致，距离MA20约{distance_pct:.1f}%",
+            "dca_reason": f"价格与MA20、MA20斜率方向不一致，距离MA20约{distance_pct:.1f}%，趋势信号不足",
             "dca_next_trigger_price": next_trigger,
             "dca_trend_ma20": round(ma20, 4),
             "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
@@ -763,12 +1202,269 @@ class PortfolioService:
             "dca_trend_atr14": round(atr14, 4) if atr14 is not None else None,
             "dca_trend_atr_band_pct": round(atr_band_pct, 3),
             "dca_decision_steps": ["资产轨道：趋势轨", "趋势判断：价格与MA20或斜率方向不一致", "最终动作：观察等待"],
-                "dca_quality_score": 50.0,
+            "dca_quality_score": 50.0,
         }
 
     @classmethod
+    def _state_dca_signal(
+        cls,
+        state: PortfolioDcaState | None,
+        history: PortfolioDcaSignalHistory | None = None,
+    ) -> dict | None:
+        if not state or state.last_light is None:
+            return None
+        metrics = history.metrics if history and isinstance(history.metrics, dict) else {}
+        budget_multiplier = (
+            cls._optional_finite_float(history.budget_multiplier)
+            if history and history.budget_multiplier is not None
+            else cls._optional_finite_float(state.last_budget_multiplier)
+        )
+        trigger_price = (
+            cls._optional_finite_float(history.trigger_price)
+            if history and history.trigger_price is not None
+            else cls._optional_finite_float(state.last_trigger_price)
+        )
+        use_history_text = bool(history and history.persisted_light == state.last_light)
+        return {
+            "dca_track": metrics.get("track"),
+            "dca_light": state.last_light,
+            "dca_label": state.last_label,
+            "dca_action": state.last_action,
+            "dca_reason": history.reason if use_history_text and history.reason else "使用最近一次正式红绿灯状态；候选变化需满足确认次数后才会切换",
+            "dca_next_trigger_price": trigger_price,
+            "dca_valuation_percentile": cls._optional_finite_float(metrics.get("valuation_percentile")),
+            "dca_valuation_pe": cls._optional_finite_float(metrics.get("valuation_pe")),
+            "dca_valuation_pb": cls._optional_finite_float(metrics.get("valuation_pb")),
+            "dca_valuation_pe_percentile": cls._optional_finite_float(metrics.get("valuation_pe_percentile")),
+            "dca_valuation_pb_percentile": cls._optional_finite_float(metrics.get("valuation_pb_percentile")),
+            "dca_valuation_sample_size": metrics.get("valuation_sample_size"),
+            "dca_trend_ma20": cls._optional_finite_float(metrics.get("trend_ma20")),
+            "dca_trend_ma20_slope_pct": cls._optional_finite_float(metrics.get("trend_ma20_slope_pct")),
+            "dca_trend_distance_pct": cls._optional_finite_float(metrics.get("trend_distance_pct")),
+            "dca_trend_atr14": cls._optional_finite_float(metrics.get("trend_atr14")),
+            "dca_trend_atr_band_pct": cls._optional_finite_float(metrics.get("trend_atr_band_pct")),
+            "dca_trend_ma60": cls._optional_finite_float(metrics.get("trend_ma60")),
+            "dca_trend_ma60_slope_pct": cls._optional_finite_float(metrics.get("trend_ma60_slope_pct")),
+            "dca_trend_ma120": cls._optional_finite_float(metrics.get("trend_ma120")),
+            "dca_trend_ma120_slope_pct": cls._optional_finite_float(metrics.get("trend_ma120_slope_pct")),
+            "dca_trend_volume_ratio": cls._optional_finite_float(metrics.get("trend_volume_ratio")),
+            "dca_trend_atr_multiplier": cls._optional_finite_float(metrics.get("trend_atr_multiplier")),
+            "dca_decision_steps": metrics.get("decision_steps") or ["使用最近一次后台红绿灯扫描结果", "等待下一次 10:30 或 14:40 后台更新刷新完整指标"],
+            "dca_quality_score": cls._optional_finite_float(metrics.get("quality_score")),
+            "dca_green_trigger_price": cls._optional_finite_float(metrics.get("green_trigger_price")),
+            "dca_deep_green_trigger_price": cls._optional_finite_float(metrics.get("deep_green_trigger_price")),
+            "dca_budget_multiplier": budget_multiplier,
+            "dca_budget_label": None,
+        }
+
+    @classmethod
+    def _pending_dca_signal(cls, track_override: str | None = None) -> dict:
+        return {
+            "dca_track": track_override or "unknown",
+            "dca_light": "yellow",
+            "dca_label": "黄灯：待后台计算",
+            "dca_action": "等待后台更新",
+            "dca_reason": "该持仓暂无缓存行情或红绿灯扫描结果，后台任务会在 10:30 / 14:40 更新",
+            "dca_next_trigger_price": None,
+            "dca_valuation_percentile": None,
+            "dca_valuation_pe": None,
+            "dca_valuation_pb": None,
+            "dca_valuation_pe_percentile": None,
+            "dca_valuation_pb_percentile": None,
+            "dca_valuation_sample_size": None,
+            "dca_trend_ma20": None,
+            "dca_trend_ma20_slope_pct": None,
+            "dca_trend_distance_pct": None,
+            "dca_trend_atr14": None,
+            "dca_trend_atr_band_pct": None,
+            "dca_trend_ma60": None,
+            "dca_trend_ma60_slope_pct": None,
+            "dca_trend_ma120": None,
+            "dca_trend_ma120_slope_pct": None,
+            "dca_trend_volume_ratio": None,
+            "dca_trend_atr_multiplier": None,
+            "dca_decision_steps": ["列表接口：只读取缓存，不阻塞拉取外部数据", "最终动作：等待后台红绿灯数据更新"],
+            "dca_candidate_light": None,
+            "dca_candidate_confirm_count": None,
+            "dca_quality_score": None,
+            "dca_green_trigger_price": None,
+            "dca_deep_green_trigger_price": None,
+            "dca_budget_multiplier": 1.0,
+            "dca_budget_label": "待计算",
+        }
+
+    @classmethod
+    def _build_factor_score(cls, code: str, name: str | None, quote, dca_signal: dict) -> dict:
+        classification = EtfClassificationService.classify(code, name)
+        display_name = name or ""
+        broad_keywords = ("沪深300", "中证500", "中证1000", "上证50", "A50", "深证100", "中证A500", "A500", "宽基", "全指", "红利", "股息")
+        sector_keywords = (
+            "芯片", "半导体", "人工智能", "AI", "机器人", "算力", "通信", "5G", "软件", "云计算", "科技",
+            "新能源", "光伏", "锂电", "电池", "储能", "风电", "创新药", "生物", "医药", "医疗",
+            "消费", "食品", "饮料", "白酒", "家电", "银行", "证券", "券商", "保险", "金融", "地产",
+            "军工", "国防", "农业", "煤炭", "有色", "化工", "能源"
+        )
+        is_sector = any(keyword.lower() in f"{code} {display_name}".lower() for keyword in sector_keywords) and not any(keyword in display_name for keyword in broad_keywords)
+        if not is_sector:
+            return {
+                "enabled": False,
+                "total_score": 0.0,
+                "macro_score": 0.0,
+                "technical_score": 0.0,
+                "sentiment_score": 0.0,
+                "prosperity_score": 0.0,
+                "rating": "不适用",
+                "action": "不适用",
+                "reason": "该 ETF 暂按宽基、跨境、商品或债券处理，不参与行业四因子评分。",
+                "factors": [],
+            }
+
+        macro_score = 55.0
+        factors: list[str] = []
+        if classification.style == "成长":
+            macro_score += 8
+            factors.append("宏观：成长风格对流动性和风险偏好更敏感，基础分上调。")
+        elif classification.style == "周期":
+            macro_score += 4
+            factors.append("宏观：周期行业更依赖经济修复，基础分中性偏正。")
+        elif classification.style == "防御":
+            macro_score += 2
+            factors.append("宏观：防御行业波动较低，基础分略上调。")
+
+        technical_score = cls._optional_finite_float(dca_signal.get("dca_quality_score"))
+        if technical_score is None:
+            light = dca_signal.get("dca_light")
+            technical_score = 72.0 if light in {"deep_green", "green"} else 35.0 if light == "red" else 50.0
+        factors.append(f"技术：复用红绿灯质量分 {technical_score:.1f}。")
+
+        change_pct = cls._optional_finite_float(getattr(quote, "change_pct", None) if quote else None)
+        volume_ratio = cls._optional_finite_float(dca_signal.get("dca_trend_volume_ratio"))
+        sentiment_score = 50.0
+        if change_pct is not None:
+            sentiment_score += max(-18.0, min(18.0, change_pct * 3))
+            factors.append(f"情绪：当日涨跌 {change_pct:.2f}%。")
+        if volume_ratio is not None:
+            sentiment_score += max(-10.0, min(10.0, (volume_ratio - 1) * 12))
+            factors.append(f"情绪：量能约 {volume_ratio:.2f} 倍。")
+        else:
+            factors.append("情绪：量能数据不足，按中性处理。")
+
+        prosperity_score = 50.0
+        hot_keywords = ("人工智能", "AI", "机器人", "算力", "半导体", "芯片", "新能源", "储能", "创新药", "军工")
+        defensive_keywords = ("消费", "食品", "饮料", "白酒", "医药", "医疗", "银行")
+        cyclical_keywords = ("证券", "券商", "保险", "金融", "地产", "煤炭", "有色", "化工", "能源")
+        if any(keyword.lower() in display_name.lower() for keyword in hot_keywords):
+            prosperity_score += 12
+            factors.append("景气度：命中高景气主题关键词，代理分上调。")
+        elif any(keyword in display_name for keyword in defensive_keywords):
+            prosperity_score += 6
+            factors.append("景气度：命中防御消费/医药/银行关键词，代理分小幅上调。")
+        elif any(keyword in display_name for keyword in cyclical_keywords):
+            prosperity_score += 4
+            factors.append("景气度：命中周期金融/资源关键词，等待宏观确认。")
+        else:
+            factors.append("景气度：暂无行业基本面数据，按中性代理分处理。")
+
+        macro_score = max(0.0, min(100.0, macro_score))
+        technical_score = max(0.0, min(100.0, technical_score))
+        sentiment_score = max(0.0, min(100.0, sentiment_score))
+        prosperity_score = max(0.0, min(100.0, prosperity_score))
+        total_score = round(macro_score * 0.25 + technical_score * 0.35 + sentiment_score * 0.20 + prosperity_score * 0.20, 1)
+        if total_score >= 75:
+            rating, action = "强", "优先观察加仓"
+        elif total_score >= 60:
+            rating, action = "中强", "可小额配置"
+        elif total_score >= 45:
+            rating, action = "中性", "持有观察"
+        else:
+            rating, action = "弱", "谨慎或减配"
+        return {
+            "enabled": True,
+            "total_score": total_score,
+            "macro_score": round(macro_score, 1),
+            "technical_score": round(technical_score, 1),
+            "sentiment_score": round(sentiment_score, 1),
+            "prosperity_score": round(prosperity_score, 1),
+            "rating": rating,
+            "action": action,
+            "reason": "行业四因子评分为宏观、技术、情绪、景气度的加权结果；当前景气度为关键词代理，后续可接真实行业基本面数据。",
+            "factors": factors,
+        }
+
+    @classmethod
+    def _build_cross_border_risk(cls, code: str, name: str | None, market_value: float | None = None, total_market_value: float | None = None) -> dict:
+        classification = EtfClassificationService.classify(code, name)
+        risk_tags = list(classification.risk_tags)
+        is_cross_border = "跨境" in risk_tags
+        if not is_cross_border:
+            return {
+                "is_cross_border": False,
+                "risk_level": "low",
+                "risk_tags": risk_tags,
+                "max_position_hint": classification.max_position_hint,
+                "budget_multiplier_adjustment": 1.0,
+                "action": "常规执行",
+                "reason": "非跨境 ETF，按常规红绿灯和宏观轮动规则执行。",
+                "warnings": [],
+            }
+
+        current_weight = (market_value / total_market_value) if market_value and total_market_value and total_market_value > 0 else None
+        warnings = [
+            "跨境 ETF 受海外交易时段影响，A 股交易时间内净值可能滞后。",
+            "需要关注人民币汇率波动，汇率会放大或抵消底层资产收益。",
+            "当前系统暂未接入实时 IOPV/溢价率，红绿灯为价格趋势信号，不代表可追高买入。",
+        ]
+        risk_level = "medium"
+        adjustment = 0.8
+        action = "降倍率执行"
+
+        if "高波动" in risk_tags or classification.asset_bucket in {"港股中概", "美股成长"}:
+            risk_level = "high"
+            adjustment = 0.6
+            action = "小额分批"
+            warnings.append("该类跨境成长 ETF 波动和估值弹性较高，绿灯也建议分批执行。")
+
+        if current_weight is not None and current_weight >= classification.max_position_hint:
+            risk_level = "high"
+            adjustment = 0.0
+            action = "不新增"
+            warnings.append(f"当前单品种权重约 {current_weight * 100:.1f}%，已达到或超过建议上限 {classification.max_position_hint * 100:.0f}%。")
+
+        return {
+            "is_cross_border": True,
+            "risk_level": risk_level,
+            "risk_tags": risk_tags,
+            "max_position_hint": classification.max_position_hint,
+            "budget_multiplier_adjustment": adjustment,
+            "action": action,
+            "reason": "跨境 ETF 需要叠加汇率、时差、溢价和 T+0 交易风险约束。",
+            "warnings": warnings,
+        }
+
+    @classmethod
+    def _apply_cross_border_risk_to_signal(cls, signal: dict, risk: dict) -> dict:
+        if not risk.get("is_cross_border"):
+            return signal
+        adjustment = cls._finite_float(risk.get("budget_multiplier_adjustment"), 1.0)
+        current_multiplier = cls._optional_finite_float(signal.get("dca_budget_multiplier"))
+        if current_multiplier is not None:
+            adjusted = round(max(0.0, current_multiplier * adjustment), 2)
+            signal["dca_budget_multiplier"] = adjusted
+            if adjusted <= 0:
+                signal["dca_budget_label"] = "跨境风控暂停 0x"
+            elif adjusted < current_multiplier:
+                signal["dca_budget_label"] = f"跨境风控 {adjusted:g}x"
+        steps = list(signal.get("dca_decision_steps") or [])
+        steps.append(f"跨境风控：{risk.get('action') or '降倍率执行'}")
+        signal["dca_decision_steps"] = steps
+        warning_text = "；".join(risk.get("warnings") or [])
+        if warning_text:
+            signal["dca_reason"] = f"{signal.get('dca_reason') or ''}；跨境风控：{warning_text}"
+        return signal
+
+    @classmethod
     async def get_with_market(
-        cls, session: AsyncSession, user_id: int
+        cls, session: AsyncSession, user_id: int, compute_dca: bool = False
     ) -> List[PortfolioWithMarket]:
         """获取持仓列表（含实时行情）"""
         result = await session.execute(
@@ -779,27 +1475,63 @@ class PortfolioService:
         if not portfolios:
             return []
         
-        # 只获取持仓ETF的行情（优先从Redis缓存）
         etf_codes = [p.etf_code for p in portfolios]
-        quotes = await MarketService.get_quotes_for_codes(etf_codes)
+        if compute_dca:
+            quotes = await MarketService.get_quotes_for_codes(etf_codes)
+        else:
+            # 持仓列表只读取缓存行情，避免新增 ETF 缺数据时阻塞整张表。
+            quotes = await MarketService.get_cached_quotes_for_codes(etf_codes)
         info_result = await session.execute(select(EtfInfo).where(EtfInfo.code.in_(etf_codes)))
         etf_name_by_code = {item.code: item.name for item in info_result.scalars().all()}
         state_result = await session.execute(select(PortfolioDcaState).where(PortfolioDcaState.portfolio_id.in_([p.id for p in portfolios])))
         dca_state_by_portfolio_id = {item.portfolio_id: item for item in state_result.scalars().all()}
+        dca_history_by_portfolio_id: dict[int, PortfolioDcaSignalHistory] = {}
+        if not compute_dca:
+            history_result = await session.execute(
+                select(PortfolioDcaSignalHistory)
+                .where(
+                    PortfolioDcaSignalHistory.user_id == user_id,
+                    PortfolioDcaSignalHistory.portfolio_id.in_([p.id for p in portfolios]),
+                )
+                .order_by(
+                    PortfolioDcaSignalHistory.portfolio_id.asc(),
+                    PortfolioDcaSignalHistory.scanned_at.desc(),
+                    PortfolioDcaSignalHistory.id.desc(),
+                )
+            )
+            for history in history_result.scalars().all():
+                dca_history_by_portfolio_id.setdefault(history.portfolio_id, history)
         
+        estimated_total_market_value = 0.0
+        for p in portfolios:
+            quote = quotes.get(p.etf_code)
+            price = cls._optional_finite_float(quote.price) if quote else None
+            if price is not None and price > 0:
+                estimated_total_market_value += cls._finite_float(p.shares) * price
+
         results = []
         for p in portfolios:
             quote = quotes.get(p.etf_code)
             display_name = (quote.name if quote else None) or etf_name_by_code.get(p.etf_code)
             price = cls._optional_finite_float(quote.price) if quote else None
-            dca_signal = await cls._build_dca_signal(session, p.etf_code, display_name, price, p.dca_track_override)
             dca_state = dca_state_by_portfolio_id.get(p.id)
+            if compute_dca:
+                dca_signal = await cls._build_dca_signal(session, p.etf_code, display_name, price, p.dca_track_override)
+            else:
+                dca_signal = cls._state_dca_signal(
+                    dca_state,
+                    dca_history_by_portfolio_id.get(p.id),
+                ) or cls._pending_dca_signal(p.dca_track_override)
             if dca_state:
                 dca_signal["dca_candidate_light"] = dca_state.candidate_light
                 dca_signal["dca_candidate_confirm_count"] = dca_state.candidate_confirm_count
             else:
                 dca_signal["dca_candidate_light"] = None
                 dca_signal["dca_candidate_confirm_count"] = None
+            estimated_market_value = cls._finite_float(p.shares) * price if price is not None and price > 0 else None
+            cross_border_risk = cls._build_cross_border_risk(p.etf_code, display_name, estimated_market_value, estimated_total_market_value)
+            dca_signal = cls._apply_cross_border_risk_to_signal(dca_signal, cross_border_risk)
+            factor_score = cls._build_factor_score(p.etf_code, display_name, quote, dca_signal)
             if quote and price is not None and price > 0:
                 shares = cls._finite_float(p.shares)
                 cost_price = cls._finite_float(p.cost_price)
@@ -844,6 +1576,8 @@ class PortfolioService:
                     today_pnl=cls._optional_finite_float(today_pnl),
                     today_pnl_pct=cls._optional_finite_float(today_pnl_pct),
                     holding_days=holding_days,
+                    cross_border_risk=cross_border_risk,
+                    factor_score=factor_score,
                     **dca_signal,
                 ))
             else:
@@ -858,6 +1592,8 @@ class PortfolioService:
                     created_at=p.created_at,
                     updated_at=p.updated_at,
                     etf_name=display_name,
+                    cross_border_risk=cross_border_risk,
+                    factor_score=factor_score,
                     **dca_signal,
                 ))
         
@@ -868,10 +1604,18 @@ class PortfolioService:
         """获取持仓汇总"""
         from models.user import User
         
-        portfolios = await PortfolioService.get_with_market(session, user_id=user_id)
+        portfolios = await PortfolioService.get_with_market(session, user_id=user_id, compute_dca=False)
         # 获取用户可用资金
         user_result = await session.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
         available_cash = float(user.account_balance) if user and user.account_balance else 0.0
+        macro_result = await session.execute(
+            select(MacroCycleState)
+            .where(MacroCycleState.region.in_(["cn", "us", "global"]))
+            .order_by(MacroCycleState.region.asc(), MacroCycleState.observed_at.desc(), MacroCycleState.id.desc())
+        )
+        macro_states: dict[str, str] = {}
+        for state in macro_result.scalars().all():
+            macro_states.setdefault(state.region, state.cycle_phase)
         
-        return PortfolioService.build_summary_from_portfolios(portfolios, available_cash)
+        return PortfolioService.build_summary_from_portfolios(portfolios, available_cash, macro_states)

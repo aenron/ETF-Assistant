@@ -7,6 +7,7 @@ from database import init_db, engine
 from database import async_session_maker
 from models.user import User
 from routers import portfolio_router, market_router, advice_router, assistant_router, admin_router, multi_agent_router, strategy_router
+from routers.macro import router as macro_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from routers.notification_config import router as notification_config_router
@@ -32,6 +33,33 @@ async def run_migrations():
         ("index_valuation.pb", "ALTER TABLE index_valuation ADD COLUMN pb NUMERIC(12, 4)"),
         ("portfolio_dca_state.candidate_light", "ALTER TABLE portfolio_dca_state ADD COLUMN candidate_light VARCHAR(30)"),
         ("portfolio_dca_state.candidate_confirm_count", "ALTER TABLE portfolio_dca_state ADD COLUMN candidate_confirm_count INTEGER"),
+        ("dca_index_mapping.table", "CREATE TABLE IF NOT EXISTS dca_index_mapping (id SERIAL PRIMARY KEY, etf_code VARCHAR(20), keyword VARCHAR(100), index_symbol VARCHAR(20) NOT NULL, index_name VARCHAR(100), enabled BOOLEAN DEFAULT TRUE NOT NULL, created_at TIMESTAMP DEFAULT NOW() NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("dca_index_mapping.uq", "CREATE UNIQUE INDEX IF NOT EXISTS uq_dca_index_mapping_code_keyword ON dca_index_mapping (etf_code, keyword)"),
+        ("dca_index_mapping.etf_code_idx", "CREATE INDEX IF NOT EXISTS ix_dca_index_mapping_etf_code ON dca_index_mapping (etf_code)"),
+        ("dca_index_mapping.keyword_idx", "CREATE INDEX IF NOT EXISTS ix_dca_index_mapping_keyword ON dca_index_mapping (keyword)"),
+        ("dca_signal_config.table", "CREATE TABLE IF NOT EXISTS dca_signal_config (id INTEGER PRIMARY KEY DEFAULT 1, valuation_deep_green_percentile NUMERIC(6, 2) DEFAULT 15 NOT NULL, valuation_green_percentile NUMERIC(6, 2) DEFAULT 30 NOT NULL, valuation_red_percentile NUMERIC(6, 2) DEFAULT 80 NOT NULL, valuation_min_sample_size INTEGER DEFAULT 250 NOT NULL, trend_short_ma_days INTEGER DEFAULT 20 NOT NULL, trend_medium_ma_days INTEGER DEFAULT 60 NOT NULL, trend_long_ma_days INTEGER DEFAULT 120 NOT NULL, trend_history_days INTEGER DEFAULT 140 NOT NULL, trend_slope_shift_days INTEGER DEFAULT 5 NOT NULL, trend_volume_ma_days INTEGER DEFAULT 20 NOT NULL, trend_volume_confirm_ratio NUMERIC(6, 3) DEFAULT 0.8 NOT NULL, trend_volume_expand_ratio NUMERIC(6, 3) DEFAULT 1.2 NOT NULL, trend_atr_days INTEGER DEFAULT 14 NOT NULL, trend_atr_base_multiplier NUMERIC(6, 3) DEFAULT 1.5 NOT NULL, trend_atr_mid_multiplier NUMERIC(6, 3) DEFAULT 1.8 NOT NULL, trend_atr_high_multiplier NUMERIC(6, 3) DEFAULT 2.0 NOT NULL, trend_atr_mid_volatility_pct NUMERIC(6, 3) DEFAULT 2.5 NOT NULL, trend_atr_high_volatility_pct NUMERIC(6, 3) DEFAULT 4.0 NOT NULL, light_confirm_count INTEGER DEFAULT 2 NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("dca_signal_config.default", "INSERT INTO dca_signal_config (id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM dca_signal_config WHERE id = 1)"),
+        ("strategy_run_cache.table", "CREATE TABLE IF NOT EXISTS strategy_run_cache (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), strategy_id VARCHAR(50) NOT NULL, result_json TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW() NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("strategy_run_cache.uq", "CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_run_cache_user_strategy ON strategy_run_cache (user_id, strategy_id)"),
+        ("macro_cycle_state.table", "CREATE TABLE IF NOT EXISTS macro_cycle_state (id SERIAL PRIMARY KEY, region VARCHAR(20) DEFAULT 'cn' NOT NULL, cycle_phase VARCHAR(30) NOT NULL, growth_score NUMERIC(6, 2) DEFAULT 0 NOT NULL, inflation_score NUMERIC(6, 2) DEFAULT 0 NOT NULL, growth_trend VARCHAR(20) NOT NULL, inflation_trend VARCHAR(20) NOT NULL, confidence NUMERIC(6, 2) DEFAULT 50 NOT NULL, summary TEXT, dca_impact TEXT, source_note TEXT, source_type VARCHAR(20) DEFAULT 'auto' NOT NULL, override_until TIMESTAMP, observed_at TIMESTAMP DEFAULT NOW() NOT NULL, created_at TIMESTAMP DEFAULT NOW() NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("macro_cycle_state.phase_idx", "CREATE INDEX IF NOT EXISTS ix_macro_cycle_state_cycle_phase ON macro_cycle_state (cycle_phase)"),
+        ("macro_cycle_state.observed_idx", "CREATE INDEX IF NOT EXISTS ix_macro_cycle_state_observed_at ON macro_cycle_state (observed_at)"),
+        ("macro_cycle_state.region", "ALTER TABLE macro_cycle_state ADD COLUMN region VARCHAR(20) DEFAULT 'cn' NOT NULL"),
+        ("macro_cycle_state.region_idx", "CREATE INDEX IF NOT EXISTS ix_macro_cycle_state_region ON macro_cycle_state (region)"),
+        ("macro_cycle_state.source_type", "ALTER TABLE macro_cycle_state ADD COLUMN source_type VARCHAR(20) DEFAULT 'auto' NOT NULL"),
+        ("macro_cycle_state.override_until", "ALTER TABLE macro_cycle_state ADD COLUMN override_until TIMESTAMP"),
+        ("macro_cycle_state.source_type_idx", "CREATE INDEX IF NOT EXISTS ix_macro_cycle_state_source_type ON macro_cycle_state (source_type)"),
+        ("macro_indicator.table", "CREATE TABLE IF NOT EXISTS macro_indicator (id SERIAL PRIMARY KEY, region VARCHAR(20) DEFAULT 'cn' NOT NULL, indicator_code VARCHAR(50) NOT NULL, indicator_name VARCHAR(100) NOT NULL, category VARCHAR(30) NOT NULL, period VARCHAR(20) NOT NULL, value NUMERIC(14, 4) NOT NULL, previous_value NUMERIC(14, 4), trend VARCHAR(20) NOT NULL, unit VARCHAR(20), source VARCHAR(50) DEFAULT 'akshare' NOT NULL, source_note TEXT, source_function VARCHAR(100), source_column VARCHAR(100), raw_period VARCHAR(50), fetched_at TIMESTAMP DEFAULT NOW() NOT NULL, created_at TIMESTAMP DEFAULT NOW() NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("macro_indicator.drop_old_uq", "DROP INDEX IF EXISTS uq_macro_indicator_code_period"),
+        ("macro_indicator.uq", "CREATE UNIQUE INDEX IF NOT EXISTS uq_macro_indicator_region_code_period ON macro_indicator (region, indicator_code, period)"),
+        ("macro_indicator.code_idx", "CREATE INDEX IF NOT EXISTS ix_macro_indicator_indicator_code ON macro_indicator (indicator_code)"),
+        ("macro_indicator.category_idx", "CREATE INDEX IF NOT EXISTS ix_macro_indicator_category ON macro_indicator (category)"),
+        ("macro_indicator.period_idx", "CREATE INDEX IF NOT EXISTS ix_macro_indicator_period ON macro_indicator (period)"),
+        ("macro_indicator.region", "ALTER TABLE macro_indicator ADD COLUMN region VARCHAR(20) DEFAULT 'cn' NOT NULL"),
+        ("macro_indicator.region_idx", "CREATE INDEX IF NOT EXISTS ix_macro_indicator_region ON macro_indicator (region)"),
+        ("macro_indicator.source_function", "ALTER TABLE macro_indicator ADD COLUMN source_function VARCHAR(100)"),
+        ("macro_indicator.source_column", "ALTER TABLE macro_indicator ADD COLUMN source_column VARCHAR(100)"),
+        ("macro_indicator.raw_period", "ALTER TABLE macro_indicator ADD COLUMN raw_period VARCHAR(50)"),
     ]
 
     for label, statement in migration_statements:
@@ -115,6 +143,7 @@ app.include_router(assistant_router)
 app.include_router(llm_config_router)
 app.include_router(notification_config_router)
 app.include_router(admin_router)
+app.include_router(macro_router)
 app.include_router(multi_agent_router)
 app.include_router(strategy_router)
 

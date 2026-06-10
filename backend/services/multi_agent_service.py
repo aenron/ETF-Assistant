@@ -455,10 +455,14 @@ class MultiAgentService:
         cls,
         session: AsyncSession,
         user_id: int,
+        portfolio_ids: Sequence[int] | None = None,
     ) -> tuple[dict | None, list[str], float | None]:
         from services.portfolio_service import PortfolioService
 
         holdings = await PortfolioService.get_with_market(session, user_id=user_id)
+        if portfolio_ids is not None:
+            allowed_ids = {int(item) for item in portfolio_ids}
+            holdings = [item for item in holdings if item.id in allowed_ids]
         result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         account_balance = float(user.account_balance) if user and user.account_balance is not None else None
@@ -1559,6 +1563,44 @@ class MultiAgentService:
         return cls._normalize_arbiter_summary(raw, round_index=round_index, latest_opinions=opinions, scene=scene)
 
     @classmethod
+    def _select_debate_roles(
+        cls,
+        roles: Sequence[RoleBlueprint],
+        opinions: Sequence[MultiAgentRoleOpinion],
+        arbiter_summary: MultiAgentArbiterSummary,
+    ) -> list[RoleBlueprint]:
+        """后续轮只让冲突相关角色继续发言，并保留风控角色兜底。"""
+        if not roles:
+            return []
+
+        conflict_text = " ".join([
+            *arbiter_summary.strong_opposition,
+            *arbiter_summary.disagreements,
+            arbiter_summary.why_stop,
+            arbiter_summary.conclusion,
+        ])
+        selected_keys: set[str] = set()
+        opinion_by_role = {opinion.role_id: opinion for opinion in opinions}
+
+        for role in roles:
+            opinion = opinion_by_role.get(role.key)
+            if role.key in conflict_text or role.role_name in conflict_text:
+                selected_keys.add(role.key)
+            if opinion and opinion.stance in {"bearish", "mixed"}:
+                selected_keys.add(role.key)
+            if opinion and any(note and note in conflict_text for note in opinion.risk_notes[:2]):
+                selected_keys.add(role.key)
+
+        risk_role = next((role for role in roles if role.key in {"risk_arbiter", "risk_exposure"}), None)
+        if risk_role:
+            selected_keys.add(risk_role.key)
+
+        if not selected_keys:
+            return list(roles)
+
+        return [role for role in roles if role.key in selected_keys]
+
+    @classmethod
     def _build_opposing_points(
         cls,
         *,
@@ -1728,7 +1770,7 @@ class MultiAgentService:
 
         try:
             if request.use_portfolio_context:
-                portfolio_summary, holdings_preview, account_balance = await cls._build_portfolio_context(session, user_id)
+                portfolio_summary, holdings_preview, account_balance = await cls._build_portfolio_context(session, user_id, request.portfolio_ids)
             if request.scene == MultiAgentScene.ACCOUNT:
                 account_evidence_block = cls._account_evidence_block(portfolio_summary, holdings_preview, account_balance)
             elif request.scene == MultiAgentScene.GENERAL:
@@ -1758,13 +1800,20 @@ class MultiAgentService:
                     holdings_preview=holdings_preview,
                 )
             policy_event_context = PolicyEventContextBundle(prompt_block="", metadata=[])
-            initial_role_opinions = []
-            for role in roles:
+
+            async def generate_role_opinion(
+                role: RoleBlueprint,
+                *,
+                round_index: int,
+                previous_opinion: MultiAgentRoleOpinion | None = None,
+                opposing_points: Sequence[str] = (),
+                disagreement_summary: str = "",
+            ) -> tuple[MultiAgentRoleOpinion, bool]:
                 try:
                     opinion = await cls._generate_role_opinion_with_retries(
                         scene=request.scene,
                         role=role,
-                        round_index=1,
+                        round_index=round_index,
                         question=request.question,
                         context_summary=context_summary,
                         search_bundle=search_bundle,
@@ -1776,11 +1825,19 @@ class MultiAgentService:
                         portfolio_summary=portfolio_summary,
                         holdings_preview=holdings_preview,
                         account_balance=account_balance,
+                        previous_opinion=previous_opinion,
+                        opposing_points=opposing_points,
+                        disagreement_summary=disagreement_summary,
                     )
+                    return opinion, opinion.confidence == 0.0
                 except Exception as exc:
-                    had_role_failure = True
-                    opinion = cls._fallback_role_opinion(role=role, round_index=1, error=exc)
-                initial_role_opinions.append(opinion)
+                    return cls._fallback_role_opinion(role=role, round_index=round_index, error=exc), True
+
+            initial_results = await asyncio.gather(
+                *(generate_role_opinion(role, round_index=1) for role in roles)
+            )
+            initial_role_opinions = [opinion for opinion, _ in initial_results]
+            had_role_failure = had_role_failure or any(failed for _, failed in initial_results)
 
             debate_rounds: list[MultiAgentDebateRound] = []
             current_opinions = list(initial_role_opinions)
@@ -1798,32 +1855,21 @@ class MultiAgentService:
                 previous_arbiter = arbiter_summary
                 for round_index in range(2, request.max_debate_rounds + 1):
                     disagreement_summary = cls._build_disagreement_summary(current_opinions)
-                    round_opinions = []
-                    for role in roles:
-                        try:
-                            opinion = await cls._generate_role_opinion_with_retries(
-                                scene=request.scene,
-                                role=role,
+                    debate_roles = cls._select_debate_roles(roles, current_opinions, previous_arbiter)
+                    round_results = await asyncio.gather(
+                        *(
+                            generate_role_opinion(
+                                role,
                                 round_index=round_index,
-                                question=request.question,
-                                context_summary=context_summary,
-                                search_bundle=search_bundle,
-                                technical_context=technical_context,
-                                policy_event_context=policy_event_context,
-                                account_evidence_block=account_evidence_block,
-                                general_evidence_block=general_evidence_block,
-                                provider=provider_snapshot,
-                                portfolio_summary=portfolio_summary,
-                                holdings_preview=holdings_preview,
-                                account_balance=account_balance,
                                 previous_opinion=next((item for item in current_opinions if item.role_id == role.key), None),
                                 opposing_points=cls._build_opposing_points(role=role, opinions=current_opinions),
                                 disagreement_summary=disagreement_summary,
                             )
-                        except Exception as exc:
-                            had_role_failure = True
-                            opinion = cls._fallback_role_opinion(role=role, round_index=round_index, error=exc)
-                        round_opinions.append(opinion)
+                            for role in debate_roles
+                        )
+                    )
+                    round_opinions = [opinion for opinion, _ in round_results]
+                    had_role_failure = had_role_failure or any(failed for _, failed in round_results)
                     current_opinions = list(round_opinions)
                     arbiter_summary = await cls._generate_arbiter_summary(
                         scene=request.scene,
@@ -2012,6 +2058,81 @@ class MultiAgentService:
                 payload = {"raw": data}
             chat_transcript.append({"event": event_name, "payload": payload})
 
+        async def emit_parallel_role_opinions(
+            *,
+            round_index: int,
+            target: list[MultiAgentRoleOpinion],
+            role_subset: Sequence[RoleBlueprint] | None = None,
+            previous_opinions: Sequence[MultiAgentRoleOpinion] = (),
+            disagreement_summary: str = "",
+        ) -> AsyncIterator[str]:
+            queue: asyncio.Queue[tuple[str, str, Any]] = asyncio.Queue()
+            opinions_by_role: dict[str, MultiAgentRoleOpinion] = {}
+
+            async def run_role(role: RoleBlueprint) -> None:
+                output: list[MultiAgentRoleOpinion] = []
+                message_id = f"role-{round_index}-{role.key}"
+                try:
+                    async for event in cls._stream_role_opinion_events(
+                        scene=request.scene,
+                        role=role,
+                        round_index=round_index,
+                        question=request.question,
+                        context_summary=context_summary,
+                        search_bundle=search_bundle,
+                        technical_context=technical_context,
+                        policy_event_context=policy_event_context,
+                        account_evidence_block=account_evidence_block,
+                        general_evidence_block=general_evidence_block,
+                        provider=provider_snapshot,
+                        previous_opinion=next((item for item in previous_opinions if item.role_id == role.key), None),
+                        opposing_points=cls._build_opposing_points(role=role, opinions=previous_opinions) if previous_opinions else (),
+                        disagreement_summary=disagreement_summary,
+                        output=output,
+                        portfolio_summary=portfolio_summary,
+                        holdings_preview=holdings_preview,
+                        account_balance=account_balance,
+                    ):
+                        await queue.put(("event", role.key, event))
+                    opinion = output[0] if output else cls._fallback_role_opinion(
+                        role=role,
+                        round_index=round_index,
+                        error=RuntimeError("角色未返回观点"),
+                    )
+                except Exception as exc:
+                    opinion = cls._fallback_role_opinion(role=role, round_index=round_index, error=exc)
+                    await queue.put((
+                        "event",
+                        role.key,
+                        cls._sse_event("role_done", {"message_id": message_id, "opinion": opinion.model_dump(mode="json")}),
+                    ))
+                await queue.put(("done", role.key, opinion))
+
+            active_roles = list(role_subset or roles)
+            tasks = [asyncio.create_task(run_role(role)) for role in active_roles]
+            completed = 0
+            try:
+                while completed < len(tasks):
+                    kind, role_key, payload = await queue.get()
+                    if kind == "event":
+                        persist_sse_text(payload)
+                        yield payload
+                    elif kind == "done":
+                        opinions_by_role[role_key] = payload
+                        completed += 1
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            target.extend(
+                opinions_by_role[role.key]
+                for role in active_roles
+                if role.key in opinions_by_role
+            )
+
         yield emit(
             "meta",
             {
@@ -2027,7 +2148,7 @@ class MultiAgentService:
         try:
             yield emit("status", {"message": "正在汇总持仓和账户上下文"})
             if request.use_portfolio_context:
-                portfolio_summary, holdings_preview, account_balance = await cls._build_portfolio_context(session, user_id)
+                portfolio_summary, holdings_preview, account_balance = await cls._build_portfolio_context(session, user_id, request.portfolio_ids)
             if request.scene == MultiAgentScene.ACCOUNT:
                 account_evidence_block = cls._account_evidence_block(portfolio_summary, holdings_preview, account_balance)
             elif request.scene == MultiAgentScene.GENERAL:
@@ -2067,35 +2188,12 @@ class MultiAgentService:
                 "round_start",
                 {"round_index": 1, "title": "第 1 轮初始并行分析", "role_count": len(roles)},
             )
-            for role in roles:
-                output: list[MultiAgentRoleOpinion] = []
-                async for event in cls._stream_role_opinion_events(
-                    scene=request.scene,
-                    role=role,
-                    round_index=1,
-                    question=request.question,
-                    context_summary=context_summary,
-                    search_bundle=search_bundle,
-                    technical_context=technical_context,
-                    policy_event_context=policy_event_context,
-                    account_evidence_block=account_evidence_block,
-                    general_evidence_block=general_evidence_block,
-                    provider=provider_snapshot,
-                    output=output,
-                    portfolio_summary=portfolio_summary,
-                    holdings_preview=holdings_preview,
-                    account_balance=account_balance,
-                ):
-                    persist_sse_text(event)
-                    yield event
-                opinion = output[0] if output else cls._fallback_role_opinion(
-                    role=role,
-                    round_index=1,
-                    error=RuntimeError("角色未返回观点"),
-                )
-                if opinion.confidence == 0.0:
-                    had_role_failure = True
-                initial_role_opinions.append(opinion)
+            async for event in emit_parallel_role_opinions(
+                round_index=1,
+                target=initial_role_opinions,
+            ):
+                yield event
+            had_role_failure = had_role_failure or any(opinion.confidence == 0.0 for opinion in initial_role_opinions)
 
             current_opinions = list(initial_role_opinions)
             yield emit("status", {"message": "裁决角色正在判断首轮分歧"})
@@ -2114,48 +2212,27 @@ class MultiAgentService:
                 previous_arbiter = arbiter_summary
                 for round_index in range(2, request.max_debate_rounds + 1):
                     disagreement_summary = cls._build_disagreement_summary(current_opinions)
+                    debate_roles = cls._select_debate_roles(roles, current_opinions, previous_arbiter)
                     yield emit(
                         "round_start",
                         {
                             "round_index": round_index,
                             "title": f"第 {round_index} 轮反驳与回应",
                             "summary": disagreement_summary,
-                            "role_count": len(roles),
+                            "role_count": len(debate_roles),
+                            "roles": [role.role_name for role in debate_roles],
                         },
                     )
                     round_opinions: list[MultiAgentRoleOpinion] = []
-                    for role in roles:
-                        output: list[MultiAgentRoleOpinion] = []
-                        async for event in cls._stream_role_opinion_events(
-                            scene=request.scene,
-                            role=role,
-                            round_index=round_index,
-                            question=request.question,
-                            context_summary=context_summary,
-                            search_bundle=search_bundle,
-                            technical_context=technical_context,
-                            policy_event_context=policy_event_context,
-                            account_evidence_block=account_evidence_block,
-                            general_evidence_block=general_evidence_block,
-                            provider=provider_snapshot,
-                            previous_opinion=next((item for item in current_opinions if item.role_id == role.key), None),
-                            opposing_points=cls._build_opposing_points(role=role, opinions=current_opinions),
-                            disagreement_summary=disagreement_summary,
-                            output=output,
-                            portfolio_summary=portfolio_summary,
-                            holdings_preview=holdings_preview,
-                            account_balance=account_balance,
-                        ):
-                            persist_sse_text(event)
-                            yield event
-                        opinion = output[0] if output else cls._fallback_role_opinion(
-                            role=role,
-                            round_index=round_index,
-                            error=RuntimeError("角色未返回观点"),
-                        )
-                        if opinion.confidence == 0.0:
-                            had_role_failure = True
-                        round_opinions.append(opinion)
+                    async for event in emit_parallel_role_opinions(
+                        round_index=round_index,
+                        target=round_opinions,
+                        role_subset=debate_roles,
+                        previous_opinions=current_opinions,
+                        disagreement_summary=disagreement_summary,
+                    ):
+                        yield event
+                    had_role_failure = had_role_failure or any(opinion.confidence == 0.0 for opinion in round_opinions)
 
                     current_opinions = list(round_opinions)
                     yield emit("status", {"message": f"裁决角色正在判断第 {round_index} 轮分歧"})

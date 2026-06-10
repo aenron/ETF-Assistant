@@ -34,8 +34,11 @@ async def run_strategy(
 
 
 @router.get("/latest", response_model=StrategyRunResponse | None)
-async def get_latest_strategy_run(current_user: User = Depends(get_current_user)):
-    return StrategyService.get_last_run(current_user.id)
+async def get_latest_strategy_run(
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return await StrategyService.get_last_run(db, current_user.id)
 
 
 @router.get("/schedule", response_model=StrategyScheduleResponse)

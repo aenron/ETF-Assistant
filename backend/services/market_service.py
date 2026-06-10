@@ -24,6 +24,7 @@ os.environ.setdefault('HTTP_USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x
 from models import EtfInfo, EtfProfile, MarketDaily
 from schemas.market import MarketQuote, KLineItem, EtfSearchResult, TechnicalIndicators
 from config import settings
+from database import async_session_maker
 from services.redis_service import RedisService
 from utils.timezone import now_in_shanghai
 
@@ -39,8 +40,10 @@ class MarketService:
     CACHE_EXPIRE_SECONDS = 604800  # 7天缓存 (7 * 24 * 60 * 60)
     KLINE_CACHE_EXPIRE_SECONDS = 7200  # 2小时缓存
     PROFILE_CACHE_EXPIRE_SECONDS = 86400  # ETF资料1天缓存，后台定时刷新
+    KLINE_CACHE_CANDIDATE_DAYS = (60, 90, 120, 140, 180, 250)
     _THS_INDUSTRY_NAME_MAP: Dict[str, str] | None = None
     _TUSHARE_PRO = None
+    _KLINE_WARMING_KEYS: set[str] = set()
 
     @staticmethod
     def _with_refresh_time(
@@ -101,6 +104,87 @@ class MarketService:
             payload,
             expire=cls.KLINE_CACHE_EXPIRE_SECONDS,
         )
+
+    @classmethod
+    async def get_kline_from_longer_cache(cls, code: str, days: int) -> Optional[List[KLineItem]]:
+        """从更长周期 Redis 缓存裁剪历史 K 线，减少精确天数 miss 后的外部请求。"""
+        if not settings.redis_enabled:
+            return None
+
+        candidate_days = sorted({*cls.KLINE_CACHE_CANDIDATE_DAYS, days * 2})
+        for candidate in candidate_days:
+            if candidate <= days:
+                continue
+            cached = await cls.get_kline_from_cache(code, candidate)
+            if cached and len(cached) >= days:
+                result = cached[-days:]
+                await cls.cache_kline(code, days, result)
+                print(f"[MarketService] 使用较长K线缓存: {code}, {candidate}->{days}")
+                return result
+        return None
+
+    @classmethod
+    async def get_kline_from_db(cls, code: str, days: int) -> Optional[List[KLineItem]]:
+        """从 market_daily 读取历史 K 线，作为手动策略执行的持久缓存。"""
+        try:
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(MarketDaily)
+                    .where(MarketDaily.etf_code == code)
+                    .order_by(MarketDaily.trade_date.desc())
+                    .limit(days)
+                )
+                rows = list(result.scalars().all())
+        except Exception as e:
+            print(f"[MarketService] 数据库K线读取失败: {code}, {e}")
+            return None
+
+        min_rows = min(days, 30)
+        if len(rows) < min_rows:
+            print(f"[MarketService] 数据库K线缓存不足: {code}, {len(rows)}/{min_rows} 条")
+            return None
+
+        rows.reverse()
+        items = [
+            KLineItem(
+                trade_date=row.trade_date,
+                open_price=float(row.open_price) if row.open_price is not None else 0.0,
+                close_price=float(row.close_price) if row.close_price is not None else 0.0,
+                high_price=float(row.high_price) if row.high_price is not None else 0.0,
+                low_price=float(row.low_price) if row.low_price is not None else 0.0,
+                volume=int(row.volume or 0),
+                change_pct=float(row.change_pct) if row.change_pct is not None else 0.0,
+            )
+            for row in rows
+        ]
+        await cls.cache_kline(code, days, items)
+        print(f"[MarketService] 使用数据库K线缓存: {code}, {len(items)} 条")
+        return items
+
+    @classmethod
+    async def _cache_and_store_kline(cls, code: str, days: int, data: List[KLineItem]) -> None:
+        """外部数据源成功后同步写入短期 Redis 和持久行情表。"""
+        await cls.cache_kline(code, days, data)
+        try:
+            async with async_session_maker() as session:
+                await cls.save_market_daily(session, code, data)
+                await session.commit()
+        except Exception as e:
+            print(f"[MarketService] 数据库K线保存失败: {code}, {e}")
+
+    @classmethod
+    async def warm_history_kline_cache(cls, code: str, days: int = 60) -> None:
+        """后台预热 K 线缓存；同一标的同一周期去重，失败只记录日志。"""
+        key = cls._kline_cache_key(code, days)
+        if key in cls._KLINE_WARMING_KEYS:
+            return
+        cls._KLINE_WARMING_KEYS.add(key)
+        try:
+            await cls.get_history_kline(code, days=days, prefer_cache=False)
+        except Exception as e:
+            print(f"[MarketService] 后台预热历史K线失败: {code}, {e}")
+        finally:
+            cls._KLINE_WARMING_KEYS.discard(key)
 
     @classmethod
     async def get_etf_profile_from_cache(cls, code: str, year: str) -> Optional[Dict[str, Any]]:
@@ -183,6 +267,16 @@ class MarketService:
         
         return result
     
+    @classmethod
+    async def get_cached_quotes_for_codes(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        """只读取行情缓存，不触发外部数据源请求。用于持仓列表快速返回。"""
+        result: Dict[str, MarketQuote] = {}
+        for code in codes:
+            cached = await cls.get_quote_from_cache(code)
+            if cached:
+                result[code] = cached
+        return result
+
     @classmethod
     async def refresh_quote(cls, code: str) -> Optional[MarketQuote]:
         """强制刷新单个ETF行情（跳过缓存）"""
@@ -1112,28 +1206,42 @@ class MarketService:
         return []
     
     @classmethod
-    async def get_history_kline(cls, code: str, days: int = 60) -> List[KLineItem]:
+    async def get_history_kline(cls, code: str, days: int = 60, prefer_cache: bool = True) -> List[KLineItem]:
         """获取历史K线数据（ETF/股票/指数板块/场外基金多源降级）"""
+        if prefer_cache:
+            cached = await cls.get_kline_from_cache(code, days)
+            if cached:
+                return cached
+
+            cached = await cls.get_kline_from_longer_cache(code, days)
+            if cached:
+                return cached
+
+            cached = await cls.get_kline_from_db(code, days)
+            if cached:
+                return cached
+
         print(f"[MarketService] 开始获取历史K线: {code}, 天数: {days}")
 
         # 同花顺 88xxxx 行业代码，必须优先于东方财富板块代码体系。
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_ths_industry, code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] 同花顺行业指数K线异常: {e}")
 
-        cached = await cls.get_kline_from_cache(code, days)
-        if cached:
-            return cached
+        if not prefer_cache:
+            cached = await cls.get_kline_from_cache(code, days)
+            if cached:
+                return cached
 
         # QMT Agent：配置后优先使用本地 QMT/xtdata 的真实 K 线。
         try:
             result = await cls._fetch_history_kline_qmt_agent(code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] QMT Agent历史K线异常: {e}")
@@ -1142,7 +1250,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare, code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] akshare获取K线异常: {e}")
@@ -1151,7 +1259,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_stock, code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] akshare股票K线异常: {e}")
@@ -1160,7 +1268,7 @@ class MarketService:
         try:
             result = await cls._fetch_history_kline_eastmoney(code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] 东方财富API获取K线异常: {e}")
@@ -1170,7 +1278,7 @@ class MarketService:
             try:
                 result = await cls._fetch_history_kline_tushare(code, days)
                 if result:
-                    await cls.cache_kline(code, days, result)
+                    await cls._cache_and_store_kline(code, days, result)
                     return result
             except Exception as e:
                 print(f"[MarketService] Tushare历史K线异常: {e}")
@@ -1179,7 +1287,7 @@ class MarketService:
         try:
             result = await cls._fetch_history_kline_sina(code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] 新浪API获取K线异常: {e}")
@@ -1188,7 +1296,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
             if result:
-                await cls.cache_kline(code, days, result)
+                await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
             print(f"[MarketService] akshare场外基金净值异常: {e}")

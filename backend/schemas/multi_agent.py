@@ -21,6 +21,7 @@ class MultiAgentRunCreate(ShanghaiBaseModel):
     scene: MultiAgentScene
     question: Optional[str] = None
     use_portfolio_context: bool = True
+    portfolio_ids: Optional[list[int]] = None
     max_debate_rounds: int = Field(default=3, ge=1, le=8)
     collapse_debate_by_default: bool = True
 

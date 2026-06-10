@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart, GitBranch, SlidersHorizontal, Activity } from 'lucide-react'
 import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
@@ -34,8 +34,17 @@ const AdminUsersPage = lazy(() =>
 const AdminSchedulerPage = lazy(() =>
   import('@/pages/AdminSchedulerPage').then((module) => ({ default: module.AdminSchedulerPage })),
 )
+const AdminDcaIndexMappingPage = lazy(() =>
+  import('@/pages/AdminDcaIndexMappingPage').then((module) => ({ default: module.AdminDcaIndexMappingPage })),
+)
+const AdminDcaSignalConfigPage = lazy(() =>
+  import('@/pages/AdminDcaSignalConfigPage').then((module) => ({ default: module.AdminDcaSignalConfigPage })),
+)
 const MultiAgentWorkbenchPage = lazy(() =>
   import('@/pages/MultiAgentWorkbenchPage').then((module) => ({ default: module.MultiAgentWorkbenchPage })),
+)
+const MacroClockPage = lazy(() =>
+  import('@/pages/MacroClockPage').then((module) => ({ default: module.MacroClockPage })),
 )
 const LoginPage = lazy(() => import('@/pages/LoginPage'))
 
@@ -52,6 +61,7 @@ function AppContent() {
     { to: '/', label: '仪表盘', icon: LayoutDashboard },
     { to: '/portfolio', label: '持仓管理', icon: Briefcase },
     { to: '/strategies', label: '交易策略', icon: LineChart },
+    { to: '/macro', label: '宏观时钟', icon: Activity },
     { to: '/advice', label: '决策历史', icon: Lightbulb },
     { to: '/multi-agent', label: '多智能体', icon: Bot },
   ]
@@ -149,6 +159,14 @@ function AppContent() {
                             <CalendarClock className="h-4 w-4" />
                             定时任务
                           </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => navigate('/admin/dca-index-mappings')}>
+                            <GitBranch className="h-4 w-4" />
+                            宽基估值映射
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => navigate('/admin/dca-signal-config')}>
+                            <SlidersHorizontal className="h-4 w-4" />
+                            红绿灯参数
+                          </DropdownMenuItem>
                         </>
                       )}
                       <DropdownMenuSeparator />
@@ -171,11 +189,14 @@ function AppContent() {
             <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
             <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
             <Route path="/strategies" element={<PrivateRoute><StrategyPage /></PrivateRoute>} />
+            <Route path="/macro" element={<PrivateRoute><MacroClockPage /></PrivateRoute>} />
             <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />
             <Route path="/multi-agent" element={<PrivateRoute><MultiAgentWorkbenchPage /></PrivateRoute>} />
             <Route path="/notifications" element={<PrivateRoute><NotificationSettingsPage /></PrivateRoute>} />
             <Route path="/admin/users" element={<PrivateRoute><AdminUsersPage /></PrivateRoute>} />
             <Route path="/admin/scheduler" element={<PrivateRoute><AdminSchedulerPage /></PrivateRoute>} />
+            <Route path="/admin/dca-index-mappings" element={<PrivateRoute><AdminDcaIndexMappingPage /></PrivateRoute>} />
+            <Route path="/admin/dca-signal-config" element={<PrivateRoute><AdminDcaSignalConfigPage /></PrivateRoute>} />
           </Routes>
         </Suspense>
       </main>

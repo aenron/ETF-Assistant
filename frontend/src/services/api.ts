@@ -49,6 +49,32 @@ export interface PortfolioUpdate {
   dca_track_override?: string
 }
 
+
+
+export interface PortfolioFactorScore {
+  enabled: boolean
+  total_score: number
+  macro_score: number
+  technical_score: number
+  sentiment_score: number
+  prosperity_score: number
+  rating: string
+  action: string
+  reason: string
+  factors: string[]
+}
+
+export interface PortfolioCrossBorderRisk {
+  is_cross_border: boolean
+  risk_level: string
+  risk_tags: string[]
+  max_position_hint: number
+  budget_multiplier_adjustment: number
+  action: string
+  reason: string
+  warnings: string[]
+}
+
 export interface PortfolioWithMarket {
   id: number
   etf_code: string
@@ -86,6 +112,12 @@ export interface PortfolioWithMarket {
   dca_trend_distance_pct: number | null
   dca_trend_atr14: number | null
   dca_trend_atr_band_pct: number | null
+  dca_trend_ma60: number | null
+  dca_trend_ma60_slope_pct: number | null
+  dca_trend_ma120: number | null
+  dca_trend_ma120_slope_pct: number | null
+  dca_trend_volume_ratio: number | null
+  dca_trend_atr_multiplier: number | null
   dca_decision_steps: string[] | null
   dca_candidate_light: string | null
   dca_candidate_confirm_count: number | null
@@ -94,6 +126,8 @@ export interface PortfolioWithMarket {
   dca_deep_green_trigger_price: number | null
   dca_budget_multiplier: number | null
   dca_budget_label: string | null
+  cross_border_risk: PortfolioCrossBorderRisk | null
+  factor_score: PortfolioFactorScore | null
 }
 
 
@@ -115,6 +149,46 @@ export interface PortfolioDcaSignalHistoryItem {
   scanned_at: string
 }
 
+export interface PortfolioExposureItem {
+  name: string
+  market_value: number
+  ratio: number
+}
+
+export interface PortfolioExposureAlert {
+  level: string
+  message: string
+}
+
+export interface PortfolioExposureAnalysis {
+  asset_bucket: PortfolioExposureItem[]
+  region: PortfolioExposureItem[]
+  style: PortfolioExposureItem[]
+  risk_tags: PortfolioExposureItem[]
+  alerts: PortfolioExposureAlert[]
+}
+
+
+export interface PortfolioRebalanceItem {
+  name: string
+  current_value: number
+  current_ratio: number
+  target_ratio: number
+  deviation_ratio: number
+  suggested_amount: number
+  action: string
+  execution_status: string
+  execution_label: string
+  reason: string
+}
+
+export interface PortfolioRebalancePlan {
+  total_assets: number
+  single_adjustment_limit: number
+  items: PortfolioRebalanceItem[]
+  notes: string[]
+}
+
 export interface PortfolioSummary {
   total_market_value: number
   total_cost: number
@@ -123,6 +197,8 @@ export interface PortfolioSummary {
   today_pnl: number | null
   today_pnl_pct: number | null
   category_distribution: Record<string, number>
+  exposure_analysis?: PortfolioExposureAnalysis | null
+  rebalance_plan?: PortfolioRebalancePlan | null
 }
 
 export interface MarketQuote {
@@ -304,6 +380,7 @@ export interface MultiAgentRunCreate {
   scene: MultiAgentScene
   question?: string | null
   use_portfolio_context?: boolean
+  portfolio_ids?: number[]
   max_debate_rounds?: number
   collapse_debate_by_default?: boolean
 }
@@ -529,6 +606,132 @@ export interface StrategyScheduleResponse {
   next_run_time: string | null
 }
 
+
+export interface DcaIndexMapping {
+  id: number
+  etf_code: string | null
+  keyword: string | null
+  index_symbol: string
+  index_name: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface DcaIndexMappingCreate {
+  etf_code?: string | null
+  keyword?: string | null
+  index_symbol: string
+  index_name?: string | null
+  enabled?: boolean
+}
+
+export interface DcaIndexMappingUpdate {
+  etf_code?: string | null
+  keyword?: string | null
+  index_symbol?: string
+  index_name?: string | null
+  enabled?: boolean
+}
+
+
+export interface DcaSignalConfig {
+  id: number
+  valuation_deep_green_percentile: number
+  valuation_green_percentile: number
+  valuation_red_percentile: number
+  valuation_min_sample_size: number
+  trend_short_ma_days: number
+  trend_medium_ma_days: number
+  trend_long_ma_days: number
+  trend_history_days: number
+  trend_slope_shift_days: number
+  trend_volume_ma_days: number
+  trend_volume_confirm_ratio: number
+  trend_volume_expand_ratio: number
+  trend_atr_days: number
+  trend_atr_base_multiplier: number
+  trend_atr_mid_multiplier: number
+  trend_atr_high_multiplier: number
+  trend_atr_mid_volatility_pct: number
+  trend_atr_high_volatility_pct: number
+  light_confirm_count: number
+  updated_at: string
+}
+
+export type DcaSignalConfigUpdate = Partial<Omit<DcaSignalConfig, 'id' | 'updated_at'>>
+
+
+export type MacroPhase = 'recovery' | 'overheating' | 'stagflation' | 'recession'
+export type MacroTrend = 'up' | 'down' | 'flat' | 'unclear'
+export type MacroRegion = 'cn' | 'us' | 'global'
+export type MacroSourceType = 'auto' | 'manual'
+
+export interface MacroCycleState {
+  id: number
+  region: MacroRegion
+  cycle_phase: MacroPhase
+  growth_score: number
+  inflation_score: number
+  growth_trend: MacroTrend
+  inflation_trend: MacroTrend
+  confidence: number
+  summary: string | null
+  dca_impact: string | null
+  source_note: string | null
+  source_type: MacroSourceType
+  override_until: string | null
+  observed_at: string
+  created_at: string
+  updated_at: string
+}
+
+export interface MacroCycleStateCreate {
+  region: MacroRegion
+  cycle_phase: MacroPhase
+  growth_score: number
+  inflation_score: number
+  growth_trend: MacroTrend
+  inflation_trend: MacroTrend
+  confidence: number
+  summary?: string | null
+  dca_impact?: string | null
+  source_note?: string | null
+  source_type?: MacroSourceType
+  override_until?: string | null
+  observed_at?: string | null
+}
+
+
+export interface MacroIndicator {
+  id: number
+  region: MacroRegion
+  indicator_code: string
+  indicator_name: string
+  category: 'growth' | 'inflation' | string
+  period: string
+  value: number
+  previous_value: number | null
+  trend: MacroTrend
+  unit: string | null
+  source: string
+  source_note: string | null
+  source_function: string | null
+  source_column: string | null
+  raw_period: string | null
+  fetched_at: string
+  created_at: string
+  updated_at: string
+}
+
+export interface MacroRefreshResponse {
+  success: boolean
+  message: string
+  indicators_saved: number
+  state: MacroCycleState | null
+  errors: string[]
+}
+
 // API 服务
 export const portfolioApi = {
   getList: () => api.get<PortfolioWithMarket[]>('/portfolio'),
@@ -599,6 +802,13 @@ export const strategyApi = {
   }),
 }
 
+
+export const macroApi = {
+  getCurrent: (region: MacroRegion = 'cn') => api.get<MacroCycleState>('/macro/current', { params: { region } }),
+  getHistory: (region?: MacroRegion, limit = 12) => api.get<MacroCycleState[]>('/macro/history', { params: { region, limit } }),
+  getIndicators: (region?: MacroRegion, limit = 20) => api.get<MacroIndicator[]>('/macro/indicators', { params: { region, limit } }),
+}
+
 export const notificationConfigApi = {
   list: () => api.get<NotificationConfigListResponse>('/notification-configs'),
   updateBark: (data: BarkNotificationConfigUpdate) => api.put<NotificationConfigResponse>('/notification-configs/bark', data),
@@ -610,6 +820,14 @@ export const notificationConfigApi = {
 export const adminApi = {
   listUsers: () => api.get<AdminUser[]>('/admin/users'),
   updateUser: (userId: number, data: AdminUserUpdate) => api.patch<AdminUser>(`/admin/users/${userId}`, data),
+  listDcaIndexMappings: () => api.get<DcaIndexMapping[]>('/admin/dca/index-mappings'),
+  createDcaIndexMapping: (data: DcaIndexMappingCreate) => api.post<DcaIndexMapping>('/admin/dca/index-mappings', data),
+  updateDcaIndexMapping: (id: number, data: DcaIndexMappingUpdate) => api.put<DcaIndexMapping>(`/admin/dca/index-mappings/${id}`, data),
+  deleteDcaIndexMapping: (id: number) => api.delete(`/admin/dca/index-mappings/${id}`),
+  getDcaSignalConfig: () => api.get<DcaSignalConfig>('/admin/dca/signal-config'),
+  updateDcaSignalConfig: (data: DcaSignalConfigUpdate) => api.put<DcaSignalConfig>('/admin/dca/signal-config', data),
+  createMacroState: (data: MacroCycleStateCreate) => api.post<MacroCycleState>('/admin/macro/state', data),
+  refreshMacroData: (region?: MacroRegion) => api.post<MacroRefreshResponse>('/admin/macro/refresh', null, { params: { region } }),
 }
 
 export const schedulerApi = {

@@ -3,6 +3,8 @@ import { Bot, CheckCircle2, Clock, ChevronDown, ChevronUp, Pencil, RefreshCw, Sp
 
 import {
   multiAgentApi,
+  portfolioApi,
+  type PortfolioWithMarket,
   type MultiAgentContextSummary,
   type MultiAgentArbiterSummary,
   type MultiAgentDebateRound,
@@ -45,7 +47,7 @@ const convergenceLabelMap: Record<MultiAgentDebateRound['convergence_state'], st
 
 type DebateChatMessage = {
   id: string
-  kind: 'status' | 'round' | 'role' | 'arbiter' | 'final' | 'error'
+  kind: 'status' | 'round' | 'role' | 'arbiter' | 'final' | 'error' | 'user'
   roleId?: string
   roundIndex?: number
   speaker: string
@@ -84,6 +86,7 @@ const roleAvatarMap: Record<string, { label: string; className: string }> = {
   evidence: { label: '证', className: 'bg-teal-100 text-teal-700 ring-teal-200' },
   arbiter: { label: '裁', className: 'bg-blue-100 text-blue-700 ring-blue-200' },
   final: { label: '结', className: 'bg-slate-900 text-white ring-slate-300' },
+  user: { label: '我', className: 'bg-primary text-primary-foreground ring-primary/30' },
   system: { label: '系', className: 'bg-slate-100 text-slate-600 ring-slate-200' },
 }
 
@@ -113,6 +116,7 @@ function summarizeToolResult(result: unknown) {
 
 function avatarForMessage(message: DebateChatMessage) {
   if (message.roleId && roleAvatarMap[message.roleId]) return roleAvatarMap[message.roleId]
+  if (message.kind === 'user') return roleAvatarMap.user
   if (message.kind === 'arbiter') return roleAvatarMap.arbiter
   if (message.kind === 'final') return roleAvatarMap.final
   if (message.kind === 'status' || message.kind === 'round' || message.kind === 'error') return roleAvatarMap.system
@@ -418,8 +422,11 @@ function RunHistoryItem({
 
 export function MultiAgentWorkbenchPage() {
   const [scene, setScene] = useState<MultiAgentScene>('etf')
-  const [question, setQuestion] = useState('')
+  const [messageInput, setMessageInput] = useState('')
   const [usePortfolioContext, setUsePortfolioContext] = useState(true)
+  const [portfolios, setPortfolios] = useState<PortfolioWithMarket[]>([])
+  const [selectedPortfolioIds, setSelectedPortfolioIds] = useState<number[]>([])
+  const [loadingPortfolios, setLoadingPortfolios] = useState(false)
   const [maxDebateRounds, setMaxDebateRounds] = useState(3)
   const [collapseDebateByDefault, setCollapseDebateByDefault] = useState(true)
   const [runs, setRuns] = useState<MultiAgentRunResponse[]>([])
@@ -451,6 +458,24 @@ export function MultiAgentWorkbenchPage() {
     }
   }, [currentRun?.run_id, running])
 
+  const loadPortfolios = async () => {
+    setLoadingPortfolios(true)
+    try {
+      const res = await portfolioApi.getList()
+      setPortfolios(res.data)
+      setSelectedPortfolioIds((prev) => {
+        const availableIds = res.data.map((item) => item.id)
+        if (prev.length === 0) return availableIds
+        return prev.filter((id) => availableIds.includes(id))
+      })
+    } catch (error: any) {
+      console.error('Failed to load portfolios:', error)
+      setMessage(error.response?.data?.detail || '加载持仓失败')
+    } finally {
+      setLoadingPortfolios(false)
+    }
+  }
+
   const loadRuns = async () => {
     setLoadingHistory(true)
     setMessage(null)
@@ -479,14 +504,43 @@ export function MultiAgentWorkbenchPage() {
   const handleRun = async () => {
     setRunning(true)
     setMessage(null)
-    setCurrentRun(null)
-    setLiveContext(null)
-    setChatMessages([])
+    const continuingRun = currentRun
+    if (!continuingRun) {
+      setCurrentRun(null)
+      setLiveContext(null)
+      setChatMessages([])
+    }
+    const firstMessage = messageInput.trim()
+    if (!firstMessage) {
+      setMessage('请输入要讨论的问题')
+      setRunning(false)
+      return
+    }
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `user-${Date.now()}`,
+        kind: 'user',
+        roleId: 'user',
+        speaker: '用户',
+        content: firstMessage,
+      },
+    ])
     try {
+      const continuationPrompt = continuingRun
+        ? [
+          `这是基于历史研判 #${continuingRun.run_id} 的继续发言。`,
+          `上一轮最终结论：${continuingRun.final_conclusion?.conclusion || '无'}`,
+          continuingRun.arbiter_summary?.disagreements?.length ? `上一轮主要分歧：${continuingRun.arbiter_summary.disagreements.join('；')}` : '',
+          `用户继续发言：${firstMessage}`,
+          '请其余智能体基于上述历史结论继续思考，不要当作完全无关的新问题。',
+        ].filter(Boolean).join('\n')
+        : firstMessage
       const response = await multiAgentApi.streamRun({
         scene,
-        question: question.trim() || undefined,
+        question: continuationPrompt,
         use_portfolio_context: usePortfolioContext,
+        portfolio_ids: usePortfolioContext ? selectedPortfolioIds : [],
         max_debate_rounds: maxDebateRounds,
         collapse_debate_by_default: collapseDebateByDefault,
       })
@@ -533,7 +587,10 @@ export function MultiAgentWorkbenchPage() {
                 roundIndex: payload.round_index,
                 speaker: '系统',
                 content: payload.title || `第 ${payload.round_index} 轮`,
-                detail: payload.summary,
+                detail: [
+                  payload.summary,
+                  Array.isArray(payload.roles) && payload.roles.length ? `本轮角色：${payload.roles.join('、')}` : '',
+                ].filter(Boolean).join('\n'),
               },
             ])
           }
@@ -615,6 +672,7 @@ export function MultiAgentWorkbenchPage() {
             setChatMessages(buildMessagesFromRun(run))
             setShowTranscript(!run.collapse_debate_by_default)
             setRuns((prev) => [run, ...prev.filter((item) => item.run_id !== run.run_id)])
+            setMessageInput('')
           }
         }
       }
@@ -677,6 +735,15 @@ export function MultiAgentWorkbenchPage() {
     }
   }
 
+  const handleNewDebate = () => {
+    setCurrentRun(null)
+    setLiveContext(null)
+    setChatMessages([])
+    setShowTranscript(false)
+    setMessageInput('')
+    setMessage(null)
+  }
+
   const handleDeleteRun = async () => {
     if (!deleteTarget || deleting) return
     const targetId = deleteTarget.run_id
@@ -701,9 +768,18 @@ export function MultiAgentWorkbenchPage() {
 
   useEffect(() => {
     loadRuns()
+    loadPortfolios()
   }, [])
 
   const activeRunId = currentRun?.run_id ?? runs[0]?.run_id ?? null
+  const allPortfolioIds = portfolios.map((item) => item.id)
+  const selectedPortfolioCount = selectedPortfolioIds.length
+  const allPortfoliosSelected = portfolios.length > 0 && selectedPortfolioCount === portfolios.length
+  const togglePortfolio = (id: number) => {
+    setSelectedPortfolioIds((prev) => (
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    ))
+  }
 
   return (
     <div className="space-y-6">
@@ -722,9 +798,9 @@ export function MultiAgentWorkbenchPage() {
             <RefreshCw className={`mr-2 h-4 w-4 ${loadingHistory ? 'animate-spin' : ''}`} />
             刷新历史
           </Button>
-          <Button onClick={handleRun} disabled={running}>
+          <Button onClick={handleNewDebate} disabled={running}>
             <Sparkles className="mr-2 h-4 w-4" />
-            {running ? '研判中...' : '开始研判'}
+            新建辩论
           </Button>
         </div>
       </div>
@@ -757,15 +833,70 @@ export function MultiAgentWorkbenchPage() {
               </div>
             </TabsContent>
           </Tabs>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">问题</label>
-            <textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder="输入 ETF / 账户 / 通用问题。留空时将主要围绕当前持仓和市场上下文进行研判。"
-              className="min-h-28 w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary"
-            />
-          </div>
+          {usePortfolioContext && (
+            <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium">引用持仓</div>
+                  <div className="text-xs text-muted-foreground">
+                    {loadingPortfolios
+                      ? '持仓加载中...'
+                      : portfolios.length > 0
+                        ? `已选择 ${selectedPortfolioCount} / ${portfolios.length} 个持仓`
+                        : '当前暂无可引用持仓'}
+                  </div>
+                </div>
+                {portfolios.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setSelectedPortfolioIds(allPortfolioIds)}
+                      disabled={allPortfoliosSelected}
+                    >
+                      全选
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setSelectedPortfolioIds([])}
+                      disabled={selectedPortfolioCount === 0}
+                    >
+                      清空
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {portfolios.length > 0 && (
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {portfolios.map((portfolio) => {
+                    const checked = selectedPortfolioIds.includes(portfolio.id)
+                    return (
+                      <label
+                        key={portfolio.id}
+                        className={`flex cursor-pointer items-start gap-2 rounded-lg border bg-background px-3 py-2 text-sm transition-colors ${checked ? 'border-primary/50 ring-1 ring-primary/20' : 'hover:border-muted-foreground/40'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => togglePortfolio(portfolio.id)}
+                          className="mt-1 h-4 w-4 rounded border-muted-foreground/40 accent-primary"
+                        />
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">{portfolio.etf_code} {portfolio.etf_name || ''}</span>
+                          <span className="block text-xs text-muted-foreground">
+                            市值 {portfolio.market_value != null ? portfolio.market_value.toFixed(2) : '-'} · 盈亏 {portfolio.pnl_pct != null ? `${portfolio.pnl_pct >= 0 ? '+' : ''}${portfolio.pnl_pct.toFixed(2)}%` : '-'}
+                          </span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">
               <Clock className="h-3.5 w-3.5" />
@@ -824,6 +955,25 @@ export function MultiAgentWorkbenchPage() {
           <ContextSummary summary={currentContext} run={currentRun} />
 
           <DebateChat messages={chatMessages} running={running} />
+
+          <Card>
+            <CardContent className="pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <textarea
+                  value={messageInput}
+                  onChange={(event) => setMessageInput(event.target.value)}
+                  placeholder={currentRun ? '继续追问、补充观点或反驳某个角色...' : '输入你的首个问题，发起多智能体研判...'}
+                  className="min-h-20 flex-1 rounded-lg border bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary"
+                  disabled={running}
+                />
+                <Button onClick={handleRun} disabled={running || !messageInput.trim()} className="sm:self-end">
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  {running ? '研判中...' : currentRun ? '继续发言' : '发起研判'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
 
           <ConclusionPanel conclusion={currentRun?.final_conclusion ?? null} arbiter={currentArbiter} />
 

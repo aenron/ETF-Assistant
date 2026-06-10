@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from apscheduler.triggers.cron import CronTrigger
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import async_session_maker
 from models.strategy_schedule_config import StrategyScheduleConfig
+from models.strategy_run_cache import StrategyRunCache
 from schemas.market import KLineItem
 from schemas.strategy import (
     StrategyInfo,
@@ -307,12 +309,54 @@ class StrategyService:
             total=len(results),
             results=results,
         )
-        _last_runs[(user_id, STRATEGY_ID)] = response
+        await cls.save_last_run(session, user_id, response)
         return response
 
     @classmethod
-    def get_last_run(cls, user_id: int) -> Optional[StrategyRunResponse]:
-        return _last_runs.get((user_id, STRATEGY_ID))
+    async def save_last_run(cls, session: AsyncSession, user_id: int, response: StrategyRunResponse) -> None:
+        _last_runs[(user_id, response.strategy_id)] = response
+        result_json = response.model_dump_json()
+        cache_result = await session.execute(
+            select(StrategyRunCache).where(
+                StrategyRunCache.user_id == user_id,
+                StrategyRunCache.strategy_id == response.strategy_id,
+            )
+        )
+        cache = cache_result.scalar_one_or_none()
+        if cache:
+            cache.result_json = result_json
+        else:
+            session.add(StrategyRunCache(
+                user_id=user_id,
+                strategy_id=response.strategy_id,
+                result_json=result_json,
+            ))
+        await session.flush()
+
+    @classmethod
+    async def get_last_run(cls, session: AsyncSession, user_id: int) -> Optional[StrategyRunResponse]:
+        memory_cached = _last_runs.get((user_id, STRATEGY_ID))
+        if memory_cached:
+            return memory_cached
+
+        cache_result = await session.execute(
+            select(StrategyRunCache).where(
+                StrategyRunCache.user_id == user_id,
+                StrategyRunCache.strategy_id == STRATEGY_ID,
+            )
+        )
+        cache = cache_result.scalar_one_or_none()
+        if not cache:
+            return None
+
+        try:
+            response = StrategyRunResponse.model_validate(json.loads(cache.result_json))
+        except Exception as e:
+            print(f"[StrategyService] 策略缓存反序列化失败: user_id={user_id}, {e}")
+            return None
+
+        _last_runs[(user_id, STRATEGY_ID)] = response
+        return response
 
     @classmethod
     async def run_scheduled_tfss_v1(cls, user_id: int) -> None:
