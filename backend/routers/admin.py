@@ -17,6 +17,7 @@ from schemas.user import AdminUserUpdate, UserResponse
 from schemas.portfolio import DcaIndexMappingCreate, DcaIndexMappingResponse, DcaIndexMappingUpdate, DcaSignalConfigResponse, DcaSignalConfigUpdate
 from schemas.macro import MacroCycleStateCreate, MacroCycleStateResponse, MacroRefreshResponse
 from utils.timezone import now_in_utc_naive
+from services.industry_fundamental_service import IndustryFundamentalService
 from services.macro_service import MacroDataService
 from services.scheduler import (
     get_scheduler_job,
@@ -114,6 +115,25 @@ async def create_macro_state(data: MacroCycleStateCreate, session: AsyncSession 
     await session.commit()
     await session.refresh(state)
     return state
+
+
+@router.get("/industry/fundamentals")
+async def list_industry_fundamentals():
+    """列出行业基本面缓存、样本股、核心指标和采集错误。"""
+    return {"items": await IndustryFundamentalService.list_snapshots()}
+
+
+@router.post("/industry/fundamentals/refresh")
+async def refresh_industry_fundamentals(key: str | None = None):
+    """手动刷新行业基本面缓存。"""
+    keys = [key] if key else None
+    result = await IndustryFundamentalService.refresh_all(keys)
+    return {
+        "success": True,
+        "refreshed": len(result),
+        "keys": list(result.keys()),
+        "items": await IndustryFundamentalService.list_snapshots(),
+    }
 
 
 @router.post("/macro/refresh", response_model=MacroRefreshResponse)

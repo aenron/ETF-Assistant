@@ -868,7 +868,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                         <h3 className="font-semibold">跨境风控</h3>
                         <Badge variant="outline" className="border-current bg-background/70">{formatCrossBorderRiskLevel(dcaDetailPortfolio.cross_border_risk.risk_level)} · {dcaDetailPortfolio.cross_border_risk.action}</Badge>
                       </div>
-                      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                         <div className="rounded-md bg-background/70 p-3">
                           <div className="text-xs opacity-80">建议上限</div>
                           <div className="mt-1 font-mono">{(dcaDetailPortfolio.cross_border_risk.max_position_hint * 100).toFixed(0)}%</div>
@@ -876,6 +876,14 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                         <div className="rounded-md bg-background/70 p-3">
                           <div className="text-xs opacity-80">倍率折减</div>
                           <div className="mt-1 font-mono">{dcaDetailPortfolio.cross_border_risk.budget_multiplier_adjustment.toFixed(2)}x</div>
+                        </div>
+                        <div className="rounded-md bg-background/70 p-3">
+                          <div className="text-xs opacity-80">IOPV</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.cross_border_risk.iopv?.toFixed(4) || '-'}</div>
+                        </div>
+                        <div className="rounded-md bg-background/70 p-3">
+                          <div className="text-xs opacity-80">溢价率</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.cross_border_risk.premium_rate != null ? `${dcaDetailPortfolio.cross_border_risk.premium_rate.toFixed(2)}%` : '-'}</div>
                         </div>
                         <div className="rounded-md bg-background/70 p-3">
                           <div className="text-xs opacity-80">风险标签</div>
@@ -919,6 +927,20 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                         <div className="rounded-md bg-muted/40 p-3">
                           <div className="text-xs text-muted-foreground">景气度</div>
                           <div className="mt-1 font-mono">{dcaDetailPortfolio.factor_score.prosperity_score.toFixed(1)}</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">20日动量</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.factor_score.momentum20 != null ? `${dcaDetailPortfolio.factor_score.momentum20.toFixed(2)}%` : '-'}</div>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">成交额</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.factor_score.amount != null ? `${(dcaDetailPortfolio.factor_score.amount / 100000000).toFixed(2)}亿` : '-'}</div>
+                        </div>
+                        <div className="rounded-md bg-muted/40 p-3">
+                          <div className="text-xs text-muted-foreground">流动性</div>
+                          <div className="mt-1 font-mono">{dcaDetailPortfolio.factor_score.liquidity_score != null ? dcaDetailPortfolio.factor_score.liquidity_score.toFixed(1) : '-'}</div>
                         </div>
                       </div>
                       <p className="mt-3 leading-6 text-muted-foreground">{dcaDetailPortfolio.factor_score.reason}</p>

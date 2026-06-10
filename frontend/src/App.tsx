@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart, GitBranch, SlidersHorizontal, Activity } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart, GitBranch, SlidersHorizontal, Activity, Database } from 'lucide-react'
 import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
@@ -39,6 +39,9 @@ const AdminDcaIndexMappingPage = lazy(() =>
 )
 const AdminDcaSignalConfigPage = lazy(() =>
   import('@/pages/AdminDcaSignalConfigPage').then((module) => ({ default: module.AdminDcaSignalConfigPage })),
+)
+const AdminIndustryFundamentalsPage = lazy(() =>
+  import('@/pages/AdminIndustryFundamentalsPage').then((module) => ({ default: module.AdminIndustryFundamentalsPage })),
 )
 const MultiAgentWorkbenchPage = lazy(() =>
   import('@/pages/MultiAgentWorkbenchPage').then((module) => ({ default: module.MultiAgentWorkbenchPage })),
@@ -167,6 +170,10 @@ function AppContent() {
                             <SlidersHorizontal className="h-4 w-4" />
                             红绿灯参数
                           </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => navigate('/admin/industry-fundamentals')}>
+                            <Database className="h-4 w-4" />
+                            行业基本面
+                          </DropdownMenuItem>
                         </>
                       )}
                       <DropdownMenuSeparator />
@@ -197,6 +204,7 @@ function AppContent() {
             <Route path="/admin/scheduler" element={<PrivateRoute><AdminSchedulerPage /></PrivateRoute>} />
             <Route path="/admin/dca-index-mappings" element={<PrivateRoute><AdminDcaIndexMappingPage /></PrivateRoute>} />
             <Route path="/admin/dca-signal-config" element={<PrivateRoute><AdminDcaSignalConfigPage /></PrivateRoute>} />
+            <Route path="/admin/industry-fundamentals" element={<PrivateRoute><AdminIndustryFundamentalsPage /></PrivateRoute>} />
           </Routes>
         </Suspense>
       </main>

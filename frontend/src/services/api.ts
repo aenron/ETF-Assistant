@@ -32,6 +32,45 @@ api.interceptors.response.use(
 )
 
 // 类型定义
+
+export interface IndustryFundamentalData {
+  industry_key: string | null
+  industry_name: string | null
+  source: string | null
+  updated_at: string | null
+  score: number | null
+  roe: number | null
+  net_profit_growth: number | null
+  revenue_growth: number | null
+  profit_growth_delta: number | null
+  forecast_eps_growth: number | null
+  positive_rating_ratio: number | null
+  forecast_sample_size: number | null
+  sample_stocks: Array<Record<string, any>>
+  errors: string[]
+}
+
+export interface IndustryFundamentalSnapshot {
+  key: string
+  industry_name: string
+  em_industry: string
+  keywords: string[]
+  sample_symbols: string[]
+  cached: boolean
+  cached_at: string | null
+  data: IndustryFundamentalData | null
+}
+
+export interface IndustryFundamentalListResponse {
+  items: IndustryFundamentalSnapshot[]
+}
+
+export interface IndustryFundamentalRefreshResponse extends IndustryFundamentalListResponse {
+  success: boolean
+  refreshed: number
+  keys: string[]
+}
+
 export interface PortfolioCreate {
   etf_code: string
   shares: number
@@ -833,6 +872,8 @@ export const adminApi = {
   updateDcaSignalConfig: (data: DcaSignalConfigUpdate) => api.put<DcaSignalConfig>('/admin/dca/signal-config', data),
   createMacroState: (data: MacroCycleStateCreate) => api.post<MacroCycleState>('/admin/macro/state', data),
   refreshMacroData: (region?: MacroRegion) => api.post<MacroRefreshResponse>('/admin/macro/refresh', null, { params: { region } }),
+  listIndustryFundamentals: () => api.get<IndustryFundamentalListResponse>('/admin/industry/fundamentals'),
+  refreshIndustryFundamentals: (key?: string) => api.post<IndustryFundamentalRefreshResponse>('/admin/industry/fundamentals/refresh', null, { params: { key } }),
 }
 
 export const schedulerApi = {

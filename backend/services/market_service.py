@@ -1486,6 +1486,9 @@ class MarketService:
         low_col = "最低" if "最低" in df.columns else None
         volume_col = "成交量" if "成交量" in df.columns else None
         amount_col = "成交额" if "成交额" in df.columns else None
+        iopv_col = "IOPV实时估值" if "IOPV实时估值" in df.columns else "iopv" if "iopv" in df.columns else None
+        discount_col = "基金折价率" if "基金折价率" in df.columns else None
+        premium_col = "溢价率" if "溢价率" in df.columns else "premium_rate" if "premium_rate" in df.columns else None
         
         cached_count = 0
         etf_infos_to_save = []
@@ -1504,6 +1507,8 @@ class MarketService:
                     low_price=float(row.get(low_col, 0)) if low_col and row.get(low_col) else None,
                     volume=cls._to_int(row.get(volume_col)) if volume_col else None,
                     amount=cls._to_float(row.get(amount_col)) if amount_col else None,
+                    iopv=cls._to_float(row.get(iopv_col)) if iopv_col else None,
+                    premium_rate=(cls._to_float(row.get(premium_col)) if premium_col else (-cls._to_float(row.get(discount_col)) if discount_col and cls._to_float(row.get(discount_col)) is not None else None)),
                 )
                 await cls.cache_quote(code, quote)
                 cached_count += 1
@@ -1544,6 +1549,9 @@ class MarketService:
         low_col = "最低" if "最低" in df.columns else None
         volume_col = "成交量" if "成交量" in df.columns else None
         amount_col = "成交额" if "成交额" in df.columns else None
+        iopv_col = "IOPV实时估值" if "IOPV实时估值" in df.columns else "iopv" if "iopv" in df.columns else None
+        discount_col = "基金折价率" if "基金折价率" in df.columns else None
+        premium_col = "溢价率" if "溢价率" in df.columns else "premium_rate" if "premium_rate" in df.columns else None
         
         for code in codes:
             row = df[df[code_col] == code]
@@ -1559,6 +1567,8 @@ class MarketService:
                     low_price=float(row.get(low_col, 0)) if low_col and row.get(low_col) else None,
                     volume=cls._to_int(row.get(volume_col)) if volume_col else None,
                     amount=cls._to_float(row.get(amount_col)) if amount_col else None,
+                    iopv=cls._to_float(row.get(iopv_col)) if iopv_col else None,
+                    premium_rate=(cls._to_float(row.get(premium_col)) if premium_col else (-cls._to_float(row.get(discount_col)) if discount_col and cls._to_float(row.get(discount_col)) is not None else None)),
                 )
         return result
     

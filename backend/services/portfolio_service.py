@@ -1466,7 +1466,9 @@ class PortfolioService:
         current_weight = (market_value / total_market_value) if market_value and total_market_value and total_market_value > 0 else None
         price = cls._optional_finite_float(getattr(quote, "price", None) if quote else None)
         iopv = cls._optional_finite_float(getattr(quote, "iopv", None) if quote else None)
-        premium_rate = ((price - iopv) / iopv * 100) if price is not None and iopv and iopv > 0 else None
+        premium_rate = cls._optional_finite_float(getattr(quote, "premium_rate", None) if quote else None)
+        if premium_rate is None and price is not None and iopv and iopv > 0:
+            premium_rate = (price - iopv) / iopv * 100
         warnings = [
             "跨境 ETF 受海外交易时段影响，A 股交易时间内净值可能滞后。",
             "需要关注人民币汇率波动，汇率会放大或抵消底层资产收益。",

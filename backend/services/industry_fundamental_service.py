@@ -47,6 +47,25 @@ class IndustryFundamentalService:
                 return key
         return None
 
+
+    @classmethod
+    async def list_snapshots(cls) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for key, profile in cls.INDUSTRY_PROFILES.items():
+            cached = await RedisService.get(cls._cache_key(key))
+            data = cached.get("data") if cached and isinstance(cached.get("data"), dict) else None
+            rows.append({
+                "key": key,
+                "industry_name": profile.get("label"),
+                "em_industry": profile.get("em_industry"),
+                "keywords": list(profile.get("keywords") or []),
+                "sample_symbols": list(profile.get("stocks") or []),
+                "cached": data is not None,
+                "cached_at": cached.get("cached_at") if cached else None,
+                "data": data,
+            })
+        return rows
+
     @classmethod
     async def get_many(cls, keys: list[str], allow_fetch: bool = True) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
