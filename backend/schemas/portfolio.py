@@ -220,6 +220,8 @@ class PortfolioSummary(ShanghaiBaseModel):
     today_pnl_pct: Optional[float] = None
     category_distribution: dict[str, float]
     total_assets: Optional[float] = None  # 总金额 = 持仓市值 + 可用资金
+    holding_count: int = 0
+    missing_quote_count: int = 0
     exposure_analysis: Optional[PortfolioExposureAnalysis] = None
     rebalance_plan: Optional[PortfolioRebalancePlan] = None
 

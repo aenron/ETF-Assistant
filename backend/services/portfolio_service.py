@@ -341,6 +341,7 @@ class PortfolioService:
         """基于已拉取的持仓+行情结果构建汇总，避免重复查询和重复拉行情。"""
         total_market_value = 0.0
         total_cost = 0.0
+        missing_quote_count = 0
         today_pnl = 0.0
         today_previous_value = 0.0
         has_today_pnl = False
@@ -352,6 +353,8 @@ class PortfolioService:
 
         for p in portfolios:
             market_value = PortfolioService._optional_finite_float(p.market_value)
+            if market_value is None:
+                missing_quote_count += 1
             if market_value is not None and market_value > 0:
                 total_market_value += market_value
                 cost = PortfolioService._finite_float(p.shares) * PortfolioService._finite_float(p.cost_price)
@@ -401,6 +404,8 @@ class PortfolioService:
                 for category, value in category_distribution.items()
             },
             total_assets=PortfolioService._finite_float(total_assets),
+            holding_count=len(portfolios),
+            missing_quote_count=missing_quote_count,
             exposure_analysis=exposure_analysis,
             rebalance_plan=rebalance_plan,
         )

@@ -241,6 +241,9 @@ export interface PortfolioSummary {
   today_pnl: number | null
   today_pnl_pct: number | null
   category_distribution: Record<string, number>
+  total_assets: number | null
+  holding_count: number
+  missing_quote_count: number
   exposure_analysis?: PortfolioExposureAnalysis | null
   rebalance_plan?: PortfolioRebalancePlan | null
 }

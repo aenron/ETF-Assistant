@@ -26,6 +26,7 @@ export function PortfolioPage() {
     .filter((value): value is string => Boolean(value))
     .sort(compareBeijingTimeDesc)
     .at(0) ?? null
+  const missingQuoteCount = summary?.missing_quote_count ?? portfolios.filter((portfolio) => portfolio.current_price == null).length
 
   const formatMarketRefreshAt = (value: string | null) =>
     formatBeijingTime(value, {
@@ -109,6 +110,11 @@ export function PortfolioPage() {
           <p className="mt-1 text-sm text-muted-foreground">
             当前使用行情时间：{formatMarketRefreshAt(latestMarketRefreshAt)}
           </p>
+          {portfolios.length > 0 && missingQuoteCount > 0 && (
+            <p className="mt-1 text-sm text-amber-700">
+              {missingQuoteCount} 个持仓暂无行情缓存，后台刷新完成后会自动显示价格、市值和盈亏。
+            </p>
+          )}
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[auto,1fr,1fr] lg:flex">
           <Button variant="outline" size="icon" onClick={fetchData} disabled={loading} className="w-full sm:w-10">

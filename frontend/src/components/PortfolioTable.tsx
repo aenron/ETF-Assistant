@@ -436,6 +436,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   <div className="min-w-0">
                     <div className="font-mono text-base font-semibold">{p.etf_code}</div>
                     <div className="mt-1 text-sm text-muted-foreground">{p.etf_name || '-'}</div>
+                    {p.current_price == null && (
+                      <div className="mt-2 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">行情缓存刷新中</div>
+                    )}
                     <button
                       type="button"
                       className={`mt-2 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium transition-colors hover:bg-muted ${getDcaTextClass(p.dca_light, p.dca_label)}`}
@@ -557,7 +560,10 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 return (
                 <tr key={p.id} className="border-b hover:bg-muted/50 cursor-pointer" onClick={() => setDetailPortfolio(p)}>
                   <td className="py-3 px-2 font-mono">{p.etf_code}</td>
-                  <td className="py-3 px-2">{p.etf_name || '-'}</td>
+                  <td className="py-3 px-2">
+                    <div>{p.etf_name || '-'}</div>
+                    {p.current_price == null && <div className="mt-1 text-xs text-amber-700">行情缓存刷新中</div>}
+                  </td>
                   <td className="py-3 px-2 text-right">{p.shares.toLocaleString()}</td>
                   <td className="py-3 px-2 text-right">
                     <div className="flex flex-col items-end">

@@ -1,6 +1,7 @@
 import asyncio
 from fastapi import APIRouter, Query, Depends
 from typing import List
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_session
@@ -10,6 +11,7 @@ from services.etf_classification_service import EtfClassificationService
 from services.portfolio_service import PortfolioService
 from services.scheduler import update_user_dca_signals
 from routers.auth import get_current_user
+from models.portfolio import Portfolio
 from models.user import User
 
 router = APIRouter(
@@ -50,9 +52,12 @@ async def refresh_all_quotes(
     current_user: User = Depends(get_current_user),
 ):
     """强制刷新所有持仓品种行情"""
-    # 获取用户持仓的所有代码
-    portfolios = await PortfolioService.get_with_market(session, user_id=current_user.id)
-    codes = list(set(p.etf_code for p in portfolios))
+    result = await session.execute(
+        select(Portfolio.etf_code)
+        .where(Portfolio.user_id == current_user.id)
+        .distinct()
+    )
+    codes = sorted({code for code in result.scalars().all() if code})
     
     if not codes:
         return {"success": True, "message": "无持仓数据", "refreshed": 0}
