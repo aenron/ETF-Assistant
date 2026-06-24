@@ -11,7 +11,8 @@ import { formatBeijingTime } from '@/utils/time'
 function describeJob(job: SchedulerJob) {
   if (job.id === 'daily_analysis') return '工作日收盘后为所有活跃用户生成持仓分析，并按用户通知配置推送。'
   if (job.id === 'weekly_account_analysis') return '每周五收盘后为所有活跃用户生成账户级分析，并推送摘要。'
-  if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'A股交易时段刷新活跃用户持仓 ETF 的行情缓存。'
+  if (job.id === 'market_refresh') return 'A股交易时段轻刷新活跃用户持仓 ETF 的最新行情快照。'
+  if (job.id === 'market_history_refresh') return '交易日 10:35、14:35、15:02 重刷新近 60 日 K 线和成交额。'
   if (job.id === 'etf_profile_refresh') return '交易日 09:15 和 13:15 刷新活跃用户持仓 ETF 的资料快照、资产配置、公告和基金持仓。'
   if (job.id === 'dca_signal_update') return '交易日 10:30 和 14:40 按用户计算持仓红绿灯，并持久化状态、历史快照与待通知事件。'
   if (job.id === 'dca_signal_notify') return '交易日 14:45 读取已持久化的红绿灯变化，按用户和红绿灯分组发送通知。'
@@ -23,7 +24,7 @@ function describeJob(job: SchedulerJob) {
 function jobTone(job: SchedulerJob) {
   if (job.id === 'daily_analysis') return 'border-blue-200 bg-blue-50 text-blue-700'
   if (job.id === 'weekly_account_analysis') return 'border-violet-200 bg-violet-50 text-violet-700'
-  if (job.id === 'market_refresh' || job.id.startsWith('market_refresh_')) return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  if (job.id === 'market_refresh' || job.id === 'market_history_refresh') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
   if (job.id === 'etf_profile_refresh') return 'border-amber-200 bg-amber-50 text-amber-700'
   if (job.id === 'dca_signal_update') return 'border-cyan-200 bg-cyan-50 text-cyan-700'
   if (job.id === 'dca_signal_notify') return 'border-lime-200 bg-lime-50 text-lime-700'

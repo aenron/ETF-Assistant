@@ -29,6 +29,24 @@ from utils.timezone import now_in_shanghai, now_in_utc_naive
 scheduler = AsyncIOScheduler()
 
 
+async def _get_active_portfolio_codes(task_name: str) -> list[str]:
+    async with async_session_maker() as db:
+        try:
+            result = await db.execute(
+                select(Portfolio.etf_code)
+                .join(User, Portfolio.user_id == User.id)
+                .where(User.is_active == True)
+                .distinct()
+            )
+            codes = sorted({code for code in result.scalars().all() if code})
+            if not codes:
+                print(f"[Scheduler] 无持仓ETF，跳过{task_name}")
+            return codes
+        except Exception as e:
+            print(f"[Scheduler] 加载ETF列表失败，跳过{task_name}: {e}")
+            return []
+
+
 def _format_datetime(value):
     if value is None:
         return None
@@ -710,29 +728,41 @@ async def analyze_all_accounts():
 
 
 async def refresh_market_quotes():
-    """定时刷新活跃用户持仓涉及的行情缓存"""
-    print(f"[Scheduler] {now_in_shanghai()} 开始执行行情刷新任务...")
+    """轻刷新：定时刷新活跃用户持仓涉及的最新行情快照。"""
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行行情轻刷新任务...")
 
-    async with async_session_maker() as db:
-        try:
-            result = await db.execute(
-                select(Portfolio.etf_code)
-                .join(User, Portfolio.user_id == User.id)
-                .where(User.is_active == True)
-                .distinct()
-            )
-            codes = sorted({code for code in result.scalars().all() if code})
-            if not codes:
-                print("[Scheduler] 无持仓ETF，跳过行情刷新")
-                return
+    codes = await _get_active_portfolio_codes("行情轻刷新")
+    if not codes:
+        return
 
-            print(f"[Scheduler] 共 {len(codes)} 只ETF待刷新行情")
-        except Exception as e:
-            print(f"[Scheduler] 加载ETF列表失败: {e}")
-            return
-
+    print(f"[Scheduler] 共 {len(codes)} 只ETF待轻刷新行情")
     quotes = await MarketService.refresh_quotes(codes)
-    print(f"[Scheduler] 行情刷新完成，成功缓存 {len(quotes)} 只ETF")
+    print(f"[Scheduler] 行情轻刷新完成，成功缓存 {len(quotes)} 只ETF")
+
+
+async def refresh_market_history():
+    """重刷新：刷新近 60 日 K 线和成交额，供技术指标与交易指示使用。"""
+    print(f"[Scheduler] {now_in_shanghai()} 开始执行行情重刷新任务...")
+
+    codes = await _get_active_portfolio_codes("行情重刷新")
+    if not codes:
+        return
+
+    success_count = 0
+    for code in codes:
+        try:
+            data = await MarketService.get_history_kline(code, days=60, prefer_cache=False)
+            if data:
+                success_count += 1
+                latest = data[-1]
+                amount_state = "含成交额" if latest.amount is not None else "缺成交额"
+                print(f"[Scheduler] 行情重刷新完成: {code}, {len(data)} 条, 最新 {latest.trade_date}, {amount_state}")
+            else:
+                print(f"[Scheduler] 行情重刷新无数据: {code}")
+        except Exception as e:
+            print(f"[Scheduler] 行情重刷新失败: {code}, {e}")
+
+    print(f"[Scheduler] 行情重刷新完成，成功刷新 {success_count}/{len(codes)} 只ETF")
 
 
 async def refresh_etf_profiles():
@@ -838,7 +868,7 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    # A股集合竞价开始后每5分钟刷新一次行情缓存。用一个组合触发器保持任务列表简洁。
+    # 轻刷新：盘中高频刷新最新行情快照，避免频繁拉取历史K线。
     market_refresh_trigger = OrTrigger([
         CronTrigger(day_of_week='mon-fri', hour=9, minute='15-59/5', timezone='Asia/Shanghai'),
         CronTrigger(day_of_week='mon-fri', hour=10, minute='*/5', timezone='Asia/Shanghai'),
@@ -850,7 +880,21 @@ def setup_scheduler():
         refresh_market_quotes,
         trigger=market_refresh_trigger,
         id='market_refresh',
-        name='行情缓存刷新',
+        name='行情轻刷新',
+        replace_existing=True
+    )
+
+    # 重刷新：低频刷新 60 日 K 线和成交额，供技术指标、交易指示和红绿灯使用。
+    market_history_refresh_trigger = OrTrigger([
+        CronTrigger(day_of_week='mon-fri', hour=10, minute=35, timezone='Asia/Shanghai'),
+        CronTrigger(day_of_week='mon-fri', hour=14, minute=35, timezone='Asia/Shanghai'),
+        CronTrigger(day_of_week='mon-fri', hour=15, minute=2, timezone='Asia/Shanghai'),
+    ])
+    scheduler.add_job(
+        refresh_market_history,
+        trigger=market_history_refresh_trigger,
+        id='market_history_refresh',
+        name='行情重刷新',
         replace_existing=True
     )
 
@@ -940,7 +984,8 @@ def setup_scheduler():
 
     print("[Scheduler] 定时任务已配置: 工作日 15:05 自动执行收盘持仓分析")
     print("[Scheduler] 定时任务已配置: 每周五 15:10 自动执行本周账户分析并推送")
-    print("[Scheduler] 定时任务已配置: A股集合竞价开始后每5分钟自动刷新行情缓存，15:00收盘补刷一次")
+    print("[Scheduler] 定时任务已配置: A股交易时段每5分钟自动轻刷新行情快照，15:00收盘补刷一次")
+    print("[Scheduler] 定时任务已配置: 工作日 10:35、14:35、15:02 自动重刷新60日K线和成交额")
     print("[Scheduler] 定时任务已配置: 工作日 09:15、13:15 自动刷新ETF资料缓存")
     print("[Scheduler] 定时任务已配置: 工作日 14:40 自动更新定投红绿灯数据")
     print("[Scheduler] 定时任务已配置: 工作日 14:45 自动推送定投红绿灯变化通知")
