@@ -80,12 +80,18 @@ class KLineItem(ShanghaiBaseModel):
     high_price: float
     low_price: float
     volume: int
+    amount: Optional[float] = None
     change_pct: float
 
     @field_validator("open_price", "close_price", "high_price", "low_price", "change_pct", mode="before")
     @classmethod
     def clean_kline_float(cls, value):
         return _finite_float(value)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def clean_kline_amount(cls, value):
+        return _optional_finite_float(value)
 
     @field_validator("volume", mode="before")
     @classmethod

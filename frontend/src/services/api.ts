@@ -257,6 +257,7 @@ export interface MarketQuote {
   high_price: number | null
   low_price: number | null
   volume: number | null
+  amount: number | null
   refreshed_at: string | null
 }
 
@@ -267,6 +268,7 @@ export interface KLineItem {
   high_price: number
   low_price: number
   volume: number
+  amount: number | null
   change_pct: number
 }
 

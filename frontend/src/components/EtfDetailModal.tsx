@@ -43,6 +43,22 @@ type ParsedDecisionSummary = {
 
 type IndicatorLineKey = 'ma5' | 'ma10' | 'ma20' | 'boll' | 'macd'
 type HistoryRangeDays = 60 | 120 | 365
+export type BenchmarkKey = 'hs300' | 'csiA500'
+
+export type RuleCheck = {
+  label: string
+  passed: boolean | null
+  detail: string
+}
+
+export type TradeSignal = {
+  action: 'buy' | 'clear' | 'reduce' | 'take_profit' | 'watch' | 'insufficient'
+  label: string
+  toneClassName: string
+  summary: string
+  buyChecks: RuleCheck[]
+  sellChecks: RuleCheck[]
+}
 
 function splitAdviceItems(value: string) {
   return value
@@ -175,7 +191,7 @@ function LegacyAdviceContent({ reason }: { reason: string | null }) {
   )
 }
 
-type CandlePoint = {
+export type CandlePoint = {
   date: string
   fullDate: string
   open: number
@@ -183,6 +199,7 @@ type CandlePoint = {
   high: number
   low: number
   volume: number
+  amount: number | null
   change: number
 }
 
@@ -202,6 +219,19 @@ function formatVolumeLabel(value: number) {
   }
   if (value >= 10000) {
     return `${(value / 10000).toFixed(0)}万`
+  }
+  return value.toFixed(0)
+}
+
+function formatAmountLabel(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0'
+  }
+  if (value >= 100000000) {
+    return `${(value / 100000000).toFixed(2)}亿`
+  }
+  if (value >= 10000) {
+    return `${(value / 10000).toFixed(2)}万`
   }
   return value.toFixed(0)
 }
@@ -269,6 +299,303 @@ function calculateMacd(data: CandlePoint[]) {
   const histogram = dif.map((value, index) => (value - dea[index]) * 2)
 
   return { dif, dea, histogram }
+}
+
+function formatSignedPct(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return 'N/A'
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function formatSignalNumber(value: number | null | undefined, digits = 3) {
+  if (value == null || !Number.isFinite(value)) return 'N/A'
+  return value.toFixed(digits)
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null
+  return values.reduce((total, value) => total + value, 0) / values.length
+}
+
+function hasLongUpperShadow(candle: CandlePoint) {
+  const range = candle.high - candle.low
+  if (range <= 0) return false
+  const body = Math.abs(candle.close - candle.open)
+  const upperShadow = candle.high - Math.max(candle.open, candle.close)
+  return upperShadow / range >= 0.4 && upperShadow >= Math.max(body * 1.5, range * 0.25)
+}
+
+export function buildTradeSignal(
+  data: CandlePoint[],
+  benchmarks: Record<BenchmarkKey, MarketHistoryResponse | null>,
+): TradeSignal {
+  const ma5Values = calculateMovingAverage(data, 5)
+  const ma10Values = calculateMovingAverage(data, 10)
+  const ma20Values = calculateMovingAverage(data, 20)
+  const macd = calculateMacd(data)
+  const latest = data.at(-1)
+  const previous = data.at(-2)
+  const latestIndex = data.length - 1
+  const latestMa5 = ma5Values.at(-1)
+  const latestMa10 = ma10Values.at(-1)
+  const latestMa20 = ma20Values.at(-1)
+  const previousMa10 = ma10Values.at(-2)
+  const previousMa20 = ma20Values.at(-2)
+  const ma20FiveDaysAgo = ma20Values.length >= 5 ? ma20Values.at(-5) : null
+  const ma20FlatOrUp = latestMa20 != null && ma20FiveDaysAgo != null ? latestMa20 >= ma20FiveDaysAgo * 0.998 : null
+  const ma20Down = latestMa20 != null && ma20FiveDaysAgo != null ? latestMa20 < ma20FiveDaysAgo * 0.998 : null
+  const previousFiveAmountAverage = data.length >= 6 ? average(data.slice(-6, -1).map((item) => item.amount ?? 0).filter((value) => value > 0)) : null
+  const amountSignal = latest && latest.amount != null && previousFiveAmountAverage != null
+    ? {
+      passed: latest.amount > previousFiveAmountAverage * 1.2,
+      strongPassed: latest.amount > previousFiveAmountAverage * 1.3,
+      detail: `成交额 ${formatAmountLabel(latest.amount)} / 过去5日均额 ${formatAmountLabel(previousFiveAmountAverage)}`,
+    }
+    : {
+      passed: null,
+      strongPassed: null,
+      detail: '成交额数据不足，等待行情刷新补齐',
+    }
+  const highestClose60 = data.length > 0 ? Math.max(...data.slice(-60).map((item) => item.close)) : null
+  const drawdownPct = latest && highestClose60 && highestClose60 > 0 ? (highestClose60 - latest.close) / highestClose60 * 100 : null
+  const hs300Change = benchmarks.hs300?.data.at(-1)?.change_pct ?? null
+  const csiA500Change = benchmarks.csiA500?.data.at(-1)?.change_pct ?? null
+  const hasBenchmark = hs300Change != null || csiA500Change != null
+  const strongerThanBenchmark = latest && hasBenchmark
+    ? [hs300Change, csiA500Change].some((value) => value != null && latest.change > value)
+    : null
+  const latestDif = macd.dif.at(-1)
+  const latestDea = macd.dea.at(-1)
+  const latestMacdHistogram = macd.histogram.at(-1)
+  const previousMacdHistogram = macd.histogram.at(-2)
+  const macdTurnedStrong = latestDif != null && latestDea != null && latestMacdHistogram != null
+    ? latestDif > latestDea || (previousMacdHistogram != null && previousMacdHistogram <= 0 && latestMacdHistogram > 0)
+    : null
+  const rsi14 = calculateRsi(data, 14)
+  const rsiHealthy = rsi14 != null ? rsi14 >= 45 && rsi14 <= 70 : null
+  const rsiOverheated = rsi14 != null ? rsi14 > 75 : false
+  const distanceFromMa20Pct = latest && latestMa20 && latestMa20 > 0 ? (latest.close - latestMa20) / latestMa20 * 100 : null
+  const tooFarFromMa20 = distanceFromMa20Pct != null ? distanceFromMa20Pct > 7 : false
+  const previousLongUpperShadow = previous ? hasLongUpperShadow(previous) : false
+  const failedRepair = Boolean(previous && latest && previousLongUpperShadow && latest.close <= Math.max(previous.open, previous.close))
+  const latestAmountStrong = amountSignal.strongPassed === true
+  const latestLongUpperShadow = latest ? hasLongUpperShadow(latest) : false
+  const latestLongUpperWithVolume = latestLongUpperShadow && latestAmountStrong
+
+  const priceAboveMa20 = latest && latestMa20 != null ? latest.close > latestMa20 : null
+  const ma5AboveMa10 = latestMa5 != null && latestMa10 != null ? latestMa5 > latestMa10 : null
+  const buyRequiredChecks: RuleCheck[] = [
+    {
+      label: '收盘站上 MA20',
+      passed: priceAboveMa20,
+      detail: `收盘 ${formatSignalNumber(latest?.close)} / MA20 ${formatSignalNumber(latestMa20)}`,
+    },
+    {
+      label: 'MA5 高于 MA10',
+      passed: ma5AboveMa10,
+      detail: `MA5 ${formatSignalNumber(latestMa5)} / MA10 ${formatSignalNumber(latestMa10)}`,
+    },
+    {
+      label: 'MA20 走平或上行',
+      passed: ma20FlatOrUp,
+      detail: `MA20 ${formatSignalNumber(latestMa20)} / 5日前 ${formatSignalNumber(ma20FiveDaysAgo)}`,
+    },
+  ]
+  const buyBonusChecks: RuleCheck[] = [
+    {
+      label: '成交额放大 1.2x',
+      passed: amountSignal.passed,
+      detail: amountSignal.detail,
+    },
+    {
+      label: '强于沪深300或中证A500',
+      passed: strongerThanBenchmark,
+      detail: `ETF ${formatSignedPct(latest?.change)} / 沪深300 ${formatSignedPct(hs300Change)} / 中证A500 ${formatSignedPct(csiA500Change)}`,
+    },
+    {
+      label: 'MACD 转强',
+      passed: macdTurnedStrong,
+      detail: `DIF ${formatSignalNumber(latestDif, 4)} / DEA ${formatSignalNumber(latestDea, 4)} / 柱 ${formatSignalNumber(latestMacdHistogram, 4)}`,
+    },
+    {
+      label: 'RSI 45-70',
+      passed: rsiHealthy,
+      detail: `RSI ${formatSignalNumber(rsi14, 2)}`,
+    },
+  ]
+  const buyChecks: RuleCheck[] = [...buyRequiredChecks, ...buyBonusChecks]
+  const requiredBuyPassed = buyRequiredChecks.every((check) => check.passed === true)
+  const bonusPassedCount = buyBonusChecks.filter((check) => check.passed === true).length
+  const avoidChase = rsiOverheated || tooFarFromMa20
+
+  const belowMa10 = latest && latestMa10 != null ? latest.close < latestMa10 : null
+  const previousBelowMa10 = previous && previousMa10 != null ? previous.close < previousMa10 : false
+  const confirmedBelowMa10 = belowMa10 === true && (previousBelowMa10 || amountSignal.strongPassed === true)
+  const belowMa20 = latest && latestMa20 != null ? latest.close < latestMa20 : null
+  const previousBelowMa20 = previous && previousMa20 != null ? previous.close < previousMa20 : false
+  const confirmedBelowMa20 = belowMa20 === true && (previousBelowMa20 || ma20Down === true)
+  const clearlyWeakerThanBenchmark = latest && hasBenchmark
+    ? [hs300Change, csiA500Change].some((value) => value != null && latest.change < value - 0.8)
+    : null
+
+  const sellChecks: RuleCheck[] = [
+    {
+      label: 'MA20 破位确认，清仓',
+      passed: confirmedBelowMa20,
+      detail: `收盘 ${formatSignalNumber(latest?.close)} / MA20 ${formatSignalNumber(latestMa20)}；${previousBelowMa20 ? '连续2日低于MA20' : ma20Down ? 'MA20下行确认' : '尚未确认'}`,
+    },
+    {
+      label: 'MA10 破位确认，减仓',
+      passed: confirmedBelowMa10,
+      detail: `收盘 ${formatSignalNumber(latest?.close)} / MA10 ${formatSignalNumber(latestMa10)}；${previousBelowMa10 ? '连续2日低于MA10' : amountSignal.strongPassed ? '放量跌破' : '尚未确认'}`,
+    },
+    {
+      label: '60日高点回撤 5%-8%，移动止盈',
+      passed: drawdownPct != null ? drawdownPct >= 5 && drawdownPct <= 8 && belowMa20 !== true : null,
+      detail: `60日最高收盘 ${formatSignalNumber(highestClose60)} / 当前回撤 ${drawdownPct == null ? 'N/A' : `-${drawdownPct.toFixed(2)}%`}`,
+    },
+    {
+      label: '放量长上影次日未修复，减仓',
+      passed: previous && latest ? failedRepair : null,
+      detail: previous && latest
+        ? `前一日${previousLongUpperShadow ? '出现' : '未出现'}长上影，今日收盘 ${formatSignalNumber(latest.close)} / 前一日实体高点 ${formatSignalNumber(Math.max(previous.open, previous.close))}`
+        : '需要至少两个交易日数据',
+    },
+    {
+      label: '相对指数明显走弱',
+      passed: clearlyWeakerThanBenchmark,
+      detail: `ETF ${formatSignedPct(latest?.change)} / 沪深300 ${formatSignedPct(hs300Change)} / 中证A500 ${formatSignedPct(csiA500Change)}`,
+    },
+  ]
+
+  if (data.length < 20 || latestIndex < 19) {
+    return {
+      action: 'insufficient',
+      label: '数据不足',
+      toneClassName: 'border-slate-200 bg-slate-50 text-slate-700',
+      summary: '至少需要 20 个交易日 K 线才能判断 MA20 相关规则。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (confirmedBelowMa20 || (belowMa20 && ma20Down && clearlyWeakerThanBenchmark)) {
+    return {
+      action: 'clear',
+      label: '清仓',
+      toneClassName: 'border-green-200 bg-green-50 text-green-700',
+      summary: 'MA20 破位已确认，或破位同时伴随趋势下行与相对走弱，优先执行清仓风控。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (confirmedBelowMa10 || failedRepair) {
+    return {
+      action: 'reduce',
+      label: '减仓',
+      toneClassName: 'border-amber-200 bg-amber-50 text-amber-700',
+      summary: confirmedBelowMa10 ? 'MA10 破位已确认，按该方案触发减仓观察。' : '前一日长上影后未修复，按该方案触发减仓观察。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (drawdownPct != null && drawdownPct >= 5 && drawdownPct <= 8 && belowMa20 !== true) {
+    return {
+      action: 'take_profit',
+      label: '移动止盈',
+      toneClassName: 'border-blue-200 bg-blue-50 text-blue-700',
+      summary: '从 60 日高点回撤进入 5%-8% 区间，但尚未跌破 MA20，适合执行移动止盈纪律。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (requiredBuyPassed && bonusPassedCount >= 3 && !avoidChase) {
+    return {
+      action: 'buy',
+      label: '正常买入',
+      toneClassName: 'border-red-200 bg-red-50 text-red-700',
+      summary: '趋势必要条件成立，且成交额、相对强弱、MACD、RSI 中至少 3 项加分条件满足。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (requiredBuyPassed && bonusPassedCount >= 2 && !avoidChase) {
+    return {
+      action: 'buy',
+      label: '试探买入',
+      toneClassName: 'border-orange-200 bg-orange-50 text-orange-700',
+      summary: '趋势必要条件成立，且至少 2 项强度条件满足，适合小仓位试探。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (requiredBuyPassed && avoidChase) {
+    return {
+      action: 'watch',
+      label: '等待回踩',
+      toneClassName: 'border-slate-200 bg-slate-50 text-slate-700',
+      summary: `趋势条件成立，但${rsiOverheated ? 'RSI过热' : '价格距离MA20过远'}，不宜追高。`,
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  if (latestLongUpperWithVolume) {
+    return {
+      action: 'watch',
+      label: '观察修复',
+      toneClassName: 'border-slate-200 bg-slate-50 text-slate-700',
+      summary: '当日出现放量长上影，需要观察次日能否重新站上实体高点。',
+      buyChecks,
+      sellChecks,
+    }
+  }
+
+  return {
+    action: 'watch',
+    label: '观察',
+    toneClassName: 'border-slate-200 bg-slate-50 text-slate-700',
+    summary: '当前没有满足分层买入条件，也未触发确认后的卖出条件。',
+    buyChecks,
+    sellChecks,
+  }
+}
+
+export function buildTradeSignalFromHistory(
+  history: MarketHistoryResponse | null | undefined,
+  benchmarks: Record<BenchmarkKey, MarketHistoryResponse | null>,
+): TradeSignal {
+  const data = (history?.data || []).map((k) => ({
+    date: k.trade_date.slice(5),
+    fullDate: k.trade_date,
+    open: k.open_price,
+    close: k.close_price,
+    high: k.high_price,
+    low: k.low_price,
+    volume: k.volume,
+    amount: k.amount ?? null,
+    change: k.change_pct,
+  }))
+  return buildTradeSignal(data, benchmarks)
+}
+
+function calculateRsi(data: CandlePoint[], period = 14) {
+  if (data.length <= period) return null
+  const closes = data.map((item) => item.close)
+  let gains = 0
+  let losses = 0
+  for (let index = closes.length - period; index < closes.length; index += 1) {
+    const change = closes[index] - closes[index - 1]
+    if (change > 0) gains += change
+    else losses += Math.abs(change)
+  }
+  if (losses === 0) return 100
+  const rs = gains / losses
+  return 100 - (100 / (1 + rs))
 }
 
 function displayValue(value: unknown) {
@@ -600,6 +927,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     macd: false,
   })
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
+  const [benchmarkHistory, setBenchmarkHistory] = useState<Record<BenchmarkKey, MarketHistoryResponse | null>>({ hs300: null, csiA500: null })
   const [historyLoading, setHistoryLoading] = useState(true)
   const [profile, setProfile] = useState<EtfProfileResponse | null>(null)
   const [profileLoading, setProfileLoading] = useState(true)
@@ -611,6 +939,10 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   useEffect(() => {
     fetchHistory()
   }, [p.etf_code, historyDays])
+
+  useEffect(() => {
+    fetchBenchmarkHistory()
+  }, [historyDays])
 
   useEffect(() => {
     fetchProfile()
@@ -639,6 +971,22 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
       console.error('Failed to fetch history:', e)
     } finally {
       setHistoryLoading(false)
+    }
+  }
+
+  const fetchBenchmarkHistory = async () => {
+    try {
+      const [hs300Res, csiA500Res] = await Promise.allSettled([
+        marketApi.getHistory('000300', historyDays),
+        marketApi.getHistory('000510', historyDays),
+      ])
+      setBenchmarkHistory({
+        hs300: hs300Res.status === 'fulfilled' ? hs300Res.value.data : null,
+        csiA500: csiA500Res.status === 'fulfilled' ? csiA500Res.value.data : null,
+      })
+    } catch (e) {
+      console.error('Failed to fetch benchmark history:', e)
+      setBenchmarkHistory({ hs300: null, csiA500: null })
     }
   }
 
@@ -684,6 +1032,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     high: k.high_price,
     low: k.low_price,
     volume: k.volume,
+    amount: k.amount ?? null,
     change: k.change_pct,
   }))
   const latestClose = chartData.at(-1)?.close ?? null
@@ -704,6 +1053,18 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     if (value == null) return ''
     return value >= 0 ? 'text-red-500' : 'text-green-500'
   }
+  const tradeSignal = buildTradeSignal(chartData, benchmarkHistory)
+  const renderRuleCheck = (check: RuleCheck) => (
+    <div key={check.label} className="rounded-md border bg-background/70 px-2.5 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-xs font-medium leading-5">{check.label}</div>
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-4 ${check.passed == null ? 'bg-slate-100 text-slate-600' : check.passed ? 'bg-red-50 text-red-700' : 'bg-slate-100 text-slate-500'}`}>
+          {check.passed == null ? '待数据' : check.passed ? '满足' : '未满足'}
+        </span>
+      </div>
+      <div className="mt-0.5 text-[11px] leading-5 text-muted-foreground">{check.detail}</div>
+    </div>
+  )
 
   const displayAdvice = advice || latestAdvice
   const profileErrors = profile ? visibleProfileErrors(profile.errors || []) : []
@@ -931,7 +1292,31 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                     技术指标
                   </h3>
                   {indicators ? (
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div className="space-y-4">
+                      <div className={`rounded-xl border p-3.5 ${tradeSignal.toneClassName}`}>
+                        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-start sm:justify-between">
+                          <div>
+                            <div className="text-xs font-medium opacity-80">交易指示</div>
+                            <div className="mt-1 text-lg font-semibold">{tradeSignal.label}</div>
+                            <p className="mt-1 text-xs leading-5">{tradeSignal.summary}</p>
+                          </div>
+                          <Badge variant="outline" className="border-current bg-background/70">
+                            规则信号
+                          </Badge>
+                        </div>
+                        <div className="mt-3 grid gap-2.5 lg:grid-cols-2">
+                          <div>
+                            <div className="mb-1.5 text-[11px] font-semibold opacity-80">买入条件</div>
+                            <div className="grid gap-1.5">{tradeSignal.buyChecks.map(renderRuleCheck)}</div>
+                          </div>
+                          <div>
+                            <div className="mb-1.5 text-[11px] font-semibold opacity-80">卖出条件</div>
+                            <div className="grid gap-1.5">{tradeSignal.sellChecks.map(renderRuleCheck)}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                       <div className="space-y-1">
                         <span className="text-muted-foreground">MA5</span>
                         <p className="font-mono font-semibold">{indicators.ma5?.toFixed(3) ?? 'N/A'}</p>
@@ -981,6 +1366,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                         <p className={`font-mono font-semibold ${indicators.macd_histogram != null ? (indicators.macd_histogram > 0 ? 'text-red-500' : 'text-green-500') : ''}`}>
                           {indicators.macd_histogram?.toFixed(4) ?? 'N/A'}
                         </p>
+                      </div>
                       </div>
                     </div>
                   ) : (

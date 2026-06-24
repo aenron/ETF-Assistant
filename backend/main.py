@@ -28,6 +28,7 @@ async def run_migrations():
         ("multi_agent_run.max_debate_rounds", "ALTER TABLE multi_agent_run ADD COLUMN max_debate_rounds INTEGER DEFAULT 3 NOT NULL"),
         ("multi_agent_run.collapse_debate_by_default", "ALTER TABLE multi_agent_run ADD COLUMN collapse_debate_by_default BOOLEAN DEFAULT TRUE NOT NULL"),
         ("portfolio.dca_track_override", "ALTER TABLE portfolio ADD COLUMN dca_track_override VARCHAR(20)"),
+        ("market_daily.amount", "ALTER TABLE market_daily ADD COLUMN amount NUMERIC(20, 4)"),
         ("portfolio_dca_state.pending_notify_key", "ALTER TABLE portfolio_dca_state ADD COLUMN pending_notify_key VARCHAR(200)"),
         ("portfolio_dca_state.pending_notify_reason", "ALTER TABLE portfolio_dca_state ADD COLUMN pending_notify_reason VARCHAR(100)"),
         ("index_valuation.pb", "ALTER TABLE index_valuation ADD COLUMN pb NUMERIC(12, 4)"),

@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,13 +10,14 @@ sys.path.insert(0, str(backend_root))
 from schemas.market import KLineItem
 from schemas.market import MarketQuote
 from services.market_service import MarketService
+from utils.timezone import now_in_shanghai
 
 
 class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_kline_uses_db_before_public_sources(self) -> None:
         db_kline = [
             KLineItem(
-                trade_date=date(2026, 5, 8),
+                trade_date=now_in_shanghai().date(),
                 open_price=1.0,
                 close_price=1.02,
                 high_price=1.03,
@@ -37,6 +38,43 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, db_kline)
         db_fetch.assert_awaited_once_with("513300", 60)
         ths_fetch.assert_not_called()
+
+    async def test_history_kline_refreshes_when_cached_data_is_stale(self) -> None:
+        stale_kline = [
+            KLineItem(
+                trade_date=now_in_shanghai().date() - timedelta(days=7),
+                open_price=1.0,
+                close_price=1.02,
+                high_price=1.03,
+                low_price=0.99,
+                volume=1000,
+                change_pct=2.0,
+            )
+        ]
+        fresh_kline = [
+            KLineItem(
+                trade_date=now_in_shanghai().date(),
+                open_price=1.1,
+                close_price=1.12,
+                high_price=1.13,
+                low_price=1.09,
+                volume=1200,
+                change_pct=1.8,
+            )
+        ]
+
+        with (
+            patch.object(MarketService, "get_kline_from_cache", new=AsyncMock(return_value=stale_kline)),
+            patch.object(MarketService, "get_kline_from_longer_cache", new=AsyncMock(return_value=None)),
+            patch.object(MarketService, "get_kline_from_db", new=AsyncMock(return_value=None)),
+            patch.object(MarketService, "_fetch_history_kline_ths_industry", return_value=fresh_kline) as ths_fetch,
+            patch.object(MarketService, "_cache_and_store_kline", new=AsyncMock()) as cache_store,
+        ):
+            result = await MarketService.get_history_kline("513300", days=60)
+
+        self.assertEqual(result, fresh_kline)
+        ths_fetch.assert_called_once_with("513300", 60)
+        cache_store.assert_awaited_once_with("513300", 60, fresh_kline)
 
     async def test_sina_fallback_runs_before_otc_fund_nav(self) -> None:
         sina_kline = [
@@ -130,6 +168,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
                         "low": 0.99,
                         "close": 1.02,
                         "volume": 1000,
+                        "amount": 123456.0,
                     }
                 ],
             },
@@ -137,6 +176,51 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(MarketService._qmt_timestamp_to_date(records[0]["time"]), date(2026, 5, 8))
+        self.assertEqual(records[0]["amount"], 123456.0)
+
+    async def test_qmt_history_keeps_amount_on_kline_items(self) -> None:
+        payload = {
+            "item": {
+                "type": "records",
+                "records": [
+                    {
+                        "time": "20260508",
+                        "open": 1.0,
+                        "high": 1.03,
+                        "low": 0.99,
+                        "close": 1.02,
+                        "volume": 1000,
+                        "amount": 123456.0,
+                    }
+                ],
+            }
+        }
+
+        with patch.object(MarketService, "_fetch_qmt_agent", new=AsyncMock(return_value=payload)):
+            result = await MarketService._fetch_history_kline_qmt_agent("513300", days=60)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].amount, 123456.0)
+
+    def test_ohlcv_dataframe_keeps_amount_on_kline_items(self) -> None:
+        pd = __import__("pandas")
+        df = pd.DataFrame([
+            {
+                "日期": "2026-05-08",
+                "开盘": 1.0,
+                "收盘": 1.02,
+                "最高": 1.03,
+                "最低": 0.99,
+                "成交量": 1000,
+                "成交额": 123456.0,
+                "涨跌幅": 2.0,
+            }
+        ])
+
+        result = MarketService._items_from_ohlcv_df(df, days=60)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].amount, 123456.0)
 
     async def test_cache_quote_keeps_cached_name_when_new_quote_name_empty(self) -> None:
         cached_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.0, change_pct=0.0)

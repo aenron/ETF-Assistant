@@ -69,6 +69,25 @@ class MarketService:
     def _kline_cache_key(cls, code: str, days: int) -> str:
         return f"{cls.REDIS_KEY_KLINE_PREFIX}{code}:{days}"
 
+    @staticmethod
+    def _is_kline_recent(data: List[KLineItem], max_lag_days: int = 4) -> bool:
+        """Return whether cached daily K-line data is recent enough to reuse."""
+        if not data:
+            return False
+        latest_dates = [item.trade_date for item in data if item.trade_date]
+        if not latest_dates:
+            return False
+        latest_date = max(latest_dates)
+        return latest_date >= now_in_shanghai().date() - timedelta(days=max_lag_days)
+
+    @staticmethod
+    def _has_kline_amount(data: List[KLineItem]) -> bool:
+        """Return whether the K-line series carries usable historical turnover amount."""
+        if not data:
+            return False
+        recent = data[-min(len(data), 6):]
+        return any(item.amount is not None and item.amount > 0 for item in recent)
+
     @classmethod
     def _profile_cache_key(cls, code: str, year: str) -> str:
         return f"{cls.REDIS_KEY_PROFILE_PREFIX}{code}:{year}"
@@ -153,6 +172,7 @@ class MarketService:
                 high_price=float(row.high_price) if row.high_price is not None else 0.0,
                 low_price=float(row.low_price) if row.low_price is not None else 0.0,
                 volume=int(row.volume or 0),
+                amount=float(row.amount) if getattr(row, "amount", None) is not None else None,
                 change_pct=float(row.change_pct) if row.change_pct is not None else 0.0,
             )
             for row in rows
@@ -566,7 +586,7 @@ class MarketService:
             high_price=latest.high_price,
             low_price=latest.low_price,
             volume=latest.volume,
-            amount=None,
+            amount=latest.amount,
         )
 
     @classmethod
@@ -917,6 +937,7 @@ class MarketService:
         high_col = "最高" if "最高" in df.columns else "high" if "high" in df.columns else None
         low_col = "最低" if "最低" in df.columns else "low" if "low" in df.columns else None
         volume_col = "成交量" if "成交量" in df.columns else "volume" if "volume" in df.columns else None
+        amount_col = "成交额" if "成交额" in df.columns else "amount" if "amount" in df.columns else None
         change_col = "涨跌幅" if "涨跌幅" in df.columns else None
         if not all([open_col, close_col, high_col, low_col]):
             return []
@@ -937,6 +958,7 @@ class MarketService:
                 high_price=float(row[high_col]),
                 low_price=float(row[low_col]),
                 volume=cls._to_int(row.get(volume_col)) or 0 if volume_col else 0,
+                amount=cls._to_float(row.get(amount_col)) if amount_col else None,
                 change_pct=round(change_pct, 2),
             ))
         return result
@@ -998,6 +1020,7 @@ class MarketService:
                     high_price=value,
                     low_price=value,
                     volume=0,
+                    amount=None,
                     change_pct=round(change_pct, 2),
                 ))
             return result
@@ -1035,6 +1058,7 @@ class MarketService:
                         high_price=float(row.get("high") or 0),
                         low_price=float(row.get("low") or 0),
                         volume=cls._to_int(row.get("vol")) or 0,
+                        amount=cls._to_float(row.get("amount")),
                         change_pct=float(row.get("pct_chg") or 0),
                     ))
                 if result:
@@ -1097,6 +1121,7 @@ class MarketService:
                     high_price=high,
                     low_price=low,
                     volume=cls._to_int(record.get("volume") or record.get("vol")) or 0,
+                    amount=cls._to_float(record.get("amount")),
                     change_pct=round(change_pct, 2),
                 ))
             if result:
@@ -1150,6 +1175,7 @@ class MarketService:
                                 high_price=float(parts[3]),
                                 low_price=float(parts[4]),
                                 volume=cls._to_int(parts[5]) or 0,
+                                amount=cls._to_float(parts[6]) if len(parts) > 6 else None,
                                 change_pct=round(change_pct, 2),
                             ))
 
@@ -1203,6 +1229,7 @@ class MarketService:
                         high_price=float(item["high"]),
                         low_price=float(item["low"]),
                         volume=int(item["volume"]),
+                        amount=cls._to_float(item.get("amount")),
                         change_pct=round(change_pct, 2),
                     ))
                 
@@ -1218,16 +1245,25 @@ class MarketService:
         """获取历史K线数据（ETF/股票/指数板块/场外基金多源降级）"""
         if prefer_cache:
             cached = await cls.get_kline_from_cache(code, days)
-            if cached:
+            if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
                 return cached
+            if cached:
+                reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
+                print(f"[MarketService] K线缓存需刷新: {code}, {reason}")
 
             cached = await cls.get_kline_from_longer_cache(code, days)
-            if cached:
+            if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
                 return cached
+            if cached:
+                reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
+                print(f"[MarketService] 较长K线缓存需刷新: {code}, {reason}")
 
             cached = await cls.get_kline_from_db(code, days)
-            if cached:
+            if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
                 return cached
+            if cached:
+                reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
+                print(f"[MarketService] 数据库K线缓存需刷新: {code}, {reason}")
 
         print(f"[MarketService] 开始获取历史K线: {code}, 天数: {days}")
 
@@ -1242,7 +1278,7 @@ class MarketService:
 
         if not prefer_cache:
             cached = await cls.get_kline_from_cache(code, days)
-            if cached:
+            if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
                 return cached
 
         # QMT Agent：配置后优先使用本地 QMT/xtdata 的真实 K 线。
@@ -1973,7 +2009,15 @@ class MarketService:
                     MarketDaily.trade_date == item.trade_date
                 )
             )
-            if existing.scalar_one_or_none():
+            existing_row = existing.scalar_one_or_none()
+            if existing_row:
+                existing_row.open_price = item.open_price
+                existing_row.close_price = item.close_price
+                existing_row.high_price = item.high_price
+                existing_row.low_price = item.low_price
+                existing_row.volume = item.volume
+                existing_row.amount = item.amount
+                existing_row.change_pct = item.change_pct
                 continue
             
             record = MarketDaily(
@@ -1984,6 +2028,7 @@ class MarketService:
                 high_price=item.high_price,
                 low_price=item.low_price,
                 volume=item.volume,
+                amount=item.amount,
                 change_pct=item.change_pct,
             )
             session.add(record)

@@ -4,9 +4,9 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type AdviceLogResponse, type MarketHistoryResponse, type PortfolioDcaSignalHistoryItem } from '@/services/api'
+import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type MarketHistoryResponse, type PortfolioDcaSignalHistoryItem } from '@/services/api'
 import { Plus, Pencil, Trash2, Search, Lightbulb, RefreshCw, Eye, Clock, HelpCircle } from 'lucide-react'
-import { EtfDetailModal } from './EtfDetailModal'
+import { buildTradeSignalFromHistory, EtfDetailModal, type BenchmarkKey, type TradeSignal } from './EtfDetailModal'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AdviceEventContextPanel } from './AdviceEventContextPanel'
 import { formatBeijingTime } from '@/utils/time'
@@ -17,6 +17,9 @@ interface PortfolioTableProps {
   portfolios: PortfolioWithMarket[]
   onRefresh: () => void
 }
+
+type PortfolioSortKey = 'shares' | 'market_value' | 'today_pnl_pct' | 'advice'
+type SortDirection = 'asc' | 'desc'
 
 export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [showForm, setShowForm] = useState(false)
@@ -36,7 +39,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [showAdviceModal, setShowAdviceModal] = useState(false)
   const [refreshingCode, setRefreshingCode] = useState<string | null>(null)
   const [detailPortfolio, setDetailPortfolio] = useState<PortfolioWithMarket | null>(null)
-  const [latestAdvices, setLatestAdvices] = useState<Record<string, AdviceLogResponse>>({})
+  const [tradeSignalHistory, setTradeSignalHistory] = useState<Record<string, MarketHistoryResponse>>({})
+  const [benchmarkHistory, setBenchmarkHistory] = useState<Record<BenchmarkKey, MarketHistoryResponse | null>>({ hs300: null, csiA500: null })
   const [deleteTarget, setDeleteTarget] = useState<PortfolioWithMarket | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [showDcaHelp, setShowDcaHelp] = useState(false)
@@ -46,18 +50,110 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [dcaSignalHistory, setDcaSignalHistory] = useState<PortfolioDcaSignalHistoryItem[]>([])
   const [dcaSignalHistoryLoading, setDcaSignalHistoryLoading] = useState(false)
   const [showDcaChangesOnly, setShowDcaChangesOnly] = useState(false)
+  const [sortConfig, setSortConfig] = useState<{ key: PortfolioSortKey; direction: SortDirection }>({ key: 'today_pnl_pct', direction: 'desc' })
 
   useEffect(() => {
-    fetchLatestAdvices()
-  }, [])
+    fetchTradeSignalData()
+  }, [portfolios.map((item) => item.etf_code).join(',')])
 
-  const fetchLatestAdvices = async () => {
-    try {
-      const res = await adviceApi.getLatest()
-      setLatestAdvices(res.data || {})
-    } catch (e) {
-      console.error('Failed to fetch latest advices:', e)
+
+  const fetchTradeSignalData = async () => {
+    const codes = Array.from(new Set(portfolios.map((item) => item.etf_code).filter(Boolean)))
+    if (codes.length === 0) {
+      setTradeSignalHistory({})
+      return
     }
+
+    try {
+      const [hs300Res, csiA500Res] = await Promise.allSettled([
+        marketApi.getHistory('000300', 60),
+        marketApi.getHistory('000510', 60),
+      ])
+      setBenchmarkHistory({
+        hs300: hs300Res.status === 'fulfilled' ? hs300Res.value.data : null,
+        csiA500: csiA500Res.status === 'fulfilled' ? csiA500Res.value.data : null,
+      })
+
+      const results = await Promise.allSettled(codes.map((code) => marketApi.getHistory(code, 60)))
+      const nextHistory: Record<string, MarketHistoryResponse> = {}
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          nextHistory[codes[index]] = result.value.data
+        }
+      })
+      setTradeSignalHistory(nextHistory)
+    } catch (e) {
+      console.error('Failed to fetch trade signal histories:', e)
+    }
+  }
+
+  const getTradeSignal = (code: string): TradeSignal | null => {
+    const history = tradeSignalHistory[code]
+    if (!history) return null
+    return buildTradeSignalFromHistory(history, benchmarkHistory)
+  }
+
+
+  const getAdviceSortValue = (signal: TradeSignal | null) => {
+    if (!signal) return -1
+    const rank: Record<string, number> = {
+      clear: 80,
+      reduce: 70,
+      take_profit: 60,
+      watch: signal.label === '等待回踩' ? 50 : signal.label === '观察修复' ? 45 : 40,
+      insufficient: 20,
+      buy: signal.label === '正常买入' ? 10 : 15,
+    }
+    return rank[signal.action] ?? 0
+  }
+
+  const sortPortfolios = (items: PortfolioWithMarket[]) => {
+    return items.slice().sort((a, b) => {
+      const signalA = getTradeSignal(a.etf_code)
+      const signalB = getTradeSignal(b.etf_code)
+      const valueA = sortConfig.key === 'shares'
+        ? a.shares
+        : sortConfig.key === 'market_value'
+          ? a.market_value ?? -Infinity
+          : sortConfig.key === 'today_pnl_pct'
+            ? a.today_pnl_pct ?? -Infinity
+            : getAdviceSortValue(signalA)
+      const valueB = sortConfig.key === 'shares'
+        ? b.shares
+        : sortConfig.key === 'market_value'
+          ? b.market_value ?? -Infinity
+          : sortConfig.key === 'today_pnl_pct'
+            ? b.today_pnl_pct ?? -Infinity
+            : getAdviceSortValue(signalB)
+      const result = valueA === valueB ? a.etf_code.localeCompare(b.etf_code) : valueA - valueB
+      return sortConfig.direction === 'asc' ? result : -result
+    })
+  }
+
+  const sortedPortfolios = sortPortfolios(portfolios)
+
+  const handleSort = (key: PortfolioSortKey) => {
+    setSortConfig((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc',
+    }))
+  }
+
+  const sortLabel = (key: PortfolioSortKey) => sortConfig.key === key ? (sortConfig.direction === 'desc' ? ' ↓' : ' ↑') : ''
+
+  const SortHeader = ({ sortKey, align = 'right', children }: { sortKey: PortfolioSortKey; align?: 'left' | 'right' | 'center'; children: React.ReactNode }) => {
+    const alignClass = align === 'right' ? 'justify-end text-right' : align === 'center' ? 'justify-center text-center' : 'justify-start text-left'
+    return (
+      <button
+        type="button"
+        onClick={() => handleSort(sortKey)}
+        className={`inline-flex w-full items-center gap-1 font-medium text-foreground hover:text-primary ${alignClass}`}
+        title="点击排序"
+      >
+        <span>{children}</span>
+        <span className="text-[10px] text-muted-foreground">{sortLabel(sortKey)}</span>
+      </button>
+    )
   }
 
   const handleSearch = async () => {
@@ -156,8 +252,6 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       const res = await adviceApi.generateForPortfolio(portfolioId)
       setCurrentAdvice(res.data)
       setShowAdviceModal(true)
-      // 刷新最新建议
-      fetchLatestAdvices()
     } catch (error: any) {
       console.error('Failed to get advice:', error)
       const errorMsg = error?.code === 'ECONNABORTED' 
@@ -428,8 +522,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       </CardHeader>
       <CardContent>
         <div className="space-y-3 md:hidden">
-          {portfolios.map((p) => {
-            const latestAdvice = latestAdvices[p.etf_code]
+          {sortedPortfolios.map((p) => {
+            const tradeSignal = getTradeSignal(p.etf_code)
             return (
               <div key={p.id} className="rounded-xl border bg-background p-4 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
@@ -449,15 +543,18 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       <span>{p.dca_label || '定投灯待计算'}</span>
                     </button>
                   </div>
-                  {latestAdvice ? (
-                    <Badge
-                      variant="outline"
-                      className={`shrink-0 text-xs ${getAdviceTypeColor(latestAdvice.advice_type || 'hold')} border-current`}
-                    >
-                      {getAdviceTypeLabel(latestAdvice.advice_type || 'hold')}
-                    </Badge>
+                  {tradeSignal ? (
+                    <button type="button" onClick={() => setDetailPortfolio(p)} className="shrink-0">
+                      <Badge
+                        variant="outline"
+                        className={`text-xs ${tradeSignal.toneClassName}`}
+                        title="查看详情"
+                      >
+                        {tradeSignal.label}
+                      </Badge>
+                    </button>
                   ) : (
-                    <span className="shrink-0 text-xs text-muted-foreground">暂无建议</span>
+                    <span className="shrink-0 text-xs text-muted-foreground">计算中</span>
                   )}
                 </div>
 
@@ -544,19 +641,19 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
               <tr className="border-b">
                 <th className="text-left py-3 px-2">代码</th>
                 <th className="text-left py-3 px-2">名称</th>
-                <th className="text-right py-3 px-2">份额</th>
+                <th className="text-right py-3 px-2"><SortHeader sortKey="shares">份额</SortHeader></th>
                 <th className="text-right py-3 px-2">成本/现价</th>
-                <th className="text-right py-3 px-2">市值</th>
+                <th className="text-right py-3 px-2"><SortHeader sortKey="market_value">市值</SortHeader></th>
                 <th className="text-right py-3 px-2">盈亏</th>
-                <th className="text-right py-3 px-2">今日涨跌</th>
+                <th className="text-right py-3 px-2"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
                 <th className="text-left py-3 px-2">定投灯</th>
-                <th className="text-center py-3 px-2">AI建议</th>
+                <th className="text-center py-3 px-2"><SortHeader sortKey="advice" align="center">建议</SortHeader></th>
                 <th className="text-center py-3 px-2">操作</th>
               </tr>
             </thead>
             <tbody>
-              {portfolios.map((p) => {
-                const latestAdvice = latestAdvices[p.etf_code]
+              {sortedPortfolios.map((p) => {
+                const tradeSignal = getTradeSignal(p.etf_code)
                 return (
                 <tr key={p.id} className="border-b hover:bg-muted/50 cursor-pointer" onClick={() => setDetailPortfolio(p)}>
                   <td className="py-3 px-2 font-mono">{p.etf_code}</td>
@@ -594,26 +691,18 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     </div>
                   </td>
                   <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>
-                    {latestAdvice ? (
-                      <div className="flex flex-col items-center gap-0.5">
+                    {tradeSignal ? (
+                      <button type="button" onClick={() => setDetailPortfolio(p)} className="inline-flex">
                         <Badge
                           variant="outline"
-                          className={`text-xs ${getAdviceTypeColor(latestAdvice.advice_type || 'hold')} border-current`}
+                          className={`text-xs ${tradeSignal.toneClassName}`}
+                          title="查看详情"
                         >
-                          {getAdviceTypeLabel(latestAdvice.advice_type || 'hold')}
-                          <span className="ml-1 opacity-70">{latestAdvice.confidence?.toFixed(0)}%</span>
+                          {tradeSignal.label}
                         </Badge>
-                        <span className="text-[10px] text-muted-foreground">
-                          {formatBeijingTime(latestAdvice.created_at, {
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          }, '-')}
-                        </span>
-                      </div>
+                      </button>
                     ) : (
-                      <span className="text-xs text-muted-foreground">暂无</span>
+                      <span className="text-xs text-muted-foreground">计算中</span>
                     )}
                   </td>
                   <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>

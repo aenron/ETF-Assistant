@@ -17,4 +17,5 @@ class MarketDaily(Base):
     high_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     low_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     volume: Mapped[int | None] = mapped_column(BigInteger)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     change_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
