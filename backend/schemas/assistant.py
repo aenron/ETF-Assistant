@@ -13,6 +13,7 @@ class AssistantMessageCreate(ShanghaiBaseModel):
     session_id: Optional[int] = None
     retry_message_id: Optional[int] = None
     include_portfolio_context: bool = True
+    portfolio_ids: Optional[List[int]] = None
 
 
 class AssistantSessionCreate(ShanghaiBaseModel):
@@ -36,6 +37,8 @@ class AssistantMessageResponse(ShanghaiOrmModel):
     id: int
     role: str
     content: str
+    status: str = "done"
+    run_id: Optional[str] = None
     created_at: datetime
 
 class AssistantChatResponse(ShanghaiBaseModel):

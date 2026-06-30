@@ -35,6 +35,8 @@ def tavily_search_enabled() -> bool:
 def provider_supports_search(provider: str) -> bool:
     if tavily_search_enabled():
         return True
+    if provider == "openai":
+        return settings.openai_enable_web_search
     if provider == "gemini":
         return settings.gemini_enable_grounding
     if provider == "qwen":
@@ -50,7 +52,7 @@ def build_providers() -> dict[str, LLMProvider]:
         "openai": LLMProvider(
             id="openai",
             name="OpenAI GPT",
-            description=f"OpenAI GPT系列模型{tavily_suffix}",
+            description=f"OpenAI GPT系列模型，支持 Responses API 原生 Web Search{tavily_suffix}",
             enabled=bool(settings.openai_api_key),
             supports_search=provider_supports_search("openai"),
         ),

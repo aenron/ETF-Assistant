@@ -60,6 +60,7 @@ async def chat_with_assistant(
         message=data.message,
         retry_message_id=data.retry_message_id,
         include_portfolio_context=data.include_portfolio_context,
+        portfolio_ids=data.portfolio_ids,
     )
 
 
@@ -77,7 +78,27 @@ async def stream_chat_with_assistant(
         message=data.message,
         retry_message_id=data.retry_message_id,
         include_portfolio_context=data.include_portfolio_context,
+        portfolio_ids=data.portfolio_ids,
     )
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/chat/stream/{message_id}")
+async def subscribe_assistant_stream(
+    message_id: int,
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """重新订阅正在生成的助手消息。"""
+    stream = AssistantService.subscribe_stream(db, user_id=current_user.id, message_id=message_id)
     return StreamingResponse(
         stream,
         media_type="text/event-stream",

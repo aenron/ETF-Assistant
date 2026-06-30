@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { portfolioApi, marketApi, adviceApi, type PortfolioWithMarket, type EtfSearchResult, type AdviceResponse, type MarketHistoryResponse, type PortfolioDcaSignalHistoryItem } from '@/services/api'
 import { Plus, Pencil, Trash2, Search, Lightbulb, RefreshCw, Eye, Clock, HelpCircle } from 'lucide-react'
-import { buildTradeSignalFromHistory, EtfDetailModal, type BenchmarkKey, type TradeSignal } from './EtfDetailModal'
+import { EtfDetailModal, type TradeSignal } from './EtfDetailModal'
 import { ConfirmDialog } from './ConfirmDialog'
 import { AdviceEventContextPanel } from './AdviceEventContextPanel'
 import { formatBeijingTime } from '@/utils/time'
@@ -18,6 +18,8 @@ interface PortfolioTableProps {
   onRefresh: () => void
 }
 
+type AssetType = 'auto' | 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
+
 type PortfolioSortKey = 'shares' | 'market_value' | 'today_pnl_pct' | 'advice'
 type SortDirection = 'asc' | 'desc'
 
@@ -28,7 +30,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [searchResults, setSearchResults] = useState<EtfSearchResult[]>([])
   const [formData, setFormData] = useState({
     etf_code: '',
+    asset_type: 'auto' as AssetType,
     shares: '',
+    buy_amount: '',
     cost_price: '',
     buy_date: '',
     note: '',
@@ -39,10 +43,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [showAdviceModal, setShowAdviceModal] = useState(false)
   const [refreshingCode, setRefreshingCode] = useState<string | null>(null)
   const [detailPortfolio, setDetailPortfolio] = useState<PortfolioWithMarket | null>(null)
-  const [tradeSignalHistory, setTradeSignalHistory] = useState<Record<string, MarketHistoryResponse>>({})
-  const [benchmarkHistory, setBenchmarkHistory] = useState<Record<BenchmarkKey, MarketHistoryResponse | null>>({ hs300: null, csiA500: null })
   const [deleteTarget, setDeleteTarget] = useState<PortfolioWithMarket | null>(null)
   const [deleting, setDeleting] = useState(false)
+
   const [showDcaHelp, setShowDcaHelp] = useState(false)
   const [dcaDetailPortfolio, setDcaDetailPortfolio] = useState<PortfolioWithMarket | null>(null)
   const [dcaHistory, setDcaHistory] = useState<MarketHistoryResponse | null>(null)
@@ -52,47 +55,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   const [showDcaChangesOnly, setShowDcaChangesOnly] = useState(false)
   const [sortConfig, setSortConfig] = useState<{ key: PortfolioSortKey; direction: SortDirection }>({ key: 'today_pnl_pct', direction: 'desc' })
 
-  useEffect(() => {
-    fetchTradeSignalData()
-  }, [portfolios.map((item) => item.etf_code).join(',')])
-
-
-  const fetchTradeSignalData = async () => {
-    const codes = Array.from(new Set(portfolios.map((item) => item.etf_code).filter(Boolean)))
-    if (codes.length === 0) {
-      setTradeSignalHistory({})
-      return
-    }
-
-    try {
-      const [hs300Res, csiA500Res] = await Promise.allSettled([
-        marketApi.getHistory('000300', 60),
-        marketApi.getHistory('000510', 60),
-      ])
-      setBenchmarkHistory({
-        hs300: hs300Res.status === 'fulfilled' ? hs300Res.value.data : null,
-        csiA500: csiA500Res.status === 'fulfilled' ? csiA500Res.value.data : null,
-      })
-
-      const results = await Promise.allSettled(codes.map((code) => marketApi.getHistory(code, 60)))
-      const nextHistory: Record<string, MarketHistoryResponse> = {}
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          nextHistory[codes[index]] = result.value.data
-        }
-      })
-      setTradeSignalHistory(nextHistory)
-    } catch (e) {
-      console.error('Failed to fetch trade signal histories:', e)
-    }
-  }
-
-  const getTradeSignal = (code: string): TradeSignal | null => {
-    const history = tradeSignalHistory[code]
-    if (!history) return null
-    return buildTradeSignalFromHistory(history, benchmarkHistory)
-  }
-
+  const getTradeSignal = (portfolio: PortfolioWithMarket): TradeSignal | null => portfolio.trend_signal || null
 
   const getAdviceSortValue = (signal: TradeSignal | null) => {
     if (!signal) return -1
@@ -109,8 +72,8 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
 
   const sortPortfolios = (items: PortfolioWithMarket[]) => {
     return items.slice().sort((a, b) => {
-      const signalA = getTradeSignal(a.etf_code)
-      const signalB = getTradeSignal(b.etf_code)
+      const signalA = getTradeSignal(a)
+      const signalB = getTradeSignal(b)
       const valueA = sortConfig.key === 'shares'
         ? a.shares
         : sortConfig.key === 'market_value'
@@ -164,7 +127,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
   }
 
   const handleSelectEtf = (etf: EtfSearchResult) => {
-    setFormData({ ...formData, etf_code: etf.code })
+    setFormData({ ...formData, etf_code: etf.code, asset_type: 'etf' })
     setSearchResults([])
     setSearchQuery('')
   }
@@ -174,31 +137,60 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     setEditingId(null)
     setSearchResults([])
     setSearchQuery('')
-    setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' })
+    setFormData({ etf_code: '', asset_type: 'auto', shares: '', buy_amount: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' })
   }
 
   const openCreateForm = () => {
     setEditingId(null)
     setSearchResults([])
     setSearchQuery('')
-    setFormData({ etf_code: '', shares: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' })
+    setFormData({ etf_code: '', asset_type: 'auto', shares: '', buy_amount: '', cost_price: '', buy_date: '', note: '', dca_track_override: '' })
     setShowForm(true)
   }
 
   const handleSubmit = async () => {
-    const data = {
-      etf_code: formData.etf_code,
-      shares: parseFloat(formData.shares),
-      cost_price: parseFloat(formData.cost_price),
+    const isCashLike = effectiveFormAssetType === 'cash' || effectiveFormAssetType === 'money_fund'
+    const costPrice = isCashLike ? 1 : parseFloat(formData.cost_price)
+    const buyAmount = parseFloat(formData.buy_amount)
+    const shares = (effectiveFormAssetType === 'otc_fund' && !editingId) || isCashLike
+      ? buyAmount / costPrice
+      : parseFloat(formData.shares)
+    const assetCode = isCashLike && !formData.etf_code.trim()
+      ? (effectiveFormAssetType === 'cash' ? 'CASH' : 'MONEY')
+      : formData.etf_code.trim()
+
+    if (!assetCode) {
+      alert('请填写资产代码')
+      return
+    }
+    if (!Number.isFinite(costPrice) || costPrice <= 0 || !Number.isFinite(shares) || shares <= 0) {
+      alert((effectiveFormAssetType === 'otc_fund' && !editingId) || isCashLike ? '请填写有效的金额和净值' : '请填写有效的份额和成本价')
+      return
+    }
+    if (effectiveFormAssetType === 'otc_fund' && costPrice > 100) {
+      alert('场外基金的成本净值应填写每份净值，例如 0.9000 或 1.2345，不是买入金额或总成本。')
+      return
+    }
+
+    const baseData = {
+      shares,
+      cost_price: costPrice,
       buy_date: formData.buy_date || undefined,
       note: formData.note || undefined,
       dca_track_override: formData.dca_track_override || undefined,
     }
 
     if (editingId) {
-      await portfolioApi.update(editingId, data)
+      await portfolioApi.update(editingId, {
+        ...baseData,
+        asset_type: effectiveFormAssetType,
+      })
     } else {
-      await portfolioApi.create(data)
+      await portfolioApi.create({
+        ...baseData,
+        etf_code: assetCode,
+        asset_type: formData.asset_type,
+      })
     }
 
     resetPortfolioForm()
@@ -211,7 +203,9 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     setSearchQuery('')
     setFormData({
       etf_code: p.etf_code,
+      asset_type: (p.asset_type || 'etf') as AssetType,
       shares: p.shares.toString(),
+      buy_amount: (p.shares * p.cost_price).toFixed(2),
       cost_price: p.cost_price.toString(),
       buy_date: p.buy_date || '',
       note: p.note || '',
@@ -228,6 +222,10 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       await portfolioApi.delete(deleteTarget.id)
       setDeleteTarget(null)
       onRefresh()
+    } catch (error: any) {
+      console.error('删除持仓失败:', error)
+      const detail = error?.response?.data?.detail || error?.message || '请稍后重试'
+      alert(`删除失败：${detail}`)
     } finally {
       setDeleting(false)
     }
@@ -326,6 +324,38 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
     }
     return `${pnl.toFixed(2)}（${pnlPct.toFixed(2)}%）`
   }
+
+  const inferAssetTypeFromCode = (code: string): Exclude<AssetType, 'auto' | 'cash' | 'money_fund'> => {
+    const clean = code.trim()
+    if (!/^\d{6}$/.test(clean)) return 'etf'
+    if (clean.startsWith('5') || clean.startsWith('15') || clean.startsWith('16') || clean.startsWith('18')) return 'etf'
+    if (/^(600|601|603|605|688|000|001|002|003|300|301|8|4)/.test(clean)) return 'stock'
+    return 'otc_fund'
+  }
+  const effectiveFormAssetType = formData.asset_type === 'auto' ? inferAssetTypeFromCode(formData.etf_code) : formData.asset_type
+  const getAssetTypeLabel = (assetType?: string | null) => {
+    if (assetType === 'otc_fund') return '场外基金'
+    if (assetType === 'stock') return '股票'
+    if (assetType === 'cash') return '现金'
+    if (assetType === 'money_fund') return '货币基金'
+    if (assetType === 'auto') return '自动识别'
+    return 'ETF'
+  }
+  const isOtcFund = (portfolio: PortfolioWithMarket) => portfolio.asset_type === 'otc_fund'
+  const isCashLikePortfolio = (portfolio: PortfolioWithMarket) => portfolio.asset_type === 'cash' || portfolio.asset_type === 'money_fund'
+  const isCashLikeForm = effectiveFormAssetType === 'cash' || effectiveFormAssetType === 'money_fund'
+  const priceLabel = (portfolio: PortfolioWithMarket) => isCashLikePortfolio(portfolio) ? '记账净值' : isOtcFund(portfolio) ? '最新净值' : '当前价格'
+  const priceTimeLabel = (portfolio: PortfolioWithMarket) => isCashLikePortfolio(portfolio) ? '记账时间' : isOtcFund(portfolio) ? '净值日期' : '行情时间'
+  const isFundAmountEntry = (effectiveFormAssetType === 'otc_fund' && !editingId) || isCashLikeForm
+  const quantityLabel = isFundAmountEntry ? '金额' : effectiveFormAssetType === 'stock' ? '股数' : '份额'
+  const quantityPlaceholder = isFundAmountEntry ? '实际金额' : effectiveFormAssetType === 'stock' ? '持有股数' : '持有份额'
+  const costLabel = isCashLikeForm ? '记账净值' : effectiveFormAssetType === 'otc_fund' ? '成本净值' : '成本价'
+  const estimatedFundShares = (() => {
+    const amount = parseFloat(formData.buy_amount)
+    const nav = isCashLikeForm ? 1 : parseFloat(formData.cost_price)
+    return isFundAmountEntry && Number.isFinite(amount) && Number.isFinite(nav) && nav > 0 ? amount / nav : null
+  })()
+
 
   const getPnlColorClass = (value: number | null | undefined) => {
     return value && value > 0 ? 'text-red-500' : value && value < 0 ? 'text-green-500' : ''
@@ -523,12 +553,15 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       <CardContent>
         <div className="space-y-3 md:hidden">
           {sortedPortfolios.map((p) => {
-            const tradeSignal = getTradeSignal(p.etf_code)
+            const tradeSignal = getTradeSignal(p)
             return (
               <div key={p.id} className="rounded-xl border bg-background p-4 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="font-mono text-base font-semibold">{p.etf_code}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="font-mono text-base font-semibold">{p.etf_code}</div>
+                      <Badge variant="outline" className="text-[10px]">{getAssetTypeLabel(p.asset_type)}</Badge>
+                    </div>
                     <div className="mt-1 text-sm text-muted-foreground">{p.etf_name || '-'}</div>
                     {p.current_price == null && (
                       <div className="mt-2 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">行情缓存刷新中</div>
@@ -564,7 +597,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     <div className="mt-1 font-medium">{p.shares.toLocaleString()}</div>
                   </div>
                   <div className="rounded-lg bg-muted/40 p-3">
-                    <div className="text-xs text-muted-foreground">当前价格</div>
+                    <div className="text-xs text-muted-foreground">{priceLabel(p)}</div>
                     <div className="mt-1 font-medium">{p.current_price?.toFixed(3) || '-'}</div>
                   </div>
                   <div className="rounded-lg bg-muted/40 p-3">
@@ -586,7 +619,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 </div>
 
                 <div className="mt-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                  <span>行情时间</span>
+                  <span>{priceTimeLabel(p)}</span>
                   <span>{formatMarketRefreshedAt(p.market_refreshed_at)}</span>
                 </div>
 
@@ -636,48 +669,64 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
         </div>
 
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[1268px] table-fixed text-[13px]">
+            <colgroup>
+              <col className="w-[82px]" />
+              <col className="w-[150px]" />
+              <col className="w-[108px]" />
+              <col className="w-[116px]" />
+              <col className="w-[118px]" />
+              <col className="w-[128px]" />
+              <col className="w-[118px]" />
+              <col className="w-[168px]" />
+              <col className="w-[96px]" />
+              <col className="w-[184px]" />
+            </colgroup>
             <thead>
               <tr className="border-b">
-                <th className="text-left py-3 px-2">代码</th>
-                <th className="text-left py-3 px-2">名称</th>
-                <th className="text-right py-3 px-2"><SortHeader sortKey="shares">份额</SortHeader></th>
-                <th className="text-right py-3 px-2">成本/现价</th>
-                <th className="text-right py-3 px-2"><SortHeader sortKey="market_value">市值</SortHeader></th>
-                <th className="text-right py-3 px-2">盈亏</th>
-                <th className="text-right py-3 px-2"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
-                <th className="text-left py-3 px-2">定投灯</th>
-                <th className="text-center py-3 px-2"><SortHeader sortKey="advice" align="center">建议</SortHeader></th>
-                <th className="text-center py-3 px-2">操作</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-left">代码</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-left">名称</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="shares">份额</SortHeader></th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-right">成本/现价</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="market_value">市值</SortHeader></th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-right">盈亏</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-left">定投灯</th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-center"><SortHeader sortKey="advice" align="center">日线建议</SortHeader></th>
+                <th className="whitespace-nowrap px-2 py-2.5 text-center">操作</th>
               </tr>
             </thead>
             <tbody>
               {sortedPortfolios.map((p) => {
-                const tradeSignal = getTradeSignal(p.etf_code)
+                const tradeSignal = getTradeSignal(p)
                 return (
                 <tr key={p.id} className="border-b hover:bg-muted/50 cursor-pointer" onClick={() => setDetailPortfolio(p)}>
-                  <td className="py-3 px-2 font-mono">{p.etf_code}</td>
-                  <td className="py-3 px-2">
-                    <div>{p.etf_name || '-'}</div>
-                    {p.current_price == null && <div className="mt-1 text-xs text-amber-700">行情缓存刷新中</div>}
+                  <td className="whitespace-nowrap px-2 py-2.5">
+                    <div className="font-mono">{p.etf_code}</div>
+                    <Badge variant="outline" className="mt-1 text-[10px]">{getAssetTypeLabel(p.asset_type)}</Badge>
                   </td>
-                  <td className="py-3 px-2 text-right">{p.shares.toLocaleString()}</td>
-                  <td className="py-3 px-2 text-right">
+                  <td className="px-2 py-2.5">
+                    <div className="truncate" title={p.etf_name || '-'}>{p.etf_name || '-'}</div>
+                    {p.current_price == null && <div className="mt-1 truncate text-[11px] text-amber-700">行情缓存刷新中</div>}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-right">{p.shares.toLocaleString()}</td>
+                  <td className="px-2 py-2.5 text-right">
                     <div className="flex flex-col items-end">
-                      <span>{p.cost_price.toFixed(4)} / {p.current_price?.toFixed(3) || '-'}</span>
-                      <span className="text-[10px] text-muted-foreground">
+                      <span className="whitespace-nowrap">{p.cost_price.toFixed(4)} / {p.current_price?.toFixed(3) || '-'}</span>
+                      {isOtcFund(p) && <span className="whitespace-nowrap text-[10px] text-muted-foreground">成本净值 / 最新净值</span>}
+                      <span className="whitespace-nowrap text-[10px] text-muted-foreground">
                         {formatMarketRefreshedAt(p.market_refreshed_at)}
                       </span>
                     </div>
                   </td>
-                  <td className="py-3 px-2 text-right">{p.market_value?.toFixed(2) || '-'}</td>
-                  <td className={`py-3 px-2 text-right ${getPnlColorClass(p.pnl)}`}>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-right">{p.market_value?.toFixed(2) || '-'}</td>
+                  <td className={`whitespace-nowrap px-2 py-2.5 text-right ${getPnlColorClass(p.pnl)}`}>
                     {formatPnl(p.pnl, p.pnl_pct)}
                   </td>
-                  <td className={`py-3 px-2 text-right ${getPnlColorClass(p.today_pnl)}`}>
+                  <td className={`whitespace-nowrap px-2 py-2.5 text-right ${getPnlColorClass(p.today_pnl)}`}>
                     {formatPnl(p.today_pnl, p.today_pnl_pct)}
                   </td>
-                  <td className="py-3 px-2" title={p.dca_reason || undefined} onClick={e => e.stopPropagation()}>
+                  <td className="px-2 py-2.5" title={p.dca_reason || undefined} onClick={e => e.stopPropagation()}>
                     <button
                       type="button"
                       className={`inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium transition-colors hover:bg-muted ${getDcaTextClass(p.dca_light, p.dca_label)}`}
@@ -690,7 +739,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       {p.dca_budget_label || p.dca_action || '-'} · {formatDcaMeta(p)}
                     </div>
                   </td>
-                  <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-center" onClick={e => e.stopPropagation()}>
                     {tradeSignal ? (
                       <button type="button" onClick={() => setDetailPortfolio(p)} className="inline-flex">
                         <Badge
@@ -705,10 +754,12 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       <span className="text-xs text-muted-foreground">计算中</span>
                     )}
                   </td>
-                  <td className="py-3 px-2 text-center" onClick={e => e.stopPropagation()}>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                    <div className="flex flex-nowrap items-center justify-center gap-1">
                     <Button
                       size="icon"
                       variant="ghost"
+                      className="h-8 w-8"
                       onClick={() => setDetailPortfolio(p)}
                       title="查看详情"
                     >
@@ -717,6 +768,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     <Button
                       size="icon"
                       variant="ghost"
+                      className="h-8 w-8"
                       onClick={() => handleGetAdvice(p.id)}
                       disabled={adviceLoading === p.id}
                       title="生成AI建议"
@@ -726,18 +778,20 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     <Button 
                       size="icon" 
                       variant="ghost" 
+                      className="h-8 w-8"
                       onClick={() => handleRefreshQuote(p.etf_code)}
                       disabled={refreshingCode === p.etf_code}
                       title="刷新行情"
                     >
                       <RefreshCw className={`h-4 w-4 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
                     </Button>
-                    <Button size="icon" variant="ghost" onClick={() => handleEdit(p)}>
+                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => handleEdit(p)}>
                       <Pencil className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" variant="ghost" onClick={() => setDeleteTarget(p)}>
+                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setDeleteTarget(p)}>
                       <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
+                    </div>
                   </td>
                 </tr>
                 )
@@ -760,19 +814,35 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
               <DialogTitle>{editingId ? '编辑持仓' : '新增持仓'}</DialogTitle>
             </DialogHeader>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="text-sm font-medium">资产类型</label>
+                <Tabs value={formData.asset_type} onValueChange={(value) => setFormData({ ...formData, asset_type: value as AssetType, cost_price: value === 'cash' || value === 'money_fund' ? '1' : formData.cost_price })} className="mt-2">
+                  <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6">
+                    <TabsTrigger value="auto">自动</TabsTrigger>
+                    <TabsTrigger value="etf">ETF</TabsTrigger>
+                    <TabsTrigger value="otc_fund">场外基金</TabsTrigger>
+                    <TabsTrigger value="stock">股票</TabsTrigger>
+                    <TabsTrigger value="cash">现金</TabsTrigger>
+                    <TabsTrigger value="money_fund">货币基金</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </div>
               <div className="relative sm:col-span-2">
-                <label className="text-sm font-medium">ETF代码</label>
+                <label className="text-sm font-medium">资产代码</label>
                 <div className="flex gap-2">
                   <Input
                     value={formData.etf_code}
                     onChange={(e) => setFormData({ ...formData, etf_code: e.target.value })}
-                    placeholder="输入代码搜索"
+                    placeholder={isCashLikeForm ? '可留空，默认 CASH/MONEY' : effectiveFormAssetType === 'otc_fund' ? '输入场外基金代码' : effectiveFormAssetType === 'stock' ? '输入股票代码' : '输入代码搜索'}
                     disabled={!!editingId}
                   />
-                  <Button size="icon" variant="outline" onClick={handleSearch} disabled={!!editingId}>
+                  <Button size="icon" variant="outline" onClick={handleSearch} disabled={!!editingId || effectiveFormAssetType === 'otc_fund' || effectiveFormAssetType === 'stock' || isCashLikeForm}>
                     <Search className="h-4 w-4" />
                   </Button>
                 </div>
+                {formData.asset_type === 'auto' && formData.etf_code.trim() && (
+                  <div className="mt-1 text-xs text-muted-foreground">将按代码自动识别为：{getAssetTypeLabel(effectiveFormAssetType)}</div>
+                )}
                 {searchResults.length > 0 && (
                   <div className="absolute z-10 mt-1 w-full max-h-48 overflow-auto rounded-md border bg-background shadow-lg">
                     {searchResults.map((etf) => (
@@ -789,23 +859,34 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 )}
               </div>
               <div>
-                <label className="text-sm font-medium">份额</label>
+                <label className="text-sm font-medium">{quantityLabel}</label>
                 <Input
                   type="number"
-                  value={formData.shares}
-                  onChange={(e) => setFormData({ ...formData, shares: e.target.value })}
-                  placeholder="持有份额"
+                  step="0.01"
+                  value={isFundAmountEntry ? formData.buy_amount : formData.shares}
+                  onChange={(e) => setFormData(isFundAmountEntry ? { ...formData, buy_amount: e.target.value } : { ...formData, shares: e.target.value })}
+                  placeholder={quantityPlaceholder}
                 />
+                {estimatedFundShares !== null && (
+                  <div className="mt-1 text-xs text-muted-foreground">预计确认份额 {estimatedFundShares.toFixed(2)}</div>
+                )}
               </div>
               <div>
-                <label className="text-sm font-medium">成本价</label>
+                <label className="text-sm font-medium">{costLabel}</label>
                 <Input
                   type="number"
                   step="0.0001"
-                  value={formData.cost_price}
+                  value={isCashLikeForm ? '1' : formData.cost_price}
                   onChange={(e) => setFormData({ ...formData, cost_price: e.target.value })}
-                  placeholder="成本价"
+                  placeholder={costLabel}
+                  disabled={isCashLikeForm}
                 />
+                {effectiveFormAssetType === 'otc_fund' && (
+                  <div className="mt-1 text-xs text-muted-foreground">填写每份单位净值，不是买入金额。例如买入 1000 元、净值 0.9000，则确认份额约 1111.11。</div>
+                )}
+                {isCashLikeForm && (
+                  <div className="mt-1 text-xs text-muted-foreground">现金/货币基金初版按净值 1.0000 记账，金额会直接计入组合资产。</div>
+                )}
               </div>
               <div>
                 <label className="text-sm font-medium">买入日期</label>

@@ -3,18 +3,20 @@ from decimal import Decimal
 import math
 from typing import Optional, List, Any
 from zoneinfo import ZoneInfo
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Portfolio, EtfInfo, IndexValuation, PortfolioDcaSignalHistory, PortfolioDcaState, DcaIndexMapping, DcaSignalConfig, MacroCycleState
+from models import Portfolio, EtfInfo, IndexValuation, PortfolioDcaSignalHistory, PortfolioDcaState, DcaIndexMapping, DcaSignalConfig, MacroCycleState, User
 from schemas.portfolio import (
     PortfolioCreate, PortfolioUpdate, PortfolioResponse,
     PortfolioDcaSignalHistoryResponse, PortfolioWithMarket, PortfolioSummary
 )
+from schemas.market import MarketQuote
 from services.etf_classification_service import EtfClassificationService
 from services.industry_fundamental_service import IndustryFundamentalService
 from services.market_service import MarketService
+from services.trend_signal_service import build_otc_fund_trend_signal, build_trend_signal
 from services.redis_service import RedisService
 from config import settings
 from utils.timezone import now_in_shanghai
@@ -410,6 +412,158 @@ class PortfolioService:
             rebalance_plan=rebalance_plan,
         )
     
+    SUPPORTED_ASSET_TYPES = {"etf", "otc_fund", "stock", "cash", "money_fund"}
+    CASH_ASSET_TYPES = {"cash", "money_fund"}
+
+    @staticmethod
+    def _looks_like_listed_fund_code(code: str) -> bool:
+        clean = (code or "").strip()
+        return clean.startswith(("5", "15", "16", "18"))
+
+    @staticmethod
+    def _looks_like_a_share_stock_code(code: str) -> bool:
+        clean = (code or "").strip()
+        if not clean.isdigit() or len(clean) != 6:
+            return False
+        return clean.startswith(("600", "601", "603", "605", "688", "000", "001", "002", "003", "300", "301", "8", "4"))
+
+    @staticmethod
+    def _normalize_asset_type(asset_type: str | None) -> str:
+        safe = (asset_type or "auto").strip()
+        return safe if safe in PortfolioService.SUPPORTED_ASSET_TYPES or safe == "auto" else "auto"
+
+    @classmethod
+    async def detect_asset_type(cls, session: AsyncSession, code: str, requested_type: str | None = None) -> str:
+        requested = cls._normalize_asset_type(requested_type)
+        if requested in cls.SUPPORTED_ASSET_TYPES:
+            return requested
+        clean = (code or "").strip()
+        if clean.upper() in {"CASH", "CNY", "RMB"}:
+            return "cash"
+        if not clean.isdigit() or len(clean) != 6:
+            return "etf"
+        info = await session.get(EtfInfo, clean)
+        if info:
+            return "etf"
+        if cls._looks_like_listed_fund_code(clean):
+            return "etf"
+        if cls._looks_like_a_share_stock_code(clean):
+            return "stock"
+        quote = await MarketService._fetch_otc_fund_quote(clean)
+        if quote and quote.price > 0:
+            return "otc_fund"
+        return "etf"
+
+    @classmethod
+    async def migrate_legacy_otc_fund_holdings(
+        cls,
+        session: AsyncSession,
+        dry_run: bool = True,
+        user_id: int | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Identify legacy holdings that were entered as ETF but are confirmed OTC funds."""
+        stmt = select(Portfolio).where(Portfolio.asset_type == "etf")
+        if user_id is not None:
+            stmt = stmt.where(Portfolio.user_id == user_id)
+        stmt = stmt.order_by(Portfolio.id.asc()).limit(max(1, min(limit, 1000)))
+        result = await session.execute(stmt)
+        portfolios = result.scalars().all()
+        if not portfolios:
+            return {"dry_run": dry_run, "checked": 0, "matched": 0, "updated": 0, "items": []}
+
+        codes = sorted({(p.etf_code or "").strip() for p in portfolios if p.etf_code})
+        etf_info_result = await session.execute(select(EtfInfo.code).where(EtfInfo.code.in_(codes)))
+        listed_codes = {code for code in etf_info_result.scalars().all() if code}
+        items: list[dict[str, Any]] = []
+        updated = 0
+        checked = 0
+
+        for p in portfolios:
+            code = (p.etf_code or "").strip()
+            if not code or not code.isdigit() or len(code) != 6:
+                continue
+            if code in listed_codes:
+                continue
+            if cls._looks_like_listed_fund_code(code):
+                continue
+            checked += 1
+            quote = await MarketService._fetch_otc_fund_quote(code)
+            if not quote or quote.price <= 0:
+                continue
+            item = {
+                "portfolio_id": p.id,
+                "user_id": p.user_id,
+                "code": code,
+                "name": quote.name or "",
+                "latest_nav": quote.price,
+                "change_pct": quote.change_pct,
+                "old_asset_type": p.asset_type,
+                "new_asset_type": "otc_fund",
+                "reason": "代码不在场内ETF缓存表，且场外基金净值接口返回有效单位净值。",
+            }
+            items.append(item)
+            if not dry_run:
+                p.asset_type = "otc_fund"
+                updated += 1
+
+        if not dry_run and updated:
+            await session.flush()
+        return {
+            "dry_run": dry_run,
+            "checked": checked,
+            "matched": len(items),
+            "updated": updated,
+            "items": items,
+        }
+
+    @staticmethod
+    def _validate_portfolio_price_fields(asset_type: str, cost_price: float | None) -> None:
+        if asset_type not in PortfolioService.SUPPORTED_ASSET_TYPES:
+            raise ValueError("不支持的资产类型")
+        if cost_price is None or cost_price <= 0:
+            raise ValueError("成本价/成本净值必须大于0")
+        if asset_type == "otc_fund" and cost_price > 100:
+            raise ValueError("场外基金成本净值应填写每份单位净值，例如 0.9000 或 1.2345，不能填写买入金额或总成本")
+        if asset_type in PortfolioService.CASH_ASSET_TYPES and abs(float(cost_price) - 1.0) > 0.0001:
+            raise ValueError("现金/货币基金初版按净值 1.0000 记账，请将成本净值填写为 1")
+
+    @staticmethod
+    def _portfolio_cost(shares: Any, cost_price: Any) -> Decimal:
+        return Decimal(str(PortfolioService._finite_float(shares))) * Decimal(str(PortfolioService._finite_float(cost_price)))
+
+    @classmethod
+    async def _release_price_for_cash(cls, portfolio: Portfolio) -> Decimal:
+        fallback_price = Decimal(str(PortfolioService._finite_float(portfolio.cost_price)))
+        asset_type = getattr(portfolio, "asset_type", "etf") or "etf"
+        if asset_type in cls.CASH_ASSET_TYPES:
+            return Decimal("1")
+        code = getattr(portfolio, "etf_code", None)
+        if not code:
+            return fallback_price
+        quote = None
+        try:
+            cached_quotes = await MarketService.get_cached_quotes_for_codes([code])
+            quote = cached_quotes.get(code)
+            if quote is None:
+                quote = await MarketService.refresh_quote(code)
+        except Exception as exc:
+            print(f"[PortfolioService] 获取卖出成交价失败，使用成本价回退: {code}, {exc}")
+        quote_price = PortfolioService._optional_finite_float(getattr(quote, "price", None)) if quote else None
+        if quote_price is not None and quote_price > 0:
+            return Decimal(str(quote_price))
+        return fallback_price
+
+    @classmethod
+    async def _adjust_available_cash(cls, session: AsyncSession, user_id: int, delta: Decimal) -> None:
+        if delta == 0:
+            return
+        user = await session.get(User, user_id)
+        if not user:
+            return
+        current_balance = user.account_balance if user.account_balance is not None else Decimal("0")
+        user.account_balance = current_balance + delta
+
     @staticmethod
     async def get_all(session: AsyncSession, user_id: int) -> List[PortfolioResponse]:
         """获取所有持仓"""
@@ -456,26 +610,32 @@ class PortfolioService:
         )
         return [PortfolioDcaSignalHistoryResponse.model_validate(item, from_attributes=True) for item in result.scalars().all()]
 
-    @staticmethod
+    @classmethod
     async def create(
-        session: AsyncSession, data: PortfolioCreate, user_id: int
+        cls, session: AsyncSession, data: PortfolioCreate, user_id: int
     ) -> PortfolioResponse:
         """创建持仓"""
+        asset_type = await cls.detect_asset_type(session, data.etf_code, data.asset_type)
+        cls._validate_portfolio_price_fields(asset_type, data.cost_price)
+        cost_delta = cls._portfolio_cost(data.shares, data.cost_price)
         portfolio = Portfolio(
             user_id=user_id,
             etf_code=data.etf_code,
+            asset_type=asset_type,
             shares=data.shares,
             cost_price=data.cost_price,
             buy_date=data.buy_date,
             note=data.note,
         )
         session.add(portfolio)
+        await cls._adjust_available_cash(session, user_id, -cost_delta)
         await session.flush()
         await session.refresh(portfolio)
         return PortfolioResponse.model_validate(portfolio)
     
-    @staticmethod
+    @classmethod
     async def update(
+        cls,
         session: AsyncSession, 
         portfolio_id: int, 
         data: PortfolioUpdate,
@@ -490,8 +650,21 @@ class PortfolioService:
             return None
         
         update_data = data.model_dump(exclude_unset=True)
+        previous_shares = Decimal(str(cls._finite_float(portfolio.shares)))
+        previous_cost = cls._portfolio_cost(portfolio.shares, portfolio.cost_price)
+        next_asset_type = update_data.get("asset_type", portfolio.asset_type)
+        next_cost_price = update_data.get("cost_price", float(portfolio.cost_price) if portfolio.cost_price is not None else None)
+        next_shares = Decimal(str(cls._finite_float(update_data.get("shares", portfolio.shares))))
+        cls._validate_portfolio_price_fields(next_asset_type, next_cost_price)
+        release_price = await cls._release_price_for_cash(portfolio) if next_shares < previous_shares else None
         for key, value in update_data.items():
             setattr(portfolio, key, value)
+        next_cost = cls._portfolio_cost(next_shares, next_cost_price)
+        if next_shares < previous_shares:
+            cash_delta = (previous_shares - next_shares) * (release_price or Decimal("0"))
+        else:
+            cash_delta = previous_cost - next_cost
+        await cls._adjust_available_cash(session, user_id, cash_delta)
         
         await session.flush()
         await session.refresh(portfolio)
@@ -506,7 +679,23 @@ class PortfolioService:
         portfolio = result.scalar_one_or_none()
         if not portfolio:
             return False
-        
+
+        release_price = await PortfolioService._release_price_for_cash(portfolio)
+        released_cash = Decimal(str(PortfolioService._finite_float(portfolio.shares))) * release_price
+
+        await session.execute(
+            delete(PortfolioDcaSignalHistory).where(
+                PortfolioDcaSignalHistory.portfolio_id == portfolio.id,
+                PortfolioDcaSignalHistory.user_id == user_id,
+            )
+        )
+        await session.execute(
+            delete(PortfolioDcaState).where(
+                PortfolioDcaState.portfolio_id == portfolio.id,
+                PortfolioDcaState.user_id == user_id,
+            )
+        )
+        await PortfolioService._adjust_available_cash(session, user_id, released_cash)
         await session.delete(portfolio)
         return True
     
@@ -946,6 +1135,57 @@ class PortfolioService:
         return signal
 
     @classmethod
+    async def _build_otc_fund_dca_signal(cls, code: str, current_nav: float, config: dict[str, Any]) -> dict:
+        history_days = int(config.get("trend_history_days", 140))
+        short_ma_days = int(config.get("trend_short_ma_days", 20))
+        medium_ma_days = int(config.get("trend_medium_ma_days", 60))
+        klines = await MarketService.get_history_kline(code, days=history_days)
+        closes = [float(item.close_price) for item in klines if float(item.close_price) > 0]
+        if len(closes) < short_ma_days:
+            return {
+                "dca_track": "fund_nav",
+                "dca_light": "yellow",
+                "dca_label": "黄灯：净值数据不足",
+                "dca_action": "只执行基础定投",
+                "dca_reason": f"场外基金仅获取到 {len(closes)} 个净值点，暂不做增强或暂停判断。",
+                "dca_next_trigger_price": None,
+                "dca_budget_multiplier": 1.0,
+                "dca_budget_label": "基础定投 1x",
+                "dca_decision_steps": ["资产类型：场外基金", "数据口径：单位净值", "最终动作：基础定投 1x"],
+                "dca_quality_score": 45.0,
+            }
+
+        ma20 = sum(closes[-short_ma_days:]) / short_ma_days
+        ma60 = sum(closes[-medium_ma_days:]) / medium_ma_days if len(closes) >= medium_ma_days else None
+        prev_ma20 = sum(closes[-(short_ma_days + 5):-5]) / short_ma_days if len(closes) >= short_ma_days + 5 else None
+        ma20_slope_pct = (ma20 - prev_ma20) / prev_ma20 * 100 if prev_ma20 and prev_ma20 > 0 else 0.0
+        high60 = max(closes[-60:]) if len(closes) >= 60 else max(closes)
+        drawdown_pct = (high60 - current_nav) / high60 * 100 if high60 > 0 else 0.0
+        distance_pct = (current_nav - ma20) / ma20 * 100 if ma20 > 0 else 0.0
+        ma60_slope_pct = None
+        if ma60 is not None and len(closes) >= medium_ma_days + 5:
+            prev_ma60 = sum(closes[-(medium_ma_days + 5):-5]) / medium_ma_days
+            ma60_slope_pct = (ma60 - prev_ma60) / prev_ma60 * 100 if prev_ma60 > 0 else None
+        next_trigger = round(ma20, 4)
+        base = {
+            "dca_track": "fund_nav",
+            "dca_next_trigger_price": next_trigger,
+            "dca_trend_ma20": round(ma20, 4),
+            "dca_trend_ma20_slope_pct": round(ma20_slope_pct, 3),
+            "dca_trend_distance_pct": round(distance_pct, 3),
+            "dca_trend_ma60": round(ma60, 4) if ma60 is not None else None,
+            "dca_trend_ma60_slope_pct": round(ma60_slope_pct, 3) if ma60_slope_pct is not None else None,
+            "dca_decision_steps": ["资产类型：场外基金", "数据口径：单位净值", f"MA20：{ma20:.4f}，距离 {distance_pct:.1f}%", f"60日回撤：{drawdown_pct:.1f}%"],
+        }
+        if current_nav >= ma20 and ma20_slope_pct >= 0:
+            return {**base, "dca_light": "green", "dca_label": "绿灯：净值趋势修复", "dca_action": "按计划定投", "dca_budget_multiplier": 1.2, "dca_budget_label": "基金定投 1.2x", "dca_reason": f"单位净值站上MA20且MA20走平/上行，60日回撤约{drawdown_pct:.1f}%，适合按计划定投。", "dca_quality_score": 68.0}
+        if current_nav < ma20 and ma20_slope_pct < -0.5:
+            return {**base, "dca_light": "red", "dca_label": "红灯：净值趋势走弱", "dca_action": "放缓或暂停新增", "dca_budget_multiplier": 0.5, "dca_budget_label": "放缓定投 0.5x", "dca_reason": f"单位净值低于MA20且MA20下行，60日回撤约{drawdown_pct:.1f}%，先降低定投节奏等待修复。", "dca_quality_score": 35.0}
+        if drawdown_pct >= 5:
+            return {**base, "dca_light": "yellow", "dca_label": "黄灯：回撤分批", "dca_action": "小额分批定投", "dca_budget_multiplier": 1.0, "dca_budget_label": "基础定投 1x", "dca_reason": f"场外基金已有约{drawdown_pct:.1f}%回撤，但趋势尚未完全确认，保持小额分批。", "dca_quality_score": 55.0}
+        return {**base, "dca_light": "yellow", "dca_label": "黄灯：净值中性", "dca_action": "执行基础定投", "dca_budget_multiplier": 1.0, "dca_budget_label": "基础定投 1x", "dca_reason": f"单位净值相对MA20约{distance_pct:.1f}%，60日回撤约{drawdown_pct:.1f}%，当前不触发增强。", "dca_quality_score": 50.0}
+
+    @classmethod
     async def _build_dca_signal(
         cls,
         session: AsyncSession,
@@ -953,9 +1193,11 @@ class PortfolioService:
         name: str | None,
         current_price: float | None,
         track_override: str | None = None,
+        asset_type: str = "etf",
     ) -> dict:
         config = await cls._get_dca_config(session)
         display_name = name or ""
+        safe_asset_type = (asset_type or "etf").strip()
         track = (track_override or "auto").strip()
         if track == "disabled":
             return {
@@ -988,6 +1230,11 @@ class PortfolioService:
                 "dca_budget_multiplier": 1.0,
                 "dca_budget_label": "基础定投 1x",
             }
+
+        if safe_asset_type == "otc_fund":
+            return await cls._build_otc_fund_dca_signal(code, current_price, config)
+        if safe_asset_type in cls.CASH_ASSET_TYPES:
+            return cls._build_cash_dca_signal(safe_asset_type)
 
         if is_core_broad:
             index_symbol, mapping_reason = await cls._resolve_broad_index_symbol(session, code, display_name)
@@ -1450,6 +1697,95 @@ class PortfolioService:
         }
 
     @classmethod
+    def _non_etf_factor_score(cls, asset_type: str) -> dict:
+        label_map = {"otc_fund": "场外基金", "stock": "股票", "cash": "现金", "money_fund": "货币基金"}
+        label = label_map.get(asset_type, "非ETF资产")
+        return {
+            "enabled": False,
+            "total_score": 0.0,
+            "macro_score": 0.0,
+            "technical_score": 0.0,
+            "sentiment_score": 0.0,
+            "prosperity_score": 0.0,
+            "rating": "不适用",
+            "action": "不适用",
+            "reason": f"{label} 不参与ETF行业四因子评分，使用该资产类型自己的风险口径判断。",
+            "factors": [],
+            "momentum20": None,
+            "amount": None,
+            "liquidity_score": None,
+        }
+
+    @classmethod
+    def _non_etf_risk_profile(cls, asset_type: str = "otc_fund") -> dict:
+        if asset_type == "stock":
+            return {
+                "is_cross_border": False,
+                "risk_level": "high",
+                "risk_tags": ["个股", "高波动", "集中度风险"],
+                "max_position_hint": 0.1,
+                "budget_multiplier_adjustment": 0.7,
+                "action": "控制单票仓位",
+                "reason": "股票不适用ETF场内溢价和IOPV，重点关注个股波动、集中度和基本面风险。",
+                "warnings": ["单只股票建议设置更低仓位上限"],
+                "iopv": None,
+                "premium_rate": None,
+            }
+        if asset_type in cls.CASH_ASSET_TYPES:
+            return {
+                "is_cross_border": False,
+                "risk_level": "low",
+                "risk_tags": ["现金管理", "低波动"],
+                "max_position_hint": 1.0,
+                "budget_multiplier_adjustment": 1.0,
+                "action": "作为现金仓位管理",
+                "reason": "现金/货币基金作为组合流动性和再平衡资金来源，不参与趋势交易判断。",
+                "warnings": [],
+                "iopv": None,
+                "premium_rate": None,
+            }
+        return {
+            "is_cross_border": False,
+            "risk_level": "low",
+            "risk_tags": ["净值型资产"],
+            "max_position_hint": 0.2,
+            "budget_multiplier_adjustment": 1.0,
+            "action": "按净值规则执行",
+            "reason": "场外基金不适用ETF场内溢价、IOPV和实时成交风控。",
+            "warnings": [],
+            "iopv": None,
+            "premium_rate": None,
+        }
+
+    @classmethod
+    def _build_cash_quote(cls, portfolio: Portfolio) -> MarketQuote:
+        asset_type = getattr(portfolio, "asset_type", "cash") or "cash"
+        name = "现金" if asset_type == "cash" else "货币基金"
+        return MarketQuote(
+            code=portfolio.etf_code,
+            name=name,
+            price=1.0,
+            change_pct=0.0,
+            refreshed_at=cls._shanghai_now(),
+        )
+
+    @classmethod
+    def _build_cash_dca_signal(cls, asset_type: str) -> dict:
+        label = "现金仓位" if asset_type == "cash" else "货币基金"
+        return {
+            "dca_track": "cash",
+            "dca_light": "yellow",
+            "dca_label": f"黄灯：{label}管理",
+            "dca_action": "不生成买卖信号",
+            "dca_reason": f"{label}用于流动性和再平衡资金管理，不按均线或估值触发交易。",
+            "dca_next_trigger_price": None,
+            "dca_budget_multiplier": 1.0,
+            "dca_budget_label": "现金管理",
+            "dca_decision_steps": [f"资产类型：{label}", "规则：不参与趋势交易", "用途：组合现金仓位和再平衡资金来源"],
+            "dca_quality_score": 60.0,
+        }
+
+    @classmethod
     def _build_cross_border_risk(cls, code: str, name: str | None, market_value: float | None = None, total_market_value: float | None = None, quote=None) -> dict:
         classification = EtfClassificationService.classify(code, name)
         risk_tags = list(classification.risk_tags)
@@ -1545,23 +1881,34 @@ class PortfolioService:
 
     @classmethod
     async def get_with_market(
-        cls, session: AsyncSession, user_id: int, compute_dca: bool = False
+        cls,
+        session: AsyncSession,
+        user_id: int,
+        compute_dca: bool = False,
+        etf_codes: list[str] | None = None,
     ) -> List[PortfolioWithMarket]:
         """获取持仓列表（含实时行情）"""
-        result = await session.execute(
-            select(Portfolio).where(Portfolio.user_id == user_id).order_by(Portfolio.id)
-        )
+        stmt = select(Portfolio).where(Portfolio.user_id == user_id)
+        if etf_codes:
+            stmt = stmt.where(Portfolio.etf_code.in_(etf_codes))
+        result = await session.execute(stmt.order_by(Portfolio.id))
         portfolios = result.scalars().all()
         
         if not portfolios:
             return []
         
-        etf_codes = [p.etf_code for p in portfolios]
+        asset_type_by_portfolio_id = {p.id: (getattr(p, "asset_type", "etf") or "etf") for p in portfolios}
+        market_code_portfolios = [p for p in portfolios if asset_type_by_portfolio_id[p.id] not in cls.CASH_ASSET_TYPES]
+        market_codes = [p.etf_code for p in market_code_portfolios]
         if compute_dca:
-            quotes = await MarketService.get_quotes_for_codes(etf_codes)
+            quotes = await MarketService.get_quotes_for_codes(market_codes)
         else:
             # 持仓列表只读取缓存行情，避免新增 ETF 缺数据时阻塞整张表。
-            quotes = await MarketService.get_cached_quotes_for_codes(etf_codes)
+            quotes = await MarketService.get_cached_quotes_for_codes(market_codes)
+        for p in portfolios:
+            if asset_type_by_portfolio_id[p.id] in cls.CASH_ASSET_TYPES:
+                quotes[p.etf_code] = cls._build_cash_quote(p)
+        etf_codes = [p.etf_code for p in portfolios]
         info_result = await session.execute(select(EtfInfo).where(EtfInfo.code.in_(etf_codes)))
         etf_name_by_code = {item.code: item.name for item in info_result.scalars().all()}
         state_result = await session.execute(select(PortfolioDcaState).where(PortfolioDcaState.portfolio_id.in_([p.id for p in portfolios])))
@@ -1590,26 +1937,58 @@ class PortfolioService:
             if price is not None and price > 0:
                 estimated_total_market_value += cls._finite_float(p.shares) * price
 
+        def quote_display_name(code: str) -> str | None:
+            quote = quotes.get(code)
+            if quote and quote.name and quote.name != code:
+                return quote.name
+            return etf_name_by_code.get(code)
+
         industry_key_by_code = {
             p.etf_code: IndustryFundamentalService.resolve_industry_key(
                 p.etf_code,
-                (quotes.get(p.etf_code).name if quotes.get(p.etf_code) else None) or etf_name_by_code.get(p.etf_code),
+                quote_display_name(p.etf_code),
             )
             for p in portfolios
+            if (getattr(p, "asset_type", "etf") or "etf") == "etf"
         }
         fundamental_by_key = await IndustryFundamentalService.get_many(
             [key for key in industry_key_by_code.values() if key],
             allow_fetch=compute_dca,
         )
 
+        benchmark_histories = {
+            "hs300": await MarketService.get_kline_from_db("000300", 60),
+            "csiA500": await MarketService.get_kline_from_db("000510", 60),
+        }
+        trend_signal_by_code = {}
+        asset_type_by_code = {p.etf_code: (getattr(p, "asset_type", "etf") or "etf") for p in portfolios}
+        for code in etf_codes:
+            asset_type = asset_type_by_code.get(code, "etf")
+            if asset_type in cls.CASH_ASSET_TYPES:
+                trend_signal_by_code[code] = {
+                    "action": "watch",
+                    "label": "现金管理",
+                    "toneClassName": "border-slate-200 bg-slate-50 text-slate-700",
+                    "summary": "现金/货币基金不生成趋势交易信号。",
+                    "buyChecks": [],
+                    "sellChecks": [],
+                }
+                continue
+            history = await MarketService.get_kline_from_db(code, 60)
+            if asset_type == "otc_fund":
+                trend_signal_by_code[code] = build_otc_fund_trend_signal(history or [])
+            else:
+                trend_signal_by_code[code] = build_trend_signal(history or [], benchmark_histories)
+
         results = []
         for p in portfolios:
             quote = quotes.get(p.etf_code)
-            display_name = (quote.name if quote else None) or etf_name_by_code.get(p.etf_code)
+            asset_type = getattr(p, "asset_type", "etf") or "etf"
+            display_name = quote_display_name(p.etf_code)
             price = cls._optional_finite_float(quote.price) if quote else None
             dca_state = dca_state_by_portfolio_id.get(p.id)
             if compute_dca:
-                dca_signal = await cls._build_dca_signal(session, p.etf_code, display_name, price, p.dca_track_override)
+                dca_signal = await cls._build_dca_signal(session, p.etf_code, display_name, price, p.dca_track_override, asset_type)
             else:
                 dca_signal = cls._state_dca_signal(
                     dca_state,
@@ -1622,10 +2001,10 @@ class PortfolioService:
                 dca_signal["dca_candidate_light"] = None
                 dca_signal["dca_candidate_confirm_count"] = None
             estimated_market_value = cls._finite_float(p.shares) * price if price is not None and price > 0 else None
-            cross_border_risk = cls._build_cross_border_risk(p.etf_code, display_name, estimated_market_value, estimated_total_market_value, quote)
-            dca_signal = cls._apply_cross_border_risk_to_signal(dca_signal, cross_border_risk)
+            cross_border_risk = cls._build_cross_border_risk(p.etf_code, display_name, estimated_market_value, estimated_total_market_value, quote) if asset_type == "etf" else cls._non_etf_risk_profile(asset_type)
+            dca_signal = cls._apply_cross_border_risk_to_signal(dca_signal, cross_border_risk) if asset_type == "etf" else dca_signal
             industry_key = industry_key_by_code.get(p.etf_code)
-            factor_score = cls._build_factor_score(p.etf_code, display_name, quote, dca_signal, fundamental_by_key.get(industry_key) if industry_key else None)
+            factor_score = cls._build_factor_score(p.etf_code, display_name, quote, dca_signal, fundamental_by_key.get(industry_key) if industry_key else None) if asset_type == "etf" else cls._non_etf_factor_score(asset_type)
             if quote and price is not None and price > 0:
                 shares = cls._finite_float(p.shares)
                 cost_price = cls._finite_float(p.cost_price)
@@ -1653,6 +2032,7 @@ class PortfolioService:
                 results.append(PortfolioWithMarket(
                     id=p.id,
                     etf_code=p.etf_code,
+                    asset_type=asset_type,
                     shares=float(p.shares),
                     cost_price=float(p.cost_price),
                     buy_date=p.buy_date,
@@ -1672,12 +2052,14 @@ class PortfolioService:
                     holding_days=holding_days,
                     cross_border_risk=cross_border_risk,
                     factor_score=factor_score,
+                    trend_signal=trend_signal_by_code.get(p.etf_code),
                     **dca_signal,
                 ))
             else:
                 results.append(PortfolioWithMarket(
                     id=p.id,
                     etf_code=p.etf_code,
+                    asset_type=asset_type,
                     shares=float(p.shares),
                     cost_price=float(p.cost_price),
                     buy_date=p.buy_date,
@@ -1688,6 +2070,7 @@ class PortfolioService:
                     etf_name=display_name,
                     cross_border_risk=cross_border_risk,
                     factor_score=factor_score,
+                    trend_signal=trend_signal_by_code.get(p.etf_code),
                     **dca_signal,
                 ))
         

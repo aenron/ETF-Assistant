@@ -296,10 +296,16 @@ def _apply_dca_debounce(state: PortfolioDcaState, portfolio, confirm_count: int 
     return False, f"红绿灯变化待确认：{state.last_light or '-'} -> {current_light or '-'}，{state.candidate_confirm_count or 0}/{safe_confirm_count}"
 
 
-async def update_user_dca_signals(user_id: int):
+async def update_user_dca_signals(user_id: int, etf_codes: list[str] | None = None):
     """计算并持久化单个用户的红绿灯状态，只标记待通知事件，不发送通知。"""
+    target_codes = {code for code in (etf_codes or []) if code}
     async with async_session_maker() as db:
-        portfolios = await PortfolioService.get_with_market(db, user_id=user_id, compute_dca=True)
+        portfolios = await PortfolioService.get_with_market(
+            db,
+            user_id=user_id,
+            compute_dca=True,
+            etf_codes=sorted(target_codes) if target_codes else None,
+        )
         if not portfolios:
             return []
 
@@ -356,7 +362,8 @@ async def update_user_dca_signals(user_id: int):
             _add_dca_history(db, state, portfolio, user_id)
 
         await db.commit()
-        print(f"[Scheduler] 用户 {user_id} DCA红绿灯状态更新完成，待通知 {len(events)} 个")
+        scope = f"，范围 {sorted(target_codes)}" if target_codes else ""
+        print(f"[Scheduler] 用户 {user_id} DCA红绿灯状态更新完成{scope}，待通知 {len(events)} 个")
         return events
 
 
@@ -740,6 +747,50 @@ async def refresh_market_quotes():
     print(f"[Scheduler] 行情轻刷新完成，成功缓存 {len(quotes)} 只ETF")
 
 
+async def _refresh_one_market_history(code: str, semaphore: asyncio.Semaphore) -> dict:
+    async with semaphore:
+        last_error = None
+        for attempt in range(1, 3):
+            try:
+                data = await MarketService.get_history_kline(code, days=60, prefer_cache=False)
+                if not data:
+                    last_error = "无数据"
+                    print(f"[Scheduler] 行情重刷新无数据: {code}, 第 {attempt}/2 次")
+                else:
+                    latest = data[-1]
+                    total_rows = len(data)
+                    missing_amount = sum(1 for item in data if item.amount is None)
+                    amount_complete_rate = ((total_rows - missing_amount) / total_rows * 100) if total_rows else 0.0
+                    amount_state = "含成交额" if latest.amount is not None else "最新缺成交额"
+                    if missing_amount:
+                        amount_state = f"{amount_state}, 缺 {missing_amount}/{total_rows} 条"
+                    print(
+                        f"[Scheduler] 行情重刷新完成: {code}, {total_rows} 条, 最新 {latest.trade_date}, "
+                        f"{amount_state}, 成交额完整率 {amount_complete_rate:.1f}%"
+                    )
+                    return {
+                        "code": code,
+                        "success": True,
+                        "missing_amount": missing_amount,
+                        "amount_complete_rate": amount_complete_rate,
+                        "error": None,
+                    }
+            except Exception as e:
+                last_error = str(e)
+                print(f"[Scheduler] 行情重刷新失败: {code}, 第 {attempt}/2 次, {e}")
+
+            if attempt == 1:
+                await asyncio.sleep(1)
+
+        return {
+            "code": code,
+            "success": False,
+            "missing_amount": 0,
+            "amount_complete_rate": 0.0,
+            "error": last_error or "未知错误",
+        }
+
+
 async def refresh_market_history():
     """重刷新：刷新近 60 日 K 线和成交额，供技术指标与交易指示使用。"""
     print(f"[Scheduler] {now_in_shanghai()} 开始执行行情重刷新任务...")
@@ -748,21 +799,37 @@ async def refresh_market_history():
     if not codes:
         return
 
-    success_count = 0
-    for code in codes:
-        try:
-            data = await MarketService.get_history_kline(code, days=60, prefer_cache=False)
-            if data:
-                success_count += 1
-                latest = data[-1]
-                amount_state = "含成交额" if latest.amount is not None else "缺成交额"
-                print(f"[Scheduler] 行情重刷新完成: {code}, {len(data)} 条, 最新 {latest.trade_date}, {amount_state}")
-            else:
-                print(f"[Scheduler] 行情重刷新无数据: {code}")
-        except Exception as e:
-            print(f"[Scheduler] 行情重刷新失败: {code}, {e}")
+    semaphore = asyncio.Semaphore(4)
+    results = await asyncio.gather(*(_refresh_one_market_history(code, semaphore) for code in codes))
+    success_count = sum(1 for item in results if item["success"])
+    failed = [item for item in results if not item["success"]]
+    missing_amount = [item for item in results if item["success"] and item["missing_amount"]]
+    low_amount_complete = [
+        item for item in results
+        if item["success"] and item["amount_complete_rate"] < 80.0
+    ]
 
-    print(f"[Scheduler] 行情重刷新完成，成功刷新 {success_count}/{len(codes)} 只ETF")
+    if failed:
+        failed_text = ", ".join(f"{item['code']}({item['error']})" for item in failed[:10])
+        more = f" 等 {len(failed)} 只" if len(failed) > 10 else ""
+        print(f"[Scheduler] 行情重刷新失败明细: {failed_text}{more}")
+    if missing_amount:
+        missing_text = ", ".join(f"{item['code']}缺{item['missing_amount']}条" for item in missing_amount[:10])
+        more = f" 等 {len(missing_amount)} 只" if len(missing_amount) > 10 else ""
+        print(f"[Scheduler] 行情重刷新成交额缺失明细: {missing_text}{more}")
+    if low_amount_complete:
+        low_text = ", ".join(
+            f"{item['code']}完整率{item['amount_complete_rate']:.1f}%"
+            for item in low_amount_complete[:10]
+        )
+        more = f" 等 {len(low_amount_complete)} 只" if len(low_amount_complete) > 10 else ""
+        print(f"[Scheduler] 行情重刷新成交额完整率低于80%: {low_text}{more}")
+
+    print(
+        f"[Scheduler] 行情重刷新完成，成功 {success_count}/{len(codes)} 只ETF，"
+        f"失败 {len(failed)} 只，成交额缺失 {len(missing_amount)} 只，"
+        f"完整率低于80% {len(low_amount_complete)} 只"
+    )
 
 
 async def refresh_etf_profiles():

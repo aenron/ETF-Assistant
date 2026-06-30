@@ -39,6 +39,9 @@ class AdvisorService:
                     api_key=settings.openai_api_key,
                     base_url=settings.openai_base_url,
                     model=settings.openai_model,
+                    enable_web_search=settings.openai_enable_web_search,
+                    timeout_seconds=settings.openai_timeout_seconds,
+                    reasoning_effort=settings.openai_reasoning_effort,
                 )
                 cls._llm_client.provider = "openai"
             elif settings.llm_provider == "deepseek":
@@ -175,13 +178,16 @@ class AdvisorService:
         return cls._parse_json_response_text(llm, response_text)
 
     @classmethod
-    async def chat_stream_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str):
+    async def chat_stream_events_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str):
         cls._log_llm_prompt(llm, prompt, context)
         chunks: list[str] = []
         try:
-            async for chunk in llm.chat_stream(prompt):
-                chunks.append(chunk)
-                yield chunk
+            async for event in llm.chat_stream_events(prompt):
+                if event.get("type") == "text":
+                    content = event.get("content")
+                    if isinstance(content, str):
+                        chunks.append(content)
+                yield event
             cls._log_llm_result(llm, "".join(chunks), context)
             cls._log_search_usage(llm, context)
         except Exception as e:
@@ -191,6 +197,14 @@ class AdvisorService:
             cls._log_search_usage(llm, context)
             cls._log_llm_error(llm, e, context)
             raise
+
+    @classmethod
+    async def chat_stream_with_logging(cls, llm: BaseLLMClient, prompt: str, context: str):
+        async for event in cls.chat_stream_events_with_logging(llm, prompt, context):
+            if event.get("type") == "text":
+                content = event.get("content")
+                if isinstance(content, str) and content:
+                    yield content
 
     @classmethod
     def _parse_tavily_tool_calls(cls, payload: dict, max_calls: int) -> list[dict]:
@@ -1086,6 +1100,7 @@ class AdvisorService:
         indicators = MarketService.calculate_technical_indicators(kline_data)
         indicators_dict = cls.enrich_horizon_indicators(kline_data, indicators)
 
+        asset_type = getattr(p, "asset_type", "etf") or "etf"
         prompt_builder = cls.build_scheduled_prompt if analysis_mode == "scheduled" else cls.build_prompt
         prompt = prompt_builder(
             etf_code=p.etf_code,
@@ -1098,6 +1113,21 @@ class AdvisorService:
             kline_summary=kline_summary,
             indicators=indicators_dict,
         )
+        if asset_type == "otc_fund":
+            prompt = prompt.replace("你是一名专业的ETF投资顾问", "你是一名专业的场外基金投资顾问")
+            prompt = prompt.replace("## 品种信息\n- 代码:", "## 品种信息\n- 资产类型: 场外基金（净值型资产，不适用场内溢价、IOPV、成交量追价规则）\n- 代码:")
+            prompt = prompt.replace("成本价", "成本净值").replace("当前价", "最新单位净值").replace("最新收盘价/最新可用收盘价", "最新单位净值/最新可用净值")
+            prompt = prompt.replace("ETF 相关", "该基金相关").replace("和 ETF 的相关性", "和该基金底层资产的相关性")
+        elif asset_type == "stock":
+            prompt = prompt.replace("你是一名专业的ETF投资顾问", "你是一名专业的股票投资顾问")
+            prompt = prompt.replace("## 品种信息\n- 代码:", "## 品种信息\n- 资产类型: 股票（个股资产，不适用ETF估值百分位、IOPV和溢价率规则）\n- 代码:")
+            prompt = prompt.replace("ETF 相关", "该股票相关").replace("和 ETF 的相关性", "和该股票所属行业及市场的相关性")
+            prompt += "\n\n补充要求：股票建议必须强调单票集中度、波动、基本面和止损纪律，不要使用ETF定投增强或资产桶轮动话术。"
+        elif asset_type in {"cash", "money_fund"}:
+            label = "现金" if asset_type == "cash" else "货币基金"
+            prompt = prompt.replace("你是一名专业的ETF投资顾问", "你是一名专业的现金管理顾问")
+            prompt = prompt.replace("## 品种信息\n- 代码:", f"## 品种信息\n- 资产类型: {label}（现金管理资产，不生成趋势交易建议）\n- 代码:")
+            prompt += f"\n\n补充要求：这是{label}仓位，只从流动性、组合现金比例、再平衡资金来源和收益率下行风险角度建议，不要给出追涨杀跌或技术交易信号。"
         prompt = await cls.enrich_prompt_with_tavily_tools(
             llm,
             prompt,

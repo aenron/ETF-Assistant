@@ -79,6 +79,14 @@ class BaseLLMClient(ABC):
 
     async def chat_stream(self, prompt: str) -> AsyncIterator[str]:
         """流式发送prompt并获取响应，默认降级为一次性返回"""
+        async for event in self.chat_stream_events(prompt):
+            if event.get("type") == "text":
+                content = event.get("content")
+                if isinstance(content, str) and content:
+                    yield content
+
+    async def chat_stream_events(self, prompt: str) -> AsyncIterator[dict[str, object]]:
+        """流式发送prompt并获取结构化事件，默认把文本流包装成 text 事件。"""
         text = await self.chat(prompt)
         if text:
-            yield text
+            yield {"type": "text", "content": text}

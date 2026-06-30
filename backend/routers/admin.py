@@ -19,6 +19,7 @@ from schemas.macro import MacroCycleStateCreate, MacroCycleStateResponse, MacroR
 from utils.timezone import now_in_utc_naive
 from services.industry_fundamental_service import IndustryFundamentalService
 from services.macro_service import MacroDataService
+from services.portfolio_service import PortfolioService
 from services.scheduler import (
     get_scheduler_job,
     list_scheduler_jobs,
@@ -34,6 +35,25 @@ router = APIRouter(
     tags=["管理员"],
     dependencies=[Depends(get_current_admin)],
 )
+
+
+@router.post("/portfolio/migrate-otc-funds")
+async def migrate_legacy_otc_funds(
+    dry_run: bool = True,
+    user_id: int | None = None,
+    limit: int = 200,
+    session: AsyncSession = Depends(get_session),
+):
+    """保守识别旧持仓里的场外基金。dry_run=true 只预览，false 才更新。"""
+    result = await PortfolioService.migrate_legacy_otc_fund_holdings(
+        session,
+        dry_run=dry_run,
+        user_id=user_id,
+        limit=limit,
+    )
+    if not dry_run:
+        await session.commit()
+    return result
 
 
 @router.get("/users", response_model=List[UserResponse])

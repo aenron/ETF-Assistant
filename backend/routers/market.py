@@ -41,7 +41,7 @@ async def refresh_quote(
     quote = await MarketService.refresh_quote(code)
     if quote:
         clean_quote = MarketQuote.model_validate(quote).model_dump(mode="json")
-        dca_events = await update_user_dca_signals(current_user.id)
+        dca_events = await update_user_dca_signals(current_user.id, etf_codes=[code])
         return {"success": True, "quote": clean_quote, "dca_events": len(dca_events)}
     return {"success": False, "message": f"刷新 {code} 行情失败"}
 
@@ -90,6 +90,24 @@ async def get_history(
     # 计算技术指标
     indicators = MarketService.calculate_technical_indicators(kline_data)
     
+    return MarketDailyResponse(
+        code=code,
+        name=quote.name if quote else "",
+        data=kline_data,
+        indicators=indicators,
+    )
+
+
+@router.get("/intraday/{code}", response_model=MarketDailyResponse)
+async def get_intraday(
+    code: str,
+    period: str = Query(default="1m", pattern="^(1m|5m|15m|30m|60m)$"),
+    limit: int = Query(default=240, ge=20, le=480),
+):
+    """获取当日分钟K线，用于详情页实时趋势图。"""
+    kline_data = await MarketService.get_intraday_kline(code, period=period, limit=limit)
+    quote = await MarketService.get_quote_from_cache(code)
+    indicators = MarketService.calculate_technical_indicators(kline_data)
     return MarketDailyResponse(
         code=code,
         name=quote.name if quote else "",

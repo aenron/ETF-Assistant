@@ -14,6 +14,14 @@ from utils.timezone import now_in_shanghai
 
 
 class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_sina_symbol_uses_stock_market_prefix(self) -> None:
+        self.assertEqual(MarketService._sina_symbol("300059"), "sz300059")
+        self.assertEqual(MarketService._sina_symbol("000001"), "sz000001")
+        self.assertEqual(MarketService._sina_symbol("159915"), "sz159915")
+        self.assertEqual(MarketService._sina_symbol("600519"), "sh600519")
+        self.assertEqual(MarketService._sina_symbol("688111"), "sh688111")
+        self.assertEqual(MarketService._sina_symbol("513300"), "sh513300")
+
     async def test_history_kline_uses_db_before_public_sources(self) -> None:
         db_kline = [
             KLineItem(

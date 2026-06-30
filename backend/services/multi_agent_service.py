@@ -89,6 +89,9 @@ class MultiAgentService:
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 model=settings.openai_model,
+                enable_web_search=False,
+                timeout_seconds=settings.openai_timeout_seconds,
+                reasoning_effort=settings.openai_reasoning_effort,
             )
             client.provider = "openai"
             return client

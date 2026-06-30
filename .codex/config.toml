@@ -1,0 +1,8 @@
+# Auto 模式：工作区内可自动读写/执行，越界或网络等高风险动作才触发审批
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+# 把需要审批的动作交给 reviewer agent 自动审查
+approvals_reviewer = "auto_review"
+
+# 项目 Python 命令优先使用 conda 环境：conda run -n etf ...

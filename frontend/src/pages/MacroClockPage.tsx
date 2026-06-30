@@ -352,6 +352,7 @@ function buildRotationAdvice(states: Record<MacroRegion, MacroCycleState | null>
 function MacroRotationAdvice({ states, portfolios }: { states: Record<MacroRegion, MacroCycleState | null>; portfolios: PortfolioWithMarket[] }) {
   const advice = useMemo(() => buildRotationAdvice(states), [states])
   const etfRecommendations = useMemo(() => buildEtfRecommendations(portfolios, advice.buckets), [portfolios, advice.buckets])
+  const [holdingsAdviceOpen, setHoldingsAdviceOpen] = useState(false)
   return (
     <Card>
       <CardHeader>
@@ -374,8 +375,18 @@ function MacroRotationAdvice({ states, portfolios }: { states: Record<MacroRegio
           ))}
         </div>
         <div className="rounded-lg border">
-          <div className="border-b px-4 py-3 text-sm font-semibold">当前持仓 ETF 建议</div>
-          {etfRecommendations.length ? (
+          <button
+            type="button"
+            onClick={() => setHoldingsAdviceOpen((value) => !value)}
+            className="flex w-full items-center justify-between gap-3 border-b px-4 py-3 text-left text-sm font-semibold transition-colors hover:bg-muted/40"
+          >
+            <span>当前持仓 ETF 建议</span>
+            <span className="flex items-center gap-2 text-xs font-normal text-muted-foreground">
+              {etfRecommendations.length ? `${etfRecommendations.length} 只` : '暂无持仓'}
+              <ChevronDown className={`h-4 w-4 transition-transform ${holdingsAdviceOpen ? 'rotate-180' : ''}`} />
+            </span>
+          </button>
+          {holdingsAdviceOpen && (etfRecommendations.length ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b text-left text-muted-foreground">
@@ -412,7 +423,7 @@ function MacroRotationAdvice({ states, portfolios }: { states: Record<MacroRegio
             </div>
           ) : (
             <div className="px-4 py-8 text-center text-sm text-muted-foreground">暂无持仓，当前仅展示资产桶级别建议。</div>
-          )}
+          ))}
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-lg border bg-muted/20 p-4">

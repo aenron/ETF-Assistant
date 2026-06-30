@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    openai_enable_web_search: bool = False
+    openai_timeout_seconds: float = 600.0
+    openai_reasoning_effort: Literal["", "minimal", "low", "medium", "high"] = ""
     
     # DeepSeek 默认配置
     deepseek_api_key: str = ""
@@ -77,6 +80,12 @@ class Settings(BaseSettings):
 
     # Tushare 行情补充数据源
     tushare_token: str = ""
+
+    # FRED 美国宏观数据 API Key；为空时使用 FRED CSV 公开下载端点
+    fred_api_key: str = ""
+
+    # 智兔数服行情数据源，用于ETF实时行情和指数历史行情补充
+    zhitu_token: str = ""
 
     # QMT Agent 行情数据源
     qmt_agent_base_url: str = ""

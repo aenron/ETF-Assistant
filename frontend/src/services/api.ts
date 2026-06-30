@@ -73,6 +73,7 @@ export interface IndustryFundamentalRefreshResponse extends IndustryFundamentalL
 
 export interface PortfolioCreate {
   etf_code: string
+  asset_type?: 'auto' | 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
   shares: number
   cost_price: number
   buy_date?: string
@@ -81,6 +82,7 @@ export interface PortfolioCreate {
 }
 
 export interface PortfolioUpdate {
+  asset_type?: 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
   shares?: number
   cost_price?: number
   buy_date?: string
@@ -119,9 +121,25 @@ export interface PortfolioCrossBorderRisk {
   premium_rate: number | null
 }
 
+export interface PortfolioTrendRuleCheck {
+  label: string
+  passed: boolean | null
+  detail: string
+}
+
+export interface PortfolioTrendSignal {
+  action: 'buy' | 'clear' | 'reduce' | 'take_profit' | 'watch' | 'insufficient'
+  label: string
+  toneClassName: string
+  summary: string
+  buyChecks: PortfolioTrendRuleCheck[]
+  sellChecks: PortfolioTrendRuleCheck[]
+}
+
 export interface PortfolioWithMarket {
   id: number
   etf_code: string
+  asset_type: 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
   shares: number
   cost_price: number
   buy_date: string | null
@@ -172,6 +190,7 @@ export interface PortfolioWithMarket {
   dca_budget_label: string | null
   cross_border_risk: PortfolioCrossBorderRisk | null
   factor_score: PortfolioFactorScore | null
+  trend_signal: PortfolioTrendSignal | null
 }
 
 
@@ -263,6 +282,7 @@ export interface MarketQuote {
 
 export interface KLineItem {
   trade_date: string
+  trade_time?: string | null
   open_price: number
   close_price: number
   high_price: number
@@ -393,10 +413,15 @@ export interface LLMConfigResponse {
   providers: LLMProvider[]
 }
 
+export type AssistantStreamPhase = 'preparing' | 'calling_model' | 'searching' | 'generating'
+
 export interface AssistantMessage {
   id: number
   role: string
   content: string
+  status?: string
+  run_id?: string | null
+  stream_phase?: AssistantStreamPhase | null
   created_at: string
 }
 
@@ -795,6 +820,7 @@ export const portfolioApi = {
 export const marketApi = {
   getQuote: (code: string) => api.get<MarketQuote>(`/market/quote/${code}`),
   getHistory: (code: string, days = 60) => api.get<MarketHistoryResponse>(`/market/history/${code}`, { params: { days } }),
+  getIntraday: (code: string, period = '1m', limit = 240) => api.get<MarketHistoryResponse>(`/market/intraday/${code}`, { params: { period, limit } }),
   getEtfProfile: (code: string, year?: number, forceRefresh = false) => api.get<EtfProfileResponse>(`/market/etf/${code}/profile`, { params: { year, force_refresh: forceRefresh } }),
   searchEtf: (q: string) => api.get<EtfSearchResult[]>('/market/etf/search', { params: { q } }),
   refreshQuote: (code: string) => api.post(`/market/refresh/${code}`),
@@ -819,13 +845,14 @@ export const assistantApi = {
   listSessions: () => api.get<AssistantSessionListResponse>('/assistant/sessions'),
   createSession: (title?: string) => api.post<AssistantSession>('/assistant/sessions', { title }),
   getHistory: (sessionId?: number) => api.get<AssistantHistoryResponse>('/assistant/history', { params: { session_id: sessionId } }),
-  chat: (message: string, sessionId?: number, includePortfolioContext = true) => api.post<AssistantChatResponse>('/assistant/chat', {
+  chat: (message: string, sessionId?: number, includePortfolioContext = true, portfolioIds?: number[]) => api.post<AssistantChatResponse>('/assistant/chat', {
     message,
     session_id: sessionId,
     include_portfolio_context: includePortfolioContext,
+    portfolio_ids: portfolioIds,
   }),
   deleteSession: (sessionId: number) => api.delete(`/assistant/sessions/${sessionId}`),
-  streamChat: async (message: string, sessionId?: number, retryMessageId?: number, includePortfolioContext = true) =>
+  streamChat: async (message: string, sessionId?: number, retryMessageId?: number, includePortfolioContext = true, portfolioIds?: number[]) =>
     fetch('/api/assistant/chat/stream', {
       method: 'POST',
       headers: {
@@ -837,7 +864,15 @@ export const assistantApi = {
         session_id: sessionId,
         retry_message_id: retryMessageId,
         include_portfolio_context: includePortfolioContext,
+        portfolio_ids: portfolioIds,
       }),
+    }),
+  subscribeStream: async (messageId: number) =>
+    fetch(`/api/assistant/chat/stream/${messageId}`, {
+      method: 'GET',
+      headers: {
+        ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      },
     }),
 }
 

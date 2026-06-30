@@ -11,6 +11,7 @@ class Portfolio(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     etf_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    asset_type: Mapped[str] = mapped_column(String(20), default="etf", nullable=False, index=True)
     shares: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     cost_price: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     buy_date: Mapped[date | None] = mapped_column(Date)

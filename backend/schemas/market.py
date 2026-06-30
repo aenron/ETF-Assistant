@@ -75,6 +75,7 @@ class MarketQuote(ShanghaiBaseModel):
 class KLineItem(ShanghaiBaseModel):
     """K线数据项"""
     trade_date: date
+    trade_time: Optional[datetime] = None
     open_price: float
     close_price: float
     high_price: float

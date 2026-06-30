@@ -3,7 +3,7 @@ import math
 from pydantic import field_validator
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from schemas.base import ShanghaiBaseModel, ShanghaiOrmModel
 
@@ -36,6 +36,7 @@ class DecimalModel(ShanghaiBaseModel):
 
 class PortfolioBase(ShanghaiBaseModel):
     etf_code: str
+    asset_type: str = "auto"
     shares: float
     cost_price: float
     buy_date: Optional[date] = None
@@ -48,6 +49,7 @@ class PortfolioCreate(PortfolioBase):
 
 
 class PortfolioUpdate(ShanghaiBaseModel):
+    asset_type: Optional[str] = None
     shares: Optional[float] = None
     cost_price: Optional[float] = None
     buy_date: Optional[date] = None
@@ -87,6 +89,15 @@ class PortfolioCrossBorderRisk(ShanghaiBaseModel):
     warnings: list[str] = []
     iopv: Optional[float] = None
     premium_rate: Optional[float] = None
+
+
+class PortfolioTrendSignal(ShanghaiBaseModel):
+    action: str
+    label: str
+    toneClassName: str
+    summary: str
+    buyChecks: list[dict[str, Any]] = []
+    sellChecks: list[dict[str, Any]] = []
 
 
 class PortfolioWithMarket(PortfolioResponse):
@@ -134,6 +145,7 @@ class PortfolioWithMarket(PortfolioResponse):
     dca_budget_label: Optional[str] = None
     cross_border_risk: Optional[PortfolioCrossBorderRisk] = None
     factor_score: Optional[PortfolioFactorScore] = None
+    trend_signal: Optional[PortfolioTrendSignal] = None
 
     @field_validator(
         "current_price",

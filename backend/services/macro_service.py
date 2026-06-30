@@ -1,14 +1,17 @@
 import inspect
 import re
+from io import StringIO
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 import akshare as ak
+import httpx
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models.macro_cycle_state import MacroCycleState
 from models.macro_indicator import MacroIndicator
 from utils.timezone import now_in_utc_naive
@@ -35,6 +38,22 @@ class MacroIndicatorSpec:
 
 
 class MacroDataService:
+    FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
+    FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    FRED_SERIES = {
+        "us_cpi_yoy": {"series_id": "CPIAUCSL", "transform": "yoy", "unit": "%", "name": "美国CPI同比"},
+        "us_unemployment_rate": {"series_id": "UNRATE", "transform": "level", "unit": "%", "name": "美国失业率"},
+        "us_nonfarm": {"series_id": "PAYEMS", "transform": "monthly_diff_ten_thousand", "unit": "万人", "name": "美国非农就业"},
+        "us_pce": {"series_id": "PCEPILFE", "transform": "yoy", "unit": "%", "name": "美国核心PCE同比"},
+        "us_fed_rate": {"series_id": "FEDFUNDS", "transform": "level", "unit": "%", "name": "美国联邦基金利率"},
+        "us_10y_yield": {"series_id": "DGS10", "transform": "level", "unit": "%", "name": "美国10年期国债收益率"},
+    }
+
+    DEFAULT_MAX_INDICATOR_AGE_DAYS = 120
+    REALTIME_MAX_INDICATOR_AGE_DAYS = 10
+    MONTHLY_MAX_INDICATOR_AGE_DAYS = 150
+    STALE_CONFIDENCE_PENALTY = 8.0
+
     SPECS = (
         MacroIndicatorSpec(
             region="cn",
@@ -258,9 +277,9 @@ class MacroDataService:
             name="美国CPI同比",
             category="inflation",
             unit="%",
-            functions=("macro_usa_cpi_monthly", "macro_usa_cpi"),
-            date_keywords=("月份", "时间", "日期", "date", "month"),
-            value_keywords=("今值", "实际值", "CPI", "cpi", "value"),
+            functions=("fred:us_cpi_yoy", "macro_usa_cpi"),
+            date_keywords=("date", "月份", "时间", "日期", "month"),
+            value_keywords=("value", "同比", "年率", "CPI", "cpi"),
             max_abs_value=50,
             positive_when="up",
             weight=35,
@@ -285,9 +304,9 @@ class MacroDataService:
             name="美国失业率",
             category="growth",
             unit="%",
-            functions=("macro_usa_unemployment_rate", "macro_usa_unemployment"),
-            date_keywords=("月份", "时间", "日期", "date", "month"),
-            value_keywords=("今值", "实际值", "失业率", "unemployment", "value"),
+            functions=("fred:us_unemployment_rate", "macro_usa_unemployment_rate", "macro_usa_unemployment"),
+            date_keywords=("date", "月份", "时间", "日期", "month"),
+            value_keywords=("value", "今值", "实际值", "失业率", "unemployment"),
             min_value=0,
             max_value=30,
             positive_when="down",
@@ -299,9 +318,9 @@ class MacroDataService:
             name="美国联邦基金利率",
             category="liquidity",
             unit="%",
-            functions=("macro_usa_fed_interest_rate", "macro_bank_usa_interest_rate"),
-            date_keywords=("日期", "时间", "date", "month"),
-            value_keywords=("今值", "实际值", "利率", "value", "rate"),
+            functions=("fred:us_fed_rate", "macro_usa_fed_interest_rate", "macro_bank_usa_interest_rate"),
+            date_keywords=("date", "日期", "时间", "month"),
+            value_keywords=("value", "今值", "实际值", "利率", "rate"),
             min_value=0,
             max_value=30,
             positive_when="down",
@@ -313,9 +332,9 @@ class MacroDataService:
             name="美国非农就业",
             category="growth",
             unit="万人",
-            functions=("macro_usa_non_farm", "macro_usa_nonfarm_payrolls"),
-            date_keywords=("日期", "时间", "date", "month"),
-            value_keywords=("今值", "实际值", "非农", "value"),
+            functions=("fred:us_nonfarm", "macro_usa_non_farm", "macro_usa_nonfarm_payrolls"),
+            date_keywords=("date", "日期", "时间", "month"),
+            value_keywords=("value", "今值", "实际值", "非农"),
             positive_when="up",
             weight=25,
         ),
@@ -325,9 +344,9 @@ class MacroDataService:
             name="美国PCE物价",
             category="inflation",
             unit="%",
-            functions=("macro_usa_core_pce_price", "macro_usa_pce"),
-            date_keywords=("日期", "时间", "date", "month"),
-            value_keywords=("今值", "实际值", "PCE", "value"),
+            functions=("fred:us_pce", "macro_usa_core_pce_price", "macro_usa_pce"),
+            date_keywords=("date", "日期", "时间", "month"),
+            value_keywords=("value", "今值", "实际值", "PCE"),
             positive_when="up",
             weight=30,
         ),
@@ -337,9 +356,9 @@ class MacroDataService:
             name="美国10年期国债收益率",
             category="liquidity",
             unit="%",
-            functions=(("bond_zh_us_rate", {"start_date": "20200101"}), "bond_zh_us_rate"),
-            date_keywords=("日期", "时间", "date"),
-            value_keywords=("美国国债收益率10年", "美国10年", "10Y"),
+            functions=("fred:us_10y_yield", ("bond_zh_us_rate", {"start_date": "20200101"}), "bond_zh_us_rate"),
+            date_keywords=("date", "日期", "时间"),
+            value_keywords=("value", "美国国债收益率10年", "美国10年", "10Y"),
             min_value=0,
             max_value=20,
             avoid_value_keywords=("日期", "时间", "月份", "中国"),
@@ -369,7 +388,7 @@ class MacroDataService:
             functions=(("futures_foreign_commodity_realtime", {"symbol": ["GC"]}), ("futures_global_spot_em", {})),
             date_keywords=("日期", "时间", "date"),
             value_keywords=("最新价", "收盘", "价格", "close", "value"),
-            positive_when="up",
+            positive_when="down",
             weight=20,
             min_value=100,
             max_abs_value=100000,
@@ -436,6 +455,92 @@ class MacroDataService:
         ),
     )
 
+
+    @classmethod
+    def _fred_params(cls, series_id: str) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "series_id": series_id,
+            "file_type": "json",
+            "sort_order": "asc",
+            "observation_start": "2018-01-01",
+        }
+        api_key = getattr(settings, "fred_api_key", "").strip()
+        if api_key:
+            params["api_key"] = api_key
+        return params
+
+    @classmethod
+    def _fetch_fred_rows(cls, series_id: str) -> list[tuple[pd.Timestamp, float]]:
+        api_key = getattr(settings, "fred_api_key", "").strip()
+        try:
+            with httpx.Client(timeout=12.0) as client:
+                if api_key:
+                    response = client.get(cls.FRED_API_URL, params=cls._fred_params(series_id))
+                    response.raise_for_status()
+                    observations = response.json().get("observations") or []
+                    raw_rows = [(item.get("date"), item.get("value")) for item in observations]
+                else:
+                    response = client.get(cls.FRED_CSV_URL, params={"id": series_id})
+                    response.raise_for_status()
+                    frame = pd.read_csv(StringIO(response.text))
+                    value_col = series_id if series_id in frame.columns else frame.columns[-1]
+                    raw_rows = list(zip(frame["observation_date"], frame[value_col]))
+        except Exception as e:
+            print(f"[MacroDataService] FRED调用失败: {series_id}, {e}")
+            return []
+
+        rows = []
+        for date, raw_value in raw_rows:
+            value = cls._normalize_number(raw_value)
+            if value is None or not date:
+                continue
+            rows.append((pd.Timestamp(date), value))
+        rows.sort(key=lambda item: item[0])
+        return rows
+
+    @classmethod
+    def _fred_rows_to_frame(cls, rows: list[tuple[pd.Timestamp, float]], transform: str | None) -> pd.DataFrame | None:
+        output = []
+        for idx, (date, value) in enumerate(rows):
+            previous = rows[idx - 1][1] if idx > 0 else None
+            transformed = value
+            transformed_previous = previous
+            if transform == "yoy":
+                if idx < 12 or rows[idx - 12][1] == 0:
+                    continue
+                transformed = (value / rows[idx - 12][1] - 1) * 100
+                if idx >= 13 and rows[idx - 13][1] != 0:
+                    transformed_previous = (rows[idx - 1][1] / rows[idx - 13][1] - 1) * 100
+                else:
+                    transformed_previous = None
+            elif transform == "monthly_diff_ten_thousand":
+                if previous is None:
+                    continue
+                # PAYEMS is in thousands of persons; divide by 10 to express in ten-thousand persons.
+                transformed = (value - previous) / 10
+                if idx >= 2:
+                    transformed_previous = (rows[idx - 1][1] - rows[idx - 2][1]) / 10
+                else:
+                    transformed_previous = None
+            output.append({
+                "date": date.date().isoformat(),
+                "value": round(transformed, 4),
+                "previous": round(transformed_previous, 4) if transformed_previous is not None else None,
+            })
+        if not output:
+            return None
+        return pd.DataFrame(output)
+
+    @classmethod
+    def _call_fred(cls, code: str) -> pd.DataFrame | None:
+        cfg = cls.FRED_SERIES.get(code)
+        if not cfg:
+            return None
+        rows = cls._fetch_fred_rows(str(cfg["series_id"]))
+        if not rows:
+            return None
+        return cls._fred_rows_to_frame(rows, str(cfg.get("transform") or "level"))
+
     @classmethod
     def _normalize_function_entry(cls, entry: Any) -> tuple[str, dict[str, Any]]:
         if isinstance(entry, tuple) and entry:
@@ -447,6 +552,8 @@ class MacroDataService:
     @classmethod
     def _call_akshare(cls, entry: Any):
         fn_name, kwargs = cls._normalize_function_entry(entry)
+        if fn_name.startswith("fred:"):
+            return cls._call_fred(fn_name.split(":", 1)[1])
         fn = getattr(ak, fn_name, None)
         if fn is None:
             return None
@@ -522,6 +629,33 @@ class MacroDataService:
         if pd.isna(parsed):
             parsed = pd.to_datetime(text, errors="coerce")
         return parsed if not pd.isna(parsed) else pd.Timestamp.min
+
+    @classmethod
+    def _period_age_days(cls, value: Any) -> int | None:
+        parsed = cls._period_sort_value(value)
+        if parsed is pd.Timestamp.min or parsed == pd.Timestamp.min:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.tz_convert(None)
+        return (pd.Timestamp(now_in_utc_naive().date()) - parsed.normalize()).days
+
+    @classmethod
+    def _max_indicator_age_days(cls, spec: MacroIndicatorSpec) -> int:
+        if spec.region == "global":
+            return cls.REALTIME_MAX_INDICATOR_AGE_DAYS
+        return cls.MONTHLY_MAX_INDICATOR_AGE_DAYS
+
+    @classmethod
+    def _is_indicator_fresh(cls, item: MacroIndicator) -> bool:
+        spec = next((spec for spec in cls.SPECS if spec.region == item.region and spec.code == item.indicator_code), None)
+        if not spec:
+            return True
+        age_days = cls._period_age_days(item.period)
+        if age_days is None:
+            return True
+        if age_days < -7:
+            return False
+        return age_days <= cls._max_indicator_age_days(spec)
 
     @classmethod
     def _extract_latest(cls, df: pd.DataFrame, spec: MacroIndicatorSpec) -> tuple[str, float, float | None, str, str] | None:
@@ -936,26 +1070,30 @@ class MacroDataService:
         nonfarm = values.get("us_nonfarm")
         if nonfarm:
             value, trend = nonfarm
-            if value >= 15:
-                growth_score += 16
-            elif value >= 8:
+            if value >= 25:
+                growth_score += 14
+            elif value >= 15:
                 growth_score += 10
-            elif value >= 3:
-                growth_score += 4
-            elif value < 0:
+            elif value >= 8:
+                growth_score += 6
+            elif value >= 0:
+                growth_score += 2
+            else:
                 growth_score -= 18
             if trend == "up":
-                growth_score += 4
+                growth_score += 2
             elif trend == "down":
-                growth_score -= 4
+                growth_score -= 2
 
         unemployment = values.get("us_unemployment_rate")
         if unemployment:
             value, trend = unemployment
-            if value <= 4.0:
-                growth_score += 14
-            elif value <= 4.5:
+            if value <= 3.8:
+                growth_score += 12
+            elif value <= 4.2:
                 growth_score += 8
+            elif value <= 4.6:
+                growth_score += 4
             elif value >= 5.5:
                 growth_score -= 18
             elif value >= 5.0:
@@ -965,72 +1103,91 @@ class MacroDataService:
             elif trend == "down":
                 growth_score += 4
 
-        inflation_score = 35.0
+        price_score = 35.0
         cpi = values.get("us_cpi_yoy")
         if cpi:
             value, trend = cpi
-            if value >= 4.0:
-                inflation_score += 28
+            if value >= 5.0:
+                price_score += 28
+            elif value >= 4.0:
+                price_score += 22
             elif value >= 3.0:
-                inflation_score += 22
+                price_score += 16
             elif value >= 2.5:
-                inflation_score += 14
+                price_score += 10
             elif value <= 1.5:
-                inflation_score -= 12
+                price_score -= 12
             if trend == "up":
-                inflation_score += 8
+                price_score += 6
             elif trend == "down":
-                inflation_score -= 4
+                price_score -= 4
 
         pce = values.get("us_pce")
         if pce:
             value, trend = pce
-            if value >= 3.5:
-                inflation_score += 26
+            if value >= 4.0:
+                price_score += 24
+            elif value >= 3.5:
+                price_score += 18
             elif value >= 3.0:
-                inflation_score += 22
+                price_score += 14
             elif value >= 2.5:
-                inflation_score += 16
+                price_score += 9
             elif value <= 2.0:
-                inflation_score -= 8
+                price_score -= 8
             if trend == "up":
-                inflation_score += 8
+                price_score += 6
             elif trend == "down":
-                inflation_score -= 4
+                price_score -= 4
 
+        rate_pressure = 0.0
         fed_rate = values.get("us_fed_rate")
         if fed_rate:
             value, trend = fed_rate
             if value >= 5.0:
-                inflation_score += 16
+                rate_pressure += 8
             elif value >= 4.0:
-                inflation_score += 12
+                rate_pressure += 6
+            elif value >= 3.0:
+                rate_pressure += 3
             elif value <= 2.5:
-                inflation_score -= 6
+                rate_pressure -= 4
             if trend == "up":
-                inflation_score += 5
+                rate_pressure += 2
             elif trend == "down":
-                inflation_score -= 5
+                rate_pressure -= 2
 
         ten_year = values.get("us_10y_yield")
         if ten_year:
             value, trend = ten_year
-            if value >= 4.5:
-                inflation_score += 12
+            if value >= 4.8:
+                rate_pressure += 8
+            elif value >= 4.3:
+                rate_pressure += 5
             elif value >= 4.0:
-                inflation_score += 8
+                rate_pressure += 3
             elif value <= 3.0:
-                inflation_score -= 5
+                rate_pressure -= 4
             if trend == "up":
-                inflation_score += 4
+                rate_pressure += 2
             elif trend == "down":
-                inflation_score -= 3
+                rate_pressure -= 2
+
+        inflation_score = price_score + max(-8.0, min(12.0, rate_pressure))
+        if values.get("us_pmi") is None and growth_score > 68:
+            growth_score = 68.0
 
         growth_score = max(0.0, min(100.0, growth_score))
         inflation_score = max(0.0, min(100.0, inflation_score))
         growth_trend = "up" if growth_score >= 55 else "down" if growth_score < 45 else "flat"
         inflation_trend = "up" if inflation_score >= 55 else "down" if inflation_score < 45 else "flat"
         return growth_score, inflation_score, growth_trend, inflation_trend
+
+    @classmethod
+    def _score_global_cycle(cls, indicators: list[MacroIndicator]) -> tuple[float, float, str, str]:
+        risk_score, risk_trend = cls._score_categories(indicators, ("risk", "currency"), "global")
+        inflation_score, inflation_trend = cls._score_category(indicators, "inflation", "global")
+        return risk_score, inflation_score, risk_trend, inflation_trend
 
     @staticmethod
     def _phase(growth_score: float, inflation_score: float) -> str:
@@ -1047,11 +1204,11 @@ class MacroDataService:
         region_prefix = {
             "cn": "中国宏观",
             "us": "美国宏观",
-            "global": "全球流动性",
+            "global": "全球风险/流动性代理",
         }.get(region, "宏观")
         impact = {
             "recovery": f"{region_prefix}自动判断为复苏/风险友好，权益风险预算可适度提高，绿灯可按常规或增强倍率执行。",
-            "overheating": f"{region_prefix}自动判断为过热/压力上行，避免追高，绿灯仍可执行但建议降低增强倍率上限。",
+            "overheating": f"{region_prefix}自动判断为过热/再通胀压力上行，避免追高，绿灯仍可执行但建议降低增强倍率上限。",
             "stagflation": f"{region_prefix}自动判断为滞涨/压力偏高，权益风险预算应下调，黄灯偏观察，深绿/绿灯也应小额分批。",
             "recession": f"{region_prefix}自动判断为衰退/风险偏弱，控制总仓位，红绿灯只作为低位分批观察信号。",
         }
@@ -1061,20 +1218,36 @@ class MacroDataService:
     async def build_cycle_state(cls, session: AsyncSession, region: str = "cn", indicators: list[MacroIndicator] | None = None) -> MacroCycleState:
         if indicators is None:
             indicators = await cls.latest_indicators(session, region=region)
-        indicators = [item for item in indicators if item.region == region]
+        region_indicators = [item for item in indicators if item.region == region]
+        fresh_indicators = [item for item in region_indicators if cls._is_indicator_fresh(item)]
+        stale_indicators = [item for item in region_indicators if not cls._is_indicator_fresh(item)]
+        indicators = fresh_indicators
         if region == "cn":
             growth_score, inflation_score, growth_trend, inflation_trend = cls._score_cn_cycle(indicators)
         elif region == "us":
             growth_score, inflation_score, growth_trend, inflation_trend = cls._score_us_cycle(indicators)
         elif region == "global":
-            growth_score, growth_trend = cls._score_categories(indicators, ("risk", "currency"), region)
-            inflation_score, inflation_trend = cls._score_category(indicators, "inflation", region)
+            growth_score, inflation_score, growth_trend, inflation_trend = cls._score_global_cycle(indicators)
         else:
             growth_score, growth_trend = cls._score_category(indicators, "growth", region)
             inflation_score, inflation_trend = cls._score_category(indicators, "inflation", region)
         phase = cls._phase(growth_score, inflation_score)
-        confidence = min(95.0, 45.0 + len(indicators) * 10.0)
+        expected_count = len([spec for spec in cls.SPECS if spec.region == region and spec.functions])
+        coverage = len(indicators) / expected_count if expected_count else 0.0
+        confidence = 35.0 + min(1.0, coverage) * 55.0
+        confidence -= min(25.0, len(stale_indicators) * cls.STALE_CONFIDENCE_PENALTY)
+        if region == "global":
+            required_codes = {"global_vix", "global_dxy", "global_usdcny"}
+            present_codes = {item.indicator_code for item in indicators}
+            missing_required = required_codes - present_codes
+            confidence -= len(missing_required) * 10.0
+        confidence = max(15.0, min(95.0, confidence))
         names = "、".join(item.indicator_name for item in indicators[:5])
+        stale_names = "、".join(item.indicator_name for item in stale_indicators[:5])
+        summary_prefix = "自动采集全球风险/流动性代理指标" if region == "global" else "自动采集宏观指标"
+        summary = f"{summary_prefix} {len(indicators)} 个生成判断。主要指标：{names or '暂无'}。"
+        if stale_indicators:
+            summary += f" 已剔除过期指标 {len(stale_indicators)} 个：{stale_names}。"
         state = MacroCycleState(
             region=region,
             cycle_phase=phase,
@@ -1083,7 +1256,7 @@ class MacroDataService:
             growth_trend=growth_trend,
             inflation_trend=inflation_trend,
             confidence=Decimal(str(round(confidence, 2))),
-            summary=f"自动采集 {len(indicators)} 个宏观指标生成判断。主要指标：{names or '暂无'}。",
+            summary=summary,
             dca_impact=cls._dca_impact(phase, region),
             source_note=f"自动采集 AkShare · {region}",
             source_type="auto",

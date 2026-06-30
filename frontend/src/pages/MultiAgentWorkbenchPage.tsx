@@ -21,8 +21,6 @@ import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ContextSummary } from '@/components/MultiAgent/ContextSummary'
-import { RoleOpinionCard } from '@/components/MultiAgent/RoleOpinionCard'
-import { ConclusionPanel } from '@/components/MultiAgent/ConclusionPanel'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 
 const sceneLabelMap: Record<MultiAgentScene, string> = {
@@ -301,6 +299,262 @@ function buildMessagesFromRun(run: MultiAgentRunResponse | null): DebateChatMess
   return messages
 }
 
+
+const actionStyleMap: Record<string, string> = {
+  buy: 'border-red-200 bg-red-50 text-red-700',
+  add: 'border-orange-200 bg-orange-50 text-orange-700',
+  hold: 'border-blue-200 bg-blue-50 text-blue-700',
+  reduce: 'border-amber-200 bg-amber-50 text-amber-700',
+  sell: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+}
+
+const actionLabelMap: Record<string, string> = {
+  buy: '买入',
+  add: '加仓',
+  hold: '持有',
+  reduce: '减仓',
+  sell: '卖出',
+}
+
+function ConfidenceBar({ value }: { value: number }) {
+  const safeValue = Math.max(0, Math.min(100, value || 0))
+  return (
+    <div className="flex items-center gap-3">
+      <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
+        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${safeValue}%` }} />
+      </div>
+      <span className="min-w-12 text-right text-xs font-mono text-muted-foreground">{safeValue.toFixed(0)}%</span>
+    </div>
+  )
+}
+
+function FinalSummaryHero({
+  run,
+  context,
+  running,
+}: {
+  run: MultiAgentRunResponse | null
+  context: MultiAgentContextSummary | null
+  running: boolean
+}) {
+  const conclusion = run?.final_conclusion ?? null
+  const action = conclusion?.recommended_action || 'hold'
+  const confidence = conclusion?.confidence ?? 0
+  const primaryReasons = conclusion?.supporting_roles?.slice(0, 3) ?? []
+  const risks = conclusion?.risk_notes?.slice(0, 3) ?? []
+
+  return (
+    <Card className="overflow-hidden border-slate-200">
+      <CardContent className="p-0">
+        <div className="border-b bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-800 px-5 py-5 text-white">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-emerald-100">
+                <Badge variant="outline" className="border-white/20 bg-white/10 text-white">{context ? sceneLabelMap[context.scenario] : '研判'}</Badge>
+                {run?.llm_provider && <span>LLM: {run.llm_provider}</span>}
+                {run?.created_at && <span>{new Date(run.created_at).toLocaleString('zh-CN')}</span>}
+                {running && <span className="inline-flex items-center gap-1"><RefreshCw className="h-3 w-3 animate-spin" />生成中</span>}
+              </div>
+              <h2 className="truncate text-lg font-semibold">{context?.title || '等待发起多智能体研判'}</h2>
+              <p className="max-w-3xl text-sm leading-6 text-slate-200">
+                {conclusion?.conclusion || context?.question || '运行后这里会优先展示最终动作、置信度、关键依据和主要风险。'}
+              </p>
+            </div>
+            <div className="min-w-[160px] rounded-xl border border-white/15 bg-white/10 p-3 backdrop-blur">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs text-emerald-100">最终建议</span>
+                <Badge variant="outline" className={actionStyleMap[action] || actionStyleMap.hold}>
+                  {actionLabelMap[action] || action}
+                </Badge>
+              </div>
+              <ConfidenceBar value={confidence} />
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-0 md:grid-cols-3">
+          <div className="border-b p-4 md:border-b-0 md:border-r">
+            <div className="mb-2 text-xs font-medium text-muted-foreground">主要依据</div>
+            <div className="space-y-2">
+              {(primaryReasons.length ? primaryReasons : ['暂无支持角色']).map((item, index) => (
+                <div key={`${item}-${index}`} className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">{item}</div>
+              ))}
+            </div>
+          </div>
+          <div className="border-b p-4 md:border-b-0 md:border-r">
+            <div className="mb-2 text-xs font-medium text-muted-foreground">关键分歧</div>
+            <div className="space-y-2">
+              {((conclusion?.disagreements || run?.arbiter_summary?.disagreements || []).slice(0, 3).length
+                ? (conclusion?.disagreements || run?.arbiter_summary?.disagreements || []).slice(0, 3)
+                : ['暂无明显分歧']).map((item, index) => (
+                <div key={`${item}-${index}`} className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">{item}</div>
+              ))}
+            </div>
+          </div>
+          <div className="p-4">
+            <div className="mb-2 text-xs font-medium text-muted-foreground">主要风险</div>
+            <div className="space-y-2">
+              {(risks.length ? risks : ['暂无风险提示']).map((item, index) => (
+                <div key={`${item}-${index}`} className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{item}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function OpinionMatrix({ opinions }: { opinions: MultiAgentRoleOpinion[] }) {
+  if (opinions.length === 0) {
+    return (
+      <Card className="border-dashed">
+        <CardHeader><CardTitle className="text-base">Agent 观点矩阵</CardTitle></CardHeader>
+        <CardContent className="text-sm text-muted-foreground">运行后这里会按角色对照立场、依据、风险和建议。</CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <CardTitle className="text-base">Agent 观点矩阵</CardTitle>
+          <Badge variant="outline">{opinions.length} 个角色</Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto rounded-xl border">
+          <table className="min-w-full border-collapse text-left text-sm">
+            <thead className="bg-slate-50 text-xs text-muted-foreground">
+              <tr>
+                <th className="whitespace-nowrap px-3 py-2 font-medium">智能体</th>
+                <th className="whitespace-nowrap px-3 py-2 font-medium">立场</th>
+                <th className="min-w-[220px] px-3 py-2 font-medium">核心依据</th>
+                <th className="min-w-[220px] px-3 py-2 font-medium">风险关注</th>
+                <th className="whitespace-nowrap px-3 py-2 font-medium">建议</th>
+                <th className="whitespace-nowrap px-3 py-2 font-medium">置信度</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y bg-white">
+              {opinions.map((opinion) => (
+                <tr key={`${opinion.round_index}-${opinion.role_id}`} className="align-top">
+                  <td className="whitespace-nowrap px-3 py-3 font-medium text-slate-900">{opinion.role_name}</td>
+                  <td className="px-3 py-3">
+                    <Badge variant="outline" className={stanceBubbleMap[opinion.stance]}>{stanceLabelMap[opinion.stance]}</Badge>
+                  </td>
+                  <td className="px-3 py-3 text-slate-700">{opinion.evidence[0] || opinion.summary}</td>
+                  <td className="px-3 py-3 text-slate-600">{opinion.risk_notes[0] || '暂无'}</td>
+                  <td className="whitespace-nowrap px-3 py-3 text-slate-700">{opinion.action || '-'}</td>
+                  <td className="whitespace-nowrap px-3 py-3 text-slate-500">{opinion.confidence.toFixed(0)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function RoleMiniCard({ opinion }: { opinion: MultiAgentRoleOpinion }) {
+  return (
+    <div className="rounded-xl border bg-white p-3 shadow-sm shadow-slate-900/5">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="font-medium text-slate-900">{opinion.role_name}</div>
+          <div className="mt-1 text-xs text-muted-foreground">{opinion.action || '暂无动作'} · {opinion.confidence.toFixed(0)}%</div>
+        </div>
+        <Badge variant="outline" className={stanceBubbleMap[opinion.stance]}>{stanceLabelMap[opinion.stance]}</Badge>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-700">{opinion.summary}</p>
+      {opinion.rebuttals && opinion.rebuttals.length > 0 && (
+        <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{opinion.rebuttals[0]}</div>
+      )}
+    </div>
+  )
+}
+
+function DebateRoundsPanel({
+  run,
+  initialOpinions,
+  rounds,
+  showTranscript,
+  onToggle,
+}: {
+  run: MultiAgentRunResponse | null
+  initialOpinions: MultiAgentRoleOpinion[]
+  rounds: MultiAgentDebateRound[]
+  showTranscript: boolean
+  onToggle: () => void
+}) {
+  return (
+    <Card>
+      <CardHeader className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <CardTitle className="text-base">辩论轮次</CardTitle>
+          <div className="flex items-center gap-2">
+            {run && <Badge variant="outline">{rounds.length + 1} 轮 / {run.max_debate_rounds} 上限</Badge>}
+            <Button variant="outline" size="sm" onClick={onToggle} disabled={!run}>
+              {showTranscript ? <ChevronUp className="mr-2 h-4 w-4" /> : <ChevronDown className="mr-2 h-4 w-4" />}
+              {showTranscript ? '收起' : '展开'}
+            </Button>
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground">默认先看结论和观点矩阵，需要追溯推理时再展开每轮发言、反驳和裁决。</p>
+      </CardHeader>
+      {showTranscript && run ? (
+        <CardContent className="space-y-4">
+          <section className="rounded-xl border bg-slate-50 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium">第 1 轮：初始并行分析</div>
+                <div className="text-xs text-muted-foreground">各角色独立给出首轮观点。</div>
+              </div>
+              <Badge variant="outline">{initialOpinions.length} 个角色</Badge>
+            </div>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {initialOpinions.map((opinion) => <RoleMiniCard key={`initial-${opinion.role_id}`} opinion={opinion} />)}
+            </div>
+          </section>
+
+          {rounds.map((round) => (
+            <section key={round.round_index} className="rounded-xl border bg-slate-50 p-4">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium">第 {round.round_index} 轮：反驳与修正</div>
+                  <div className="mt-1 text-xs text-muted-foreground">{round.round_summary}</div>
+                </div>
+                <Badge variant="outline">{convergenceLabelMap[round.convergence_state]}</Badge>
+              </div>
+              {round.open_disagreements.length > 0 && (
+                <div className="mb-3 grid gap-2 sm:grid-cols-2">
+                  {round.open_disagreements.map((item, index) => (
+                    <div key={`${round.round_index}-${item}-${index}`} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{item}</div>
+                  ))}
+                </div>
+              )}
+              <div className="grid gap-3 lg:grid-cols-2">
+                {round.role_opinions.map((opinion) => <RoleMiniCard key={`${round.round_index}-${opinion.role_id}`} opinion={opinion} />)}
+              </div>
+              {round.arbiter_summary && (
+                <div className="mt-3 rounded-lg border bg-white px-3 py-2 text-sm text-slate-700">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium">本轮裁决</span>
+                    <Badge variant="outline">{round.arbiter_summary.consensus_reached ? '已收敛' : '继续辩论'}</Badge>
+                  </div>
+                  <div className="mt-1 text-muted-foreground">{round.arbiter_summary.why_stop}</div>
+                </div>
+              )}
+            </section>
+          ))}
+        </CardContent>
+      ) : (
+        <CardContent className="text-sm text-muted-foreground">{run ? '辩论过程已折叠。' : '暂无辩论记录。'}</CardContent>
+      )}
+    </Card>
+  )
+}
+
 function DebateChat({ messages, running }: { messages: DebateChatMessage[]; running: boolean }) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
@@ -427,6 +681,7 @@ export function MultiAgentWorkbenchPage() {
   const [portfolios, setPortfolios] = useState<PortfolioWithMarket[]>([])
   const [selectedPortfolioIds, setSelectedPortfolioIds] = useState<number[]>([])
   const [loadingPortfolios, setLoadingPortfolios] = useState(false)
+  const [portfolioSelectorOpen, setPortfolioSelectorOpen] = useState(false)
   const [maxDebateRounds, setMaxDebateRounds] = useState(3)
   const [collapseDebateByDefault, setCollapseDebateByDefault] = useState(true)
   const [runs, setRuns] = useState<MultiAgentRunResponse[]>([])
@@ -446,7 +701,6 @@ export function MultiAgentWorkbenchPage() {
   const currentContext = useMemo<MultiAgentContextSummary | null>(() => currentRun?.context_summary ?? liveContext, [currentRun, liveContext])
   const currentInitialOpinions = currentRun?.initial_role_opinions ?? []
   const currentDebateRounds = currentRun?.debate_rounds ?? []
-  const currentArbiter = currentRun?.arbiter_summary ?? null
 
   useEffect(() => {
     setShowTranscript(currentRun ? !currentRun.collapse_debate_by_default : false)
@@ -775,6 +1029,10 @@ export function MultiAgentWorkbenchPage() {
   const allPortfolioIds = portfolios.map((item) => item.id)
   const selectedPortfolioCount = selectedPortfolioIds.length
   const allPortfoliosSelected = portfolios.length > 0 && selectedPortfolioCount === portfolios.length
+  const formatPortfolioMoney = (value: number | null | undefined) => {
+    if (value == null || !Number.isFinite(value)) return '-'
+    return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }
   const togglePortfolio = (id: number) => {
     setSelectedPortfolioIds((prev) => (
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
@@ -834,18 +1092,25 @@ export function MultiAgentWorkbenchPage() {
             </TabsContent>
           </Tabs>
           {usePortfolioContext && (
-            <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+            <div className="rounded-lg border bg-muted/20 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="text-sm font-medium">引用持仓</div>
-                  <div className="text-xs text-muted-foreground">
-                    {loadingPortfolios
-                      ? '持仓加载中...'
-                      : portfolios.length > 0
-                        ? `已选择 ${selectedPortfolioCount} / ${portfolios.length} 个持仓`
-                        : '当前暂无可引用持仓'}
+                <button
+                  type="button"
+                  onClick={() => setPortfolioSelectorOpen((value) => !value)}
+                  className="flex min-w-0 items-center gap-2 text-left"
+                >
+                  {portfolioSelectorOpen ? <ChevronUp className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">引用持仓 {selectedPortfolioCount}/{portfolios.length}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {loadingPortfolios
+                        ? '持仓加载中...'
+                        : portfolios.length > 0
+                          ? '点击选择要提供给多智能体的持仓'
+                          : '当前暂无可引用持仓'}
+                    </div>
                   </div>
-                </div>
+                </button>
                 {portfolios.length > 0 && (
                   <div className="flex items-center gap-2">
                     <Button
@@ -869,30 +1134,37 @@ export function MultiAgentWorkbenchPage() {
                   </div>
                 )}
               </div>
-              {portfolios.length > 0 && (
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                  {portfolios.map((portfolio) => {
-                    const checked = selectedPortfolioIds.includes(portfolio.id)
-                    return (
-                      <label
-                        key={portfolio.id}
-                        className={`flex cursor-pointer items-start gap-2 rounded-lg border bg-background px-3 py-2 text-sm transition-colors ${checked ? 'border-primary/50 ring-1 ring-primary/20' : 'hover:border-muted-foreground/40'}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => togglePortfolio(portfolio.id)}
-                          className="mt-1 h-4 w-4 rounded border-muted-foreground/40 accent-primary"
-                        />
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium">{portfolio.etf_code} {portfolio.etf_name || ''}</span>
-                          <span className="block text-xs text-muted-foreground">
-                            市值 {portfolio.market_value != null ? portfolio.market_value.toFixed(2) : '-'} · 盈亏 {portfolio.pnl_pct != null ? `${portfolio.pnl_pct >= 0 ? '+' : ''}${portfolio.pnl_pct.toFixed(2)}%` : '-'}
-                          </span>
-                        </span>
-                      </label>
-                    )
-                  })}
+
+              {portfolioSelectorOpen && (
+                <div className="mt-3 border-t pt-3">
+                  {portfolios.length > 0 ? (
+                    <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                      {portfolios.map((portfolio) => {
+                        const checked = selectedPortfolioIds.includes(portfolio.id)
+                        return (
+                          <label
+                            key={portfolio.id}
+                            className={`flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors ${checked ? 'bg-background ring-1 ring-primary/20' : 'hover:bg-background/70'}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => togglePortfolio(portfolio.id)}
+                              className="h-4 w-4 rounded border-muted-foreground/40 accent-primary"
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-medium">{portfolio.etf_code} {portfolio.etf_name || ''}</span>
+                              <span className="block truncate text-xs text-muted-foreground">
+                                市值 {formatPortfolioMoney(portfolio.market_value)} · 盈亏 {portfolio.pnl_pct != null ? `${portfolio.pnl_pct >= 0 ? '+' : ''}${portfolio.pnl_pct.toFixed(2)}%` : '-'}
+                              </span>
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed bg-background px-3 py-3 text-sm text-muted-foreground">暂无可引用持仓</div>
+                  )}
                 </div>
               )}
             </div>
@@ -952,9 +1224,7 @@ export function MultiAgentWorkbenchPage() {
         </Card>
 
         <div className="space-y-6">
-          <ContextSummary summary={currentContext} run={currentRun} />
-
-          <DebateChat messages={chatMessages} running={running} />
+          <FinalSummaryHero run={currentRun} context={currentContext} running={running} />
 
           <Card>
             <CardContent className="pt-4">
@@ -974,111 +1244,19 @@ export function MultiAgentWorkbenchPage() {
             </CardContent>
           </Card>
 
+          {running && <DebateChat messages={chatMessages} running={running} />}
 
-          <ConclusionPanel conclusion={currentRun?.final_conclusion ?? null} arbiter={currentArbiter} />
+          <OpinionMatrix opinions={currentRun?.role_opinions ?? currentInitialOpinions} />
 
-          <Card>
-            <CardHeader className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <CardTitle className="text-base">完整辩论过程</CardTitle>
-                <div className="flex items-center gap-2">
-                  {currentRun && (
-                    <Badge variant="outline">
-                      {currentDebateRounds.length + 1} 轮 / {currentRun.max_debate_rounds} 上限
-                    </Badge>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setShowTranscript((value) => !value)}
-                    disabled={!currentRun}
-                  >
-                    {showTranscript ? (
-                      <>
-                        <ChevronUp className="mr-2 h-4 w-4" />
-                        收起
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="mr-2 h-4 w-4" />
-                        展开
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                {currentRun
-                  ? `默认${currentRun.collapse_debate_by_default ? '折叠' : '展开'}；当前展示 ${currentRun.status}，LLM：${currentRun.llm_provider || 'unknown'}。`
-                  : '先运行一次研判后，这里会展示初始分析、辩论轮次和裁决变化。'}
-              </p>
-            </CardHeader>
-            {showTranscript && currentRun ? (
-              <CardContent className="space-y-6">
-                <section className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-medium">初始并行分析</div>
-                      <div className="text-xs text-muted-foreground">所有角色的首轮分析会并行生成。</div>
-                    </div>
-                    <Badge variant="outline">{currentInitialOpinions.length} 个角色</Badge>
-                  </div>
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    {currentInitialOpinions.map((opinion) => (
-                      <RoleOpinionCard key={`initial-${opinion.role_id}`} opinion={opinion} />
-                    ))}
-                  </div>
-                </section>
+          <DebateRoundsPanel
+            run={currentRun}
+            initialOpinions={currentInitialOpinions}
+            rounds={currentDebateRounds}
+            showTranscript={showTranscript}
+            onToggle={() => setShowTranscript((value) => !value)}
+          />
 
-                {currentDebateRounds.map((round) => (
-                  <section key={round.round_index} className="space-y-3 rounded-2xl border bg-muted/10 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <div className="text-sm font-medium">第 {round.round_index} 轮辩论</div>
-                        <div className="text-xs text-muted-foreground">{round.round_summary}</div>
-                      </div>
-                      <Badge variant="outline">{convergenceLabelMap[round.convergence_state]}</Badge>
-                    </div>
-
-                    {round.arbiter_summary && (
-                      <div className="rounded-lg border bg-background p-3 text-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="font-medium">本轮裁决</span>
-                          <Badge variant="outline">
-                            {round.arbiter_summary.consensus_reached ? '已收敛' : '继续辩论'}
-                          </Badge>
-                        </div>
-                        <div className="mt-2 text-muted-foreground">{round.arbiter_summary.why_stop}</div>
-                      </div>
-                    )}
-
-                    {round.open_disagreements.length > 0 && (
-                      <div className="space-y-2">
-                        <div className="text-xs font-medium text-muted-foreground">未消解分歧</div>
-                        <div className="space-y-2">
-                          {round.open_disagreements.map((item, index) => (
-                            <div key={`${round.round_index}-${item}-${index}`} className="rounded-lg border bg-background px-3 py-2 text-sm text-foreground/80">
-                              {item}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      {round.role_opinions.map((opinion) => (
-                        <RoleOpinionCard key={`${round.round_index}-${opinion.role_id}`} opinion={opinion} />
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </CardContent>
-            ) : (
-              <CardContent className="text-sm text-muted-foreground">
-                {currentRun ? '辩论过程已折叠，点击“展开”查看每轮角色观点、反驳和裁决变化。' : '暂无辩论记录。'}
-              </CardContent>
-            )}
-          </Card>
+          <ContextSummary summary={currentContext} run={currentRun} />
         </div>
       </div>
 

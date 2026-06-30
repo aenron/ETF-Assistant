@@ -41,8 +41,9 @@ type ParsedDecisionSummary = {
   policyBasis: string[]
 }
 
-type IndicatorLineKey = 'ma5' | 'ma10' | 'ma20' | 'boll' | 'macd'
+type IndicatorLineKey = 'ma5' | 'ma10' | 'ma20' | 'ma60' | 'boll' | 'macd'
 type HistoryRangeDays = 60 | 120 | 365
+type ChartRangeKey = 'today' | HistoryRangeDays
 export type BenchmarkKey = 'hs300' | 'csiA500'
 
 export type RuleCheck = {
@@ -236,20 +237,15 @@ function formatAmountLabel(value: number) {
   return value.toFixed(0)
 }
 
-function calculateMovingAverage(data: CandlePoint[], period: number) {
+function calculateMovingAverage(data: CandlePoint[], period: number, partial = false) {
   return data.map((_, index) => {
-    if (index < period - 1) return null
-    const window = data.slice(index - period + 1, index + 1)
+    if (!partial && index < period - 1) return null
+    const start = partial ? Math.max(0, index - period + 1) : index - period + 1
+    const window = data.slice(start, index + 1)
+    if (window.length === 0) return null
     const sum = window.reduce((total, item) => total + item.close, 0)
-    return sum / period
+    return sum / window.length
   })
-}
-
-function findLastNumberIndex(values: Array<number | null>) {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (values[index] != null) return index
-  }
-  return -1
 }
 
 function calculateBollingerBands(data: CandlePoint[], period = 20, multiplier = 2) {
@@ -622,11 +618,15 @@ function CandlestickChart({
   costPrice,
   visibleIndicators,
   className = 'h-80',
+  partialMovingAverage = false,
+  timeframe = 'daily',
 }: {
   data: CandlePoint[]
   costPrice?: number | null
   visibleIndicators: Record<IndicatorLineKey, boolean>
   className?: string
+  partialMovingAverage?: boolean
+  timeframe?: 'daily' | 'intraday'
 }) {
   const width = 960
   const height = 320
@@ -639,10 +639,13 @@ function CandlestickChart({
   const chartWidth = width - padding.left - padding.right
   const candleStep = chartWidth / Math.max(data.length, 1)
   const candleWidth = Math.max(4, Math.min(12, candleStep * 0.58))
+  const averageLabel = (label: string) => timeframe === 'intraday' ? `${label}m` : label
+  const macdLabel = timeframe === 'intraday' ? '1m MACD' : '日线 MACD'
   const movingAverages = [
-    { key: 'ma5', label: 'MA5', color: '#2563eb', values: calculateMovingAverage(data, 5) },
-    { key: 'ma10', label: 'MA10', color: '#9333ea', values: calculateMovingAverage(data, 10) },
-    { key: 'ma20', label: 'MA20', color: '#f97316', values: calculateMovingAverage(data, 20) },
+    { key: 'ma5', label: averageLabel('MA5'), color: '#2563eb', values: calculateMovingAverage(data, 5, partialMovingAverage) },
+    { key: 'ma10', label: averageLabel('MA10'), color: '#9333ea', values: calculateMovingAverage(data, 10, partialMovingAverage) },
+    { key: 'ma20', label: averageLabel('MA20'), color: '#f97316', values: calculateMovingAverage(data, 20, partialMovingAverage) },
+    { key: 'ma60', label: averageLabel('MA60'), color: '#475569', values: calculateMovingAverage(data, 60, partialMovingAverage) },
   ] satisfies Array<{ key: IndicatorLineKey; label: string; color: string; values: Array<number | null> }>
   const bollingerBands = calculateBollingerBands(data)
   const bollLines = [
@@ -683,6 +686,7 @@ function CandlestickChart({
   const getMacdY = (value: number) => volumeTop + volumeHeight / 2 - (value / macdMaxAbs) * (volumeHeight * 0.42)
   const macdZeroY = getMacdY(0)
   const costY = includeCostLine ? getPriceY(costPrice) : null
+  const changeLabel = timeframe === 'intraday' ? '分钟涨跌' : '日涨跌'
 
   return (
     <div className={`${className} rounded-lg border bg-background/40 p-2`}>
@@ -718,7 +722,7 @@ function CandlestickChart({
             <>
               <span className="inline-flex items-center gap-1">
                 <span className="h-0.5 w-4 bg-cyan-600" />
-                DIF
+                {macdLabel} DIF
               </span>
               <span className="inline-flex items-center gap-1">
                 <span className="h-0.5 w-4 bg-amber-500" />
@@ -726,12 +730,12 @@ function CandlestickChart({
               </span>
               <span className="inline-flex items-center gap-1">
                 <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
-                MACD柱
+                {macdLabel}柱
               </span>
             </>
           ) : null}
         </div>
-        <span>上方为价格，下方为{visibleIndicators.macd ? 'MACD' : '成交量'}</span>
+        <span>上方为价格，下方为{visibleIndicators.macd ? macdLabel : '成交量'}</span>
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="h-[calc(100%-24px)] w-full">
         {priceTicks.map((tick) => {
@@ -758,7 +762,7 @@ function CandlestickChart({
           <g>
             <line x1={padding.left} x2={width - padding.right} y1={macdZeroY} y2={macdZeroY} stroke="currentColor" strokeOpacity="0.14" strokeDasharray="3 3" />
             <text x={width - padding.right + 6} y={macdZeroY + 4} fontSize="11" fill="currentColor" opacity="0.45">
-              MACD 0
+              {macdLabel} 0
             </text>
           </g>
         ) : null}
@@ -779,40 +783,6 @@ function CandlestickChart({
             </text>
           </g>
         ) : null}
-
-        {visibleIndicatorLines.map((line, lineIndex) => {
-          const points = line.values
-            .map((value, index) => value == null ? null : `${getX(index)},${getPriceY(value)}`)
-            .filter((point): point is string => point != null)
-            .join(' ')
-          const lastIndex = findLastNumberIndex(line.values)
-          const lastValue = lastIndex >= 0 ? line.values[lastIndex] : null
-
-          return points ? (
-            <g key={line.key}>
-              <polyline
-                points={points}
-                fill="none"
-                stroke={line.color}
-                strokeWidth="1.6"
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                strokeDasharray={'dashArray' in line ? line.dashArray : undefined}
-              />
-              {lastValue != null ? (
-                <text
-                  x={Math.min(getX(lastIndex) + 8, width - padding.right + 8)}
-                  y={Math.max(padding.top + 10, Math.min(getPriceY(lastValue) - 6 + lineIndex * 11, priceBottom - 6))}
-                  fontSize="11"
-                  fontWeight="600"
-                  fill={line.color}
-                >
-                  {line.label} {lastValue.toFixed(3)}
-                </text>
-              ) : null}
-            </g>
-          ) : null
-        })}
 
         {visibleIndicators.macd ? (
           <g>
@@ -905,10 +875,48 @@ function CandlestickChart({
               <title>
                 {`${item.fullDate}
 开 ${item.open.toFixed(3)} / 高 ${item.high.toFixed(3)} / 低 ${item.low.toFixed(3)} / 收 ${item.close.toFixed(3)}
-涨跌 ${item.change >= 0 ? '+' : ''}${item.change.toFixed(2)}% / 量 ${formatVolumeLabel(item.volume)}`}
+${changeLabel} ${item.change >= 0 ? '+' : ''}${item.change.toFixed(2)}% / 量 ${formatVolumeLabel(item.volume)}`}
               </title>
             </g>
           )
+        })}
+
+        {visibleIndicatorLines.map((line, lineIndex) => {
+          const validPoints = line.values
+            .map((value, index) => value == null ? null : { value, index, x: getX(index), y: getPriceY(value) })
+            .filter((point): point is { value: number; index: number; x: number; y: number } => point != null)
+          const points = validPoints.map((point) => `${point.x},${point.y}`).join(' ')
+          const lastPoint = validPoints.at(-1)
+
+          return validPoints.length > 0 ? (
+            <g key={line.key}>
+              {validPoints.length >= 2 ? (
+                <polyline
+                  points={points}
+                  fill="none"
+                  stroke={line.color}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  strokeDasharray={'dashArray' in line ? line.dashArray : undefined}
+                />
+              ) : null}
+              {validPoints.length === 1 ? (
+                <circle cx={validPoints[0].x} cy={validPoints[0].y} r="3.5" fill={line.color} stroke="white" strokeWidth="1.2" />
+              ) : null}
+              {lastPoint ? (
+                <text
+                  x={Math.min(lastPoint.x + 8, width - padding.right + 8)}
+                  y={Math.max(padding.top + 10, Math.min(lastPoint.y - 6 + lineIndex * 11, priceBottom - 6))}
+                  fontSize="11"
+                  fontWeight="600"
+                  fill={line.color}
+                >
+                  {line.label} {lastPoint.value.toFixed(3)}
+                </text>
+              ) : null}
+            </g>
+          ) : null
         })}
       </svg>
     </div>
@@ -917,18 +925,31 @@ function CandlestickChart({
 
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice' | 'profile'>('chart')
+  const supportsIntraday = !['otc_fund', 'cash', 'money_fund'].includes(p.asset_type)
+  const [activeChartRange, setActiveChartRange] = useState<ChartRangeKey>(supportsIntraday ? 'today' : 60)
   const [historyDays, setHistoryDays] = useState<HistoryRangeDays>(60)
   const [chartFullscreen, setChartFullscreen] = useState(false)
   const [visibleIndicators, setVisibleIndicators] = useState<Record<IndicatorLineKey, boolean>>({
     ma5: true,
     ma10: true,
     ma20: true,
+    ma60: false,
     boll: false,
     macd: false,
   })
+  const [intradayIndicators, setIntradayIndicators] = useState<Record<IndicatorLineKey, boolean>>({
+    ma5: true,
+    ma10: false,
+    ma20: true,
+    ma60: false,
+    boll: false,
+    macd: true,
+  })
   const [historyData, setHistoryData] = useState<MarketHistoryResponse | null>(null)
+  const [intradayData, setIntradayData] = useState<MarketHistoryResponse | null>(null)
   const [benchmarkHistory, setBenchmarkHistory] = useState<Record<BenchmarkKey, MarketHistoryResponse | null>>({ hs300: null, csiA500: null })
   const [historyLoading, setHistoryLoading] = useState(true)
+  const [intradayLoading, setIntradayLoading] = useState(true)
   const [profile, setProfile] = useState<EtfProfileResponse | null>(null)
   const [profileLoading, setProfileLoading] = useState(true)
   const [advice, setAdvice] = useState<AdviceResponse | null>(null)
@@ -937,8 +958,17 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [latestLoading, setLatestLoading] = useState(true)
 
   useEffect(() => {
+    setActiveChartRange(supportsIntraday ? 'today' : 60)
+  }, [p.etf_code, supportsIntraday])
+
+  useEffect(() => {
     fetchHistory()
   }, [p.etf_code, historyDays])
+
+  useEffect(() => {
+    if (supportsIntraday) fetchIntraday()
+    else setIntradayData(null)
+  }, [p.etf_code, supportsIntraday])
 
   useEffect(() => {
     fetchBenchmarkHistory()
@@ -971,6 +1001,19 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
       console.error('Failed to fetch history:', e)
     } finally {
       setHistoryLoading(false)
+    }
+  }
+
+  const fetchIntraday = async () => {
+    setIntradayLoading(true)
+    try {
+      const res = await marketApi.getIntraday(p.etf_code, '1m', 240)
+      setIntradayData(res.data)
+    } catch (e) {
+      console.error('Failed to fetch intraday history:', e)
+      setIntradayData(null)
+    } finally {
+      setIntradayLoading(false)
     }
   }
 
@@ -1022,19 +1065,28 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
 
   const indicators = historyData?.indicators
   const klines = historyData?.data || []
+  const intradayKlines = intradayData?.data || []
+
+  const toChartPoint = (k: typeof klines[number], mode: 'daily' | 'intraday'): CandlePoint => {
+    const timeLabel = k.trade_time
+      ? new Date(k.trade_time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' })
+      : k.trade_date.slice(5)
+    return {
+      date: mode === 'intraday' ? timeLabel : k.trade_date.slice(5),
+      fullDate: k.trade_time || k.trade_date,
+      open: k.open_price,
+      close: k.close_price,
+      high: k.high_price,
+      low: k.low_price,
+      volume: k.volume,
+      amount: k.amount ?? null,
+      change: k.change_pct,
+    }
+  }
 
   // K线图数据
-  const chartData = klines.map(k => ({
-    date: k.trade_date.slice(5), // MM-DD
-    fullDate: k.trade_date,
-    open: k.open_price,
-    close: k.close_price,
-    high: k.high_price,
-    low: k.low_price,
-    volume: k.volume,
-    amount: k.amount ?? null,
-    change: k.change_pct,
-  }))
+  const chartData = klines.map((k) => toChartPoint(k, 'daily'))
+  const intradayChartData = intradayKlines.map((k) => toChartPoint(k, 'intraday'))
   const latestClose = chartData.at(-1)?.close ?? null
   const calculateBias = (ma: number | null | undefined) => {
     if (latestClose == null || ma == null || ma <= 0) return null
@@ -1071,53 +1123,80 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const displayConfig = displayAdvice ? (adviceTypeConfig[displayAdvice.advice_type || 'hold'] || adviceTypeConfig.hold) : null
   const displayConfidence = displayAdvice ? (displayAdvice.confidence || 0) : 0
   const displayTime = displayAdvice?.created_at || null
-  const indicatorOptions: Array<{ key: IndicatorLineKey; label: string; colorClassName: string }> = [
-    { key: 'ma5', label: 'MA5', colorClassName: 'bg-blue-600' },
-    { key: 'ma10', label: 'MA10', colorClassName: 'bg-purple-600' },
-    { key: 'ma20', label: 'MA20', colorClassName: 'bg-orange-500' },
-    { key: 'boll', label: 'BOLL', colorClassName: 'bg-sky-500' },
+  const indicatorOptions: Array<{ key: IndicatorLineKey; label: string; intradayLabel?: string; colorClassName: string; intradayHidden?: boolean }> = [
+    { key: 'ma5', label: 'MA5', intradayLabel: 'MA5m', colorClassName: 'bg-blue-600' },
+    { key: 'ma10', label: 'MA10', intradayLabel: 'MA10m', colorClassName: 'bg-purple-600' },
+    { key: 'ma20', label: 'MA20', intradayLabel: 'MA20m', colorClassName: 'bg-orange-500' },
+    { key: 'ma60', label: 'MA60', intradayLabel: 'MA60m', colorClassName: 'bg-slate-600' },
+    { key: 'boll', label: 'BOLL', colorClassName: 'bg-sky-500', intradayHidden: true },
     { key: 'macd', label: 'MACD', colorClassName: 'bg-cyan-600' },
   ]
   const toggleIndicator = (key: IndicatorLineKey) => {
     setVisibleIndicators((prev) => ({ ...prev, [key]: !prev[key] }))
   }
-  const historyRangeOptions: Array<{ days: HistoryRangeDays; label: string; title: string }> = [
-    { days: 60, label: '60日', title: '近60日走势' },
-    { days: 120, label: '120日', title: '近120日走势' },
-    { days: 365, label: '1年', title: '近1年走势' },
+  const toggleIntradayIndicator = (key: IndicatorLineKey) => {
+    setIntradayIndicators((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+  const latestIntradayTime = intradayChartData.at(-1)?.date || null
+  const intradayPointCount = intradayChartData.length
+  const activeChartData = activeChartRange === 'today' ? intradayChartData : chartData
+  const activeChartLoading = activeChartRange === 'today' ? intradayLoading : historyLoading
+  const activeChartIndicators = activeChartRange === 'today' ? intradayIndicators : visibleIndicators
+  const activeToggleIndicator = activeChartRange === 'today' ? toggleIntradayIndicator : toggleIndicator
+  const activeChartEmptyText = activeChartRange === 'today' ? '今日分钟线暂不可用，可刷新或切换周期' : '暂无K线数据'
+  const historyRangeOptions: Array<{ key: ChartRangeKey; days?: HistoryRangeDays; label: string; title: string }> = [
+    ...(supportsIntraday ? [{ key: 'today' as const, label: '今日', title: '今日实时趋势' }] : []),
+    { key: 60, days: 60, label: '60日', title: '60日趋势' },
+    { key: 120, days: 120, label: '120日', title: '120日趋势' },
+    { key: 365, days: 365, label: '1年', title: '1年趋势' },
   ]
-  const activeHistoryRange = historyRangeOptions.find((option) => option.days === historyDays) || historyRangeOptions[0]
+  const activeHistoryRange = historyRangeOptions.find((option) => option.key === activeChartRange) || historyRangeOptions[supportsIntraday ? 0 : 0]
+  const selectChartRange = (option: typeof historyRangeOptions[number]) => {
+    setActiveChartRange(option.key)
+    if (option.days) setHistoryDays(option.days)
+  }
+  const refreshActiveChart = () => {
+    if (activeChartRange === 'today') fetchIntraday()
+    else fetchHistory()
+  }
+
+  const renderIndicatorToggles = (
+    values: Record<IndicatorLineKey, boolean>,
+    onToggle: (key: IndicatorLineKey) => void,
+  ) => (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
+      {indicatorOptions.filter((option) => !(activeChartRange === 'today' && option.intradayHidden)).map((option) => (
+        <label key={option.key} className="inline-flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={values[option.key]}
+            onChange={() => onToggle(option.key)}
+            className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary"
+          />
+          <span className={`h-0.5 w-4 ${option.colorClassName}`} />
+          <span>{activeChartRange === 'today' ? (option.intradayLabel || option.label) : option.label}</span>
+        </label>
+      ))}
+    </div>
+  )
   const renderChartControls = (variant: 'compact' | 'fullscreen' = 'compact') => (
     <div className="flex min-w-0 flex-wrap items-center gap-3">
       <div className="inline-flex shrink-0 rounded-md border bg-background p-0.5 text-xs">
         {historyRangeOptions.map((option) => (
           <button
-            key={option.days}
+            key={option.key}
             type="button"
-            onClick={() => setHistoryDays(option.days)}
-            className={`h-7 px-2.5 font-medium transition-colors ${historyDays === option.days ? 'rounded bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => selectChartRange(option)}
+            className={`h-7 px-2.5 font-medium transition-colors ${activeChartRange === option.key ? 'rounded bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
           >
             {option.label}
           </button>
         ))}
       </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
-        {indicatorOptions.map((option) => (
-          <label key={option.key} className="inline-flex cursor-pointer items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={visibleIndicators[option.key]}
-              onChange={() => toggleIndicator(option.key)}
-              className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary"
-            />
-            <span className={`h-0.5 w-4 ${option.colorClassName}`} />
-            <span>{option.label}</span>
-          </label>
-        ))}
-      </div>
+      {renderIndicatorToggles(activeChartIndicators, activeToggleIndicator)}
       <div className="flex shrink-0 items-center gap-2">
-        <Button size="sm" variant="ghost" onClick={fetchHistory} disabled={historyLoading} className="h-8 px-2.5 text-xs">
-          <RefreshCw className={`h-3.5 w-3.5 mr-1 ${historyLoading ? 'animate-spin' : ''}`} />
+        <Button size="sm" variant="ghost" onClick={refreshActiveChart} disabled={activeChartLoading} className="h-8 px-2.5 text-xs">
+          <RefreshCw className={`h-3.5 w-3.5 mr-1 ${activeChartLoading ? 'animate-spin' : ''}`} />
           刷新
         </Button>
         {variant === 'compact' ? (
@@ -1155,21 +1234,23 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               <div>{renderChartControls('fullscreen')}</div>
             </div>
             <div className="min-h-0 flex-1">
-              {historyLoading ? (
+              {activeChartLoading ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
                   <Loader2 className="h-6 w-6 animate-spin mr-2" />
                   加载中...
                 </div>
-              ) : chartData.length > 0 ? (
+              ) : activeChartData.length > 0 ? (
                 <CandlestickChart
-                  data={chartData}
-                  costPrice={p.cost_price}
-                  visibleIndicators={visibleIndicators}
+                  data={activeChartData}
+                  costPrice={activeChartRange === 'today' ? null : p.cost_price}
+                  visibleIndicators={activeChartIndicators}
                   className="h-full"
+                  partialMovingAverage={false}
+                  timeframe={activeChartRange === 'today' ? 'intraday' : 'daily'}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
-                  暂无K线数据
+                  {activeChartEmptyText}
                 </div>
               )}
             </div>
@@ -1254,7 +1335,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
             onClick={() => setActiveTab('profile')}
           >
             <Database className="h-4 w-4 inline mr-1.5" />
-            ETF资料
+            资料
           </button>
         </div>
 
@@ -1266,19 +1347,24 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               <Card>
                 <CardContent className="pt-4">
                   <div className="mb-3 space-y-3">
-                    <h3 className="text-sm font-semibold">{activeHistoryRange.title}</h3>
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <h3 className="text-sm font-semibold">行情趋势</h3>
+                      {activeChartRange === 'today' ? (
+                        <span className="text-xs text-muted-foreground">分钟K：{intradayPointCount}根 · 最新分钟：{latestIntradayTime || '暂无更新'}</span>
+                      ) : null}
+                    </div>
                     <div>{renderChartControls()}</div>
                   </div>
-                  {historyLoading ? (
+                  {activeChartLoading ? (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
                       <Loader2 className="h-6 w-6 animate-spin mr-2" />
                       加载中...
                     </div>
-                  ) : chartData.length > 0 ? (
-                    <CandlestickChart data={chartData} costPrice={p.cost_price} visibleIndicators={visibleIndicators} />
+                  ) : activeChartData.length > 0 ? (
+                    <CandlestickChart data={activeChartData} costPrice={activeChartRange === 'today' ? null : p.cost_price} visibleIndicators={activeChartIndicators} partialMovingAverage={false} timeframe={activeChartRange === 'today' ? 'intraday' : 'daily'} />
                   ) : (
                     <div className="h-64 flex items-center justify-center text-muted-foreground">
-                      暂无K线数据
+                      {activeChartEmptyText}
                     </div>
                   )}
                 </CardContent>
@@ -1289,19 +1375,20 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                 <CardContent className="pt-4">
                   <h3 className="text-sm font-semibold mb-3 flex items-center gap-1.5">
                     <Activity className="h-4 w-4" />
-                    技术指标
+                    日线技术指标
+                    <Badge variant="outline" className="ml-1.5 align-middle text-[10px]">基于日线，不随今日分钟图变化</Badge>
                   </h3>
                   {indicators ? (
                     <div className="space-y-4">
                       <div className={`rounded-xl border p-3.5 ${tradeSignal.toneClassName}`}>
                         <div className="flex flex-col gap-2.5 sm:flex-row sm:items-start sm:justify-between">
                           <div>
-                            <div className="text-xs font-medium opacity-80">交易指示</div>
+                            <div className="text-xs font-medium opacity-80">日线规则信号</div>
                             <div className="mt-1 text-lg font-semibold">{tradeSignal.label}</div>
                             <p className="mt-1 text-xs leading-5">{tradeSignal.summary}</p>
                           </div>
                           <Badge variant="outline" className="border-current bg-background/70">
-                            规则信号
+                            日线规则
                           </Badge>
                         </div>
                         <div className="mt-3 grid gap-2.5 lg:grid-cols-2">
@@ -1554,7 +1641,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               {profileLoading ? (
                 <div className="text-center py-12">
                   <Loader2 className="h-8 w-8 mx-auto animate-spin text-primary mb-4" />
-                  <p className="text-muted-foreground">正在加载ETF资料...</p>
+                  <p className="text-muted-foreground">正在加载资料...</p>
                 </div>
               ) : profile ? (
                 <>
@@ -1671,7 +1758,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               ) : (
                 <div className="text-center py-12">
                   <Database className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
-                  <p className="text-muted-foreground mb-4">暂无ETF资料</p>
+                  <p className="text-muted-foreground mb-4">暂无资料</p>
                   <Button onClick={() => fetchProfile(true)}>
                     <RefreshCw className="h-4 w-4 mr-2" />
                     重新加载

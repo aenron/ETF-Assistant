@@ -26,7 +26,7 @@ from schemas.market import MarketQuote, KLineItem, EtfSearchResult, TechnicalInd
 from config import settings
 from database import async_session_maker
 from services.redis_service import RedisService
-from utils.timezone import now_in_shanghai
+from utils.timezone import SHANGHAI_TZ, now_in_shanghai
 
 
 class MarketService:
@@ -62,7 +62,9 @@ class MarketService:
         if cached and "data" in cached:
             data = dict(cached["data"])
             data["refreshed_at"] = data.get("refreshed_at") or cached.get("cached_at")
-            return MarketQuote(**data)
+            quote = MarketQuote(**data)
+            cls._log_quote_source(code, "redis_cache", quote)
+            return quote
         return None
 
     @classmethod
@@ -87,6 +89,48 @@ class MarketService:
             return False
         recent = data[-min(len(data), 6):]
         return any(item.amount is not None and item.amount > 0 for item in recent)
+
+    @classmethod
+    def _log_quote_source(cls, code: str, source: str, quote: Optional[MarketQuote]) -> None:
+        if not quote:
+            return
+        amount_text = f"{quote.amount:.2f}" if quote.amount is not None else "None"
+        volume_text = str(quote.volume) if quote.volume is not None else "None"
+        print(
+            f"[MarketService] 数据来源 quote code={code} source={source} "
+            f"price={quote.price:.4f} change_pct={quote.change_pct:.4f} "
+            f"amount={amount_text} volume={volume_text}"
+        )
+
+    @classmethod
+    def _log_kline_source(cls, code: str, source: str, data: List[KLineItem]) -> None:
+        if not data:
+            return
+        latest = data[-1]
+        total_rows = len(data)
+        missing_amount = sum(1 for item in data if item.amount is None or item.amount <= 0)
+        amount_rate = ((total_rows - missing_amount) / total_rows * 100) if total_rows else 0.0
+        latest_amount = latest.amount if latest.amount is not None else 0.0
+        print(
+            f"[MarketService] 数据来源 kline code={code} source={source} rows={total_rows} "
+            f"latest={latest.trade_date} close={latest.close_price:.4f} "
+            f"amount={latest_amount:.2f} amount_rate={amount_rate:.1f}%"
+        )
+
+    @classmethod
+    def _normalize_kline_amounts(cls, data: List[KLineItem]) -> List[KLineItem]:
+        """Fill missing turnover amount with a price-volume estimate when the source lacks it."""
+        normalized: List[KLineItem] = []
+        for item in data:
+            amount = item.amount
+            if (amount is None or amount <= 0) and item.volume and item.volume > 0:
+                avg_price = (item.open_price + item.close_price + item.high_price + item.low_price) / 4
+                if avg_price > 0:
+                    amount = float(item.volume) * avg_price
+            if amount != item.amount:
+                item = item.model_copy(update={"amount": amount})
+            normalized.append(item)
+        return normalized
 
     @classmethod
     def _profile_cache_key(cls, code: str, year: str) -> str:
@@ -177,6 +221,7 @@ class MarketService:
             )
             for row in rows
         ]
+        items = cls._normalize_kline_amounts(items)
         await cls.cache_kline(code, days, items)
         print(f"[MarketService] 使用数据库K线缓存: {code}, {len(items)} 条")
         return items
@@ -184,6 +229,7 @@ class MarketService:
     @classmethod
     async def _cache_and_store_kline(cls, code: str, days: int, data: List[KLineItem]) -> None:
         """外部数据源成功后同步写入短期 Redis 和持久行情表。"""
+        data = cls._normalize_kline_amounts(data)
         await cls.cache_kline(code, days, data)
         try:
             async with async_session_maker() as session:
@@ -300,26 +346,34 @@ class MarketService:
     @classmethod
     async def refresh_quote(cls, code: str) -> Optional[MarketQuote]:
         """强制刷新单个ETF行情（跳过缓存）"""
-        try:
-            quotes = await cls._fetch_quotes_from_akshare([code])
-            if code in quotes:
-                return quotes[code]
-        except Exception as e:
-            print(f"[MarketService] 刷新行情失败: {code}, {e}")
-        return None
+        quotes = await cls.refresh_quotes([code])
+        return quotes.get(code)
     
     @classmethod
     async def refresh_quotes(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """强制刷新多个ETF行情（跳过缓存）"""
         if not codes:
             return {}
-        
+
+        result: Dict[str, MarketQuote] = {}
         try:
-            quotes = await cls._fetch_quotes_from_akshare(codes)
-            return quotes
+            zhitu_quotes = await cls._fetch_quotes_from_zhitu(codes)
+            for code, quote in zhitu_quotes.items():
+                cls._log_quote_source(code, "zhitu_fund_real", quote)
+            result.update(zhitu_quotes)
         except Exception as e:
-            print(f"[MarketService] 批量刷新行情失败: {e}")
-            return {}
+            print(f"[MarketService] 智兔批量刷新行情失败: {e}")
+
+        remaining = [code for code in codes if code not in result]
+        if remaining:
+            try:
+                quotes = await cls._fetch_quotes_from_akshare(remaining)
+                for code, quote in quotes.items():
+                    cls._log_quote_source(code, "fallback_market_sources", quote)
+                result.update(quotes)
+            except Exception as e:
+                print(f"[MarketService] 批量刷新行情失败: {e}")
+        return result
     
     @classmethod
     async def _get_expired_cache(cls, code: str) -> Optional[MarketQuote]:
@@ -329,7 +383,9 @@ class MarketService:
         try:
             cached = await RedisService.get(f"{cls.REDIS_KEY_QUOTE_PREFIX}{code}")
             if cached and "data" in cached:
-                return MarketQuote(**cached["data"])
+                quote = MarketQuote(**cached["data"])
+                cls._log_quote_source(code, "expired_redis_cache", quote)
+                return quote
         except Exception:
             pass
         return None
@@ -399,6 +455,203 @@ class MarketService:
             candidates.append(f"{clean}.BJ")
         candidates.extend([f"{clean}.SH", f"{clean}.SZ", f"{clean}.BJ"])
         return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    def _zhitu_symbol(code: str) -> str:
+        clean = str(code or "").strip().upper()
+        if "." in clean:
+            return clean
+        if clean.startswith("399"):
+            return f"{clean}.SZ"
+        if clean.startswith("000"):
+            return f"{clean}.SH"
+        if clean.startswith(("00", "30", "15", "16", "18", "12", "13")):
+            return f"{clean}.SZ"
+        if clean.startswith(("60", "68", "51", "58", "50", "56", "110", "113", "118")):
+            return f"{clean}.SH"
+        return clean
+
+    @staticmethod
+    def _is_zhitu_index_code(code: str) -> bool:
+        clean = str(code or "").strip().upper()
+        return clean.startswith(("000", "399")) or clean.endswith((".SH", ".SZ")) and clean[:6].startswith(("000", "399"))
+
+    @classmethod
+    def _zhitu_token(cls) -> str:
+        return settings.zhitu_token.strip()
+
+    @staticmethod
+    def _parse_zhitu_time(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        raw = str(value).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d%H:%M:%S"):
+            try:
+                return datetime.strptime(raw, fmt).replace(tzinfo=SHANGHAI_TZ)
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    async def _resolve_quote_name(cls, code: str) -> str:
+        cached = await cls.get_quote_from_cache(code)
+        if cached and cached.name and cached.name != code:
+            return cached.name
+        try:
+            async with async_session_maker() as session:
+                result = await session.execute(select(EtfInfo).where(EtfInfo.code == code))
+                info = result.scalar_one_or_none()
+                if info and info.name:
+                    return info.name
+        except Exception as e:
+            print(f"[MarketService] 解析ETF名称失败: {code}, {e}")
+        return ""
+
+    @classmethod
+    async def _fetch_zhitu_etf_names(cls, codes: List[str]) -> Dict[str, str]:
+        token = cls._zhitu_token()
+        if not token or not codes:
+            return {}
+        target_codes = {str(code).strip() for code in codes if code}
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                response = await client.get(
+                    "https://api.zhituapi.com/fund/list/etf",
+                    params={"token": token},
+                    headers=cls._build_default_headers("https://www.zhituapi.com/"),
+                )
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            print(f"[MarketService] 智兔ETF列表获取失败: {e}")
+            return {}
+        if not isinstance(data, list):
+            return {}
+
+        names: Dict[str, str] = {}
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            raw_code = str(item.get("dm") or "").split(".")[0]
+            name = str(item.get("mc") or "").strip()
+            if raw_code in target_codes and name:
+                names[raw_code] = name
+        if names:
+            try:
+                async with async_session_maker() as session:
+                    for code, name in names.items():
+                        existing = await session.get(EtfInfo, code)
+                        if existing:
+                            existing.name = name
+                        else:
+                            session.add(EtfInfo(code=code, name=name, category=None, exchange=None))
+                    await session.commit()
+            except Exception as e:
+                print(f"[MarketService] 保存智兔ETF名称失败: {e}")
+        return names
+
+    @classmethod
+    async def _fetch_quotes_from_zhitu(cls, codes: List[str]) -> Dict[str, MarketQuote]:
+        token = cls._zhitu_token()
+        if not token:
+            return {}
+
+        result: Dict[str, MarketQuote] = {}
+        resolved_names: Dict[str, str] = {}
+        headers = cls._build_default_headers("https://www.zhituapi.com/")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for code in codes:
+                clean = str(code or "").strip()
+                if not clean or clean.startswith(("000", "399")):
+                    continue
+                url = f"https://api.zhituapi.com/fund/real/ssjy/{clean}"
+                try:
+                    response = await client.get(url, params={"token": token}, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                except Exception as e:
+                    print(f"[MarketService] 智兔实时行情失败: {clean}, {e}")
+                    continue
+
+                if not isinstance(data, dict) or data.get("error"):
+                    if isinstance(data, dict) and data.get("error"):
+                        print(f"[MarketService] 智兔实时行情无数据: {clean}, {data.get('error')}")
+                    continue
+
+                price = cls._to_float(data.get("p"))
+                if price is None or price <= 0:
+                    continue
+
+                name = await cls._resolve_quote_name(clean)
+                if not name:
+                    if not resolved_names:
+                        resolved_names = await cls._fetch_zhitu_etf_names(codes)
+                    name = resolved_names.get(clean, "")
+
+                quote = MarketQuote(
+                    code=clean,
+                    name=name,
+                    price=price,
+                    change_pct=cls._to_float(data.get("pc")) or 0.0,
+                    open_price=cls._to_float(data.get("o")),
+                    high_price=cls._to_float(data.get("h")),
+                    low_price=cls._to_float(data.get("l")),
+                    volume=cls._to_int(data.get("pv") or data.get("v")),
+                    amount=cls._to_float(data.get("cje")),
+                    refreshed_at=cls._parse_zhitu_time(data.get("t")) or now_in_shanghai(),
+                )
+                result[clean] = await cls.cache_quote(clean, quote)
+        if result:
+            print(f"[MarketService] 智兔实时行情获取成功: {len(result)}/{len(codes)}")
+        return result
+
+    @classmethod
+    async def _fetch_history_kline_zhitu_index(cls, code: str, days: int = 60) -> List[KLineItem]:
+        token = cls._zhitu_token()
+        if not token or not cls._is_zhitu_index_code(code):
+            return []
+
+        symbol = cls._zhitu_symbol(code)
+        url = f"https://api.zhituapi.com/hz/history/fsjy/{symbol}/d"
+        headers = cls._build_default_headers("https://www.zhituapi.com/")
+        try:
+            print(f"[MarketService] >>> 智兔指数历史K线: {code} ({symbol})")
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                response = await client.get(url, params={"token": token, "lt": str(days)}, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            print(f"[MarketService] 智兔指数历史K线失败: {code}, {e}")
+            return []
+
+        if not isinstance(data, list):
+            if isinstance(data, dict) and data.get("error"):
+                print(f"[MarketService] 智兔指数历史K线无数据: {code}, {data.get('error')}")
+            return []
+
+        result: List[KLineItem] = []
+        for item in data[-days:]:
+            try:
+                close = cls._to_float(item.get("c"))
+                prev_close = cls._to_float(item.get("pc"))
+                if close is None:
+                    continue
+                change_pct = (close - prev_close) / prev_close * 100 if prev_close and prev_close > 0 else 0.0
+                result.append(KLineItem(
+                    trade_date=date.fromisoformat(str(item.get("t")).split(" ")[0]),
+                    open_price=cls._to_float(item.get("o")) or close,
+                    close_price=close,
+                    high_price=cls._to_float(item.get("h")) or close,
+                    low_price=cls._to_float(item.get("l")) or close,
+                    volume=cls._to_int(item.get("v")) or 0,
+                    amount=cls._to_float(item.get("a")),
+                    change_pct=round(change_pct, 2),
+                ))
+            except Exception:
+                continue
+        if result:
+            print(f"[MarketService] ✓ 智兔指数历史K线获取到 {len(result)} 条")
+        return result
 
     @staticmethod
     def _qmt_symbol(code: str) -> str:
@@ -847,16 +1100,8 @@ class MarketService:
     async def _fetch_from_sina_api(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """从新浪财经API获取行情（备用）"""
         # 新浪财经实时行情API
-        # 格式: https://hq.sinajs.cn/list=sh513300,sz159915
-        code_list = []
-        for code in codes:
-            # 判断市场：51开头是上海，15/16开头是深圳
-            if code.startswith("51") or code.startswith("58"):
-                code_list.append(f"sh{code}")
-            elif code.startswith("15") or code.startswith("16"):
-                code_list.append(f"sz{code}")
-            else:
-                code_list.append(f"sh{code}")
+        # 格式: https://hq.sinajs.cn/list=sh513300,sz300059
+        code_list = [cls._sina_symbol(code) for code in codes]
         
         url = f"https://hq.sinajs.cn/list={','.join(code_list)}"
         headers = cls._build_default_headers("https://finance.sina.com.cn/")
@@ -1187,14 +1432,19 @@ class MarketService:
         return []
     
     @classmethod
+    @classmethod
+    def _sina_symbol(cls, code: str) -> str:
+        clean = str(code or "").strip()
+        if clean.startswith(("00", "30", "15", "16", "18", "39")):
+            return f"sz{clean}"
+        if clean.startswith(("60", "68", "51", "58", "50", "56", "000")):
+            return f"sh{clean}"
+        return f"sh{clean}"
+
+    @classmethod
     async def _fetch_history_kline_sina(cls, code: str, days: int = 60) -> List[KLineItem]:
         """从新浪财经API获取历史K线数据"""
-        if code.startswith(("51", "58")):
-            symbol = f"sh{code}"
-        elif code.startswith(("15", "16")):
-            symbol = f"sz{code}"
-        else:
-            symbol = f"sh{code}"
+        symbol = cls._sina_symbol(code)
         
         url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
         params = {
@@ -1240,12 +1490,164 @@ class MarketService:
         
         return []
     
+    @staticmethod
+    def _qmt_timestamp_to_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, "", "-"):
+            return None
+        text = str(value).strip()
+        try:
+            if text.isdigit():
+                if text.startswith(("19", "20")) and len(text) >= 14:
+                    parsed = datetime.strptime(text[:14], "%Y%m%d%H%M%S")
+                    return parsed.replace(tzinfo=SHANGHAI_TZ)
+                if text.startswith(("19", "20")) and len(text) >= 12:
+                    parsed = datetime.strptime(text[:12], "%Y%m%d%H%M")
+                    return parsed.replace(tzinfo=SHANGHAI_TZ)
+                if text.startswith(("19", "20")) and len(text) >= 8:
+                    parsed = datetime.strptime(text[:8], "%Y%m%d")
+                    return parsed.replace(tzinfo=SHANGHAI_TZ)
+                if len(text) >= 13:
+                    return datetime.fromtimestamp(int(text[:13]) / 1000, tz=SHANGHAI_TZ)
+                if len(text) >= 10:
+                    return datetime.fromtimestamp(int(text[:10]), tz=SHANGHAI_TZ)
+            normalized = text.replace("T", " ")
+            parsed = datetime.fromisoformat(normalized)
+            return parsed.astimezone(SHANGHAI_TZ) if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI_TZ)
+        except Exception:
+            return None
+
+    @classmethod
+    def _normalize_intraday_items(cls, items: List[KLineItem], limit: int) -> List[KLineItem]:
+        ordered = sorted(
+            [item for item in items if item.trade_time is not None],
+            key=lambda item: item.trade_time,
+        )[-limit:]
+        result: List[KLineItem] = []
+        for item in ordered:
+            previous_close = result[-1].close_price if result else item.open_price
+            change_pct = (item.close_price - previous_close) / previous_close * 100 if previous_close > 0 else 0.0
+            result.append(item.model_copy(update={"change_pct": round(change_pct, 3)}))
+        return result
+
+    @classmethod
+    async def _fetch_intraday_kline_qmt_agent(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+        if not cls._qmt_enabled():
+            return []
+        symbol = cls._qmt_symbol(code)
+        base_url = settings.qmt_agent_base_url.rstrip("/")
+        params = {
+            "period": period,
+            "count": str(limit),
+            "dividend_type": "front_ratio",
+            "fill_data": "true",
+        }
+        try:
+            print(f"[MarketService] >>> QMT Agent获取分钟K线: {code} ({symbol})")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{base_url}/symbols/{symbol}/kline",
+                    params=params,
+                    headers=cls._qmt_headers(),
+                )
+                response.raise_for_status()
+                payload = response.json()
+            result: List[KLineItem] = []
+            for record in cls._qmt_records(payload):
+                trade_time = cls._qmt_timestamp_to_datetime(
+                    record.get("time") or record.get("datetime") or record.get("date") or record.get("trade_time")
+                )
+                close = cls._to_float(record.get("close"))
+                open_price = cls._to_float(record.get("open"))
+                high = cls._to_float(record.get("high"))
+                low = cls._to_float(record.get("low"))
+                if trade_time is None or close is None or open_price is None or high is None or low is None:
+                    continue
+                result.append(KLineItem(
+                    trade_date=trade_time.date(),
+                    trade_time=trade_time,
+                    open_price=open_price,
+                    close_price=close,
+                    high_price=high,
+                    low_price=low,
+                    volume=cls._to_int(record.get("volume") or record.get("vol")) or 0,
+                    amount=cls._to_float(record.get("amount")),
+                    change_pct=0.0,
+                ))
+            return cls._normalize_intraday_items(result, limit)
+        except Exception as e:
+            print(f"[MarketService] QMT Agent分钟K线获取失败: {code}, {e}")
+            return []
+
+    @classmethod
+    async def _fetch_intraday_kline_eastmoney(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+        klt_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60"}
+        klt = klt_map.get(period, "1")
+        url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        headers = cls._build_default_headers("https://quote.eastmoney.com/")
+        for secid in cls._eastmoney_secid_candidates(code):
+            params = {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "klt": klt,
+                "fqt": "1",
+                "end": "20500000",
+                "lmt": str(limit),
+            }
+            try:
+                print(f"[MarketService] >>> 东方财富API获取分钟K线: {code} ({secid})")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url, params=params, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                klines = data.get("data", {}).get("klines") if isinstance(data, dict) else None
+                if not klines:
+                    continue
+                result: List[KLineItem] = []
+                for line in klines:
+                    parts = str(line).split(',')
+                    if len(parts) < 6:
+                        continue
+                    parsed_time = datetime.fromisoformat(parts[0])
+                    trade_time = parsed_time.astimezone(SHANGHAI_TZ) if parsed_time.tzinfo else parsed_time.replace(tzinfo=SHANGHAI_TZ)
+                    result.append(KLineItem(
+                        trade_date=trade_time.date(),
+                        trade_time=trade_time,
+                        open_price=float(parts[1]),
+                        close_price=float(parts[2]),
+                        high_price=float(parts[3]),
+                        low_price=float(parts[4]),
+                        volume=cls._to_int(parts[5]) or 0,
+                        amount=cls._to_float(parts[6]) if len(parts) > 6 else None,
+                        change_pct=0.0,
+                    ))
+                normalized = cls._normalize_intraday_items(result, limit)
+                if normalized:
+                    print(f"[MarketService] ✓ 东方财富分钟K线获取到 {len(normalized)} 条")
+                    return normalized
+            except Exception as e:
+                print(f"[MarketService] 东方财富分钟K线获取失败: {code} {secid}, {e}")
+        return []
+
+    @classmethod
+    async def get_intraday_kline(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+        safe_limit = max(20, min(limit, 480))
+        safe_period = period if period in {"1m", "5m", "15m", "30m", "60m"} else "1m"
+        for fetcher in (cls._fetch_intraday_kline_qmt_agent, cls._fetch_intraday_kline_eastmoney):
+            result = await fetcher(code, safe_period, safe_limit)
+            if result:
+                today = now_in_shanghai().date()
+                today_items = [item for item in result if item.trade_date == today]
+                return today_items or result
+        return []
+
     @classmethod
     async def get_history_kline(cls, code: str, days: int = 60, prefer_cache: bool = True) -> List[KLineItem]:
         """获取历史K线数据（ETF/股票/指数板块/场外基金多源降级）"""
         if prefer_cache:
             cached = await cls.get_kline_from_cache(code, days)
             if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
+                cls._log_kline_source(code, "redis_cache", cached)
                 return cached
             if cached:
                 reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
@@ -1253,6 +1655,7 @@ class MarketService:
 
             cached = await cls.get_kline_from_longer_cache(code, days)
             if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
+                cls._log_kline_source(code, "redis_longer_cache", cached)
                 return cached
             if cached:
                 reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
@@ -1260,6 +1663,7 @@ class MarketService:
 
             cached = await cls.get_kline_from_db(code, days)
             if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
+                cls._log_kline_source(code, "database_cache", cached)
                 return cached
             if cached:
                 reason = "缺少成交额" if cls._is_kline_recent(cached) and not cls._has_kline_amount(cached) else f"最新日期: {cached[-1].trade_date}"
@@ -1267,10 +1671,21 @@ class MarketService:
 
         print(f"[MarketService] 开始获取历史K线: {code}, 天数: {days}")
 
+        # 智兔指数历史行情：用于沪深300、中证A500等基准指数，ETF历史K线实测无数据。
+        try:
+            result = await cls._fetch_history_kline_zhitu_index(code, days)
+            if result:
+                cls._log_kline_source(code, "zhitu_index_history", result)
+                await cls._cache_and_store_kline(code, days, result)
+                return result
+        except Exception as e:
+            print(f"[MarketService] 智兔指数历史K线异常: {e}")
+
         # 同花顺 88xxxx 行业代码，必须优先于东方财富板块代码体系。
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_ths_industry, code, days)
             if result:
+                cls._log_kline_source(code, "ths_industry_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1279,12 +1694,14 @@ class MarketService:
         if not prefer_cache:
             cached = await cls.get_kline_from_cache(code, days)
             if cached and cls._is_kline_recent(cached) and cls._has_kline_amount(cached):
+                cls._log_kline_source(code, "redis_cache_after_force", cached)
                 return cached
 
         # QMT Agent：配置后优先使用本地 QMT/xtdata 的真实 K 线。
         try:
             result = await cls._fetch_history_kline_qmt_agent(code, days)
             if result:
+                cls._log_kline_source(code, "qmt_agent_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1294,6 +1711,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare, code, days)
             if result:
+                cls._log_kline_source(code, "akshare_etf_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1303,6 +1721,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_stock, code, days)
             if result:
+                cls._log_kline_source(code, "akshare_stock_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1312,6 +1731,7 @@ class MarketService:
         try:
             result = await cls._fetch_history_kline_eastmoney(code, days)
             if result:
+                cls._log_kline_source(code, "eastmoney_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1322,6 +1742,7 @@ class MarketService:
             try:
                 result = await cls._fetch_history_kline_tushare(code, days)
                 if result:
+                    cls._log_kline_source(code, "tushare_history", result)
                     await cls._cache_and_store_kline(code, days, result)
                     return result
             except Exception as e:
@@ -1331,6 +1752,7 @@ class MarketService:
         try:
             result = await cls._fetch_history_kline_sina(code, days)
             if result:
+                cls._log_kline_source(code, "sina_history_estimated_amount", cls._normalize_kline_amounts(result))
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -1340,6 +1762,7 @@ class MarketService:
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
             if result:
+                cls._log_kline_source(code, "akshare_otc_fund_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
