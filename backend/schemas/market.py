@@ -76,6 +76,7 @@ class KLineItem(ShanghaiBaseModel):
     """K线数据项"""
     trade_date: date
     trade_time: Optional[datetime] = None
+    provisional: bool = False
     open_price: float
     close_price: float
     high_price: float
@@ -122,6 +123,9 @@ class MarketDailyResponse(ShanghaiBaseModel):
     name: str
     data: List[KLineItem]
     indicators: Optional[TechnicalIndicators] = None
+    latest_trade_date: Optional[date] = None
+    source: Optional[str] = None
+    has_provisional: bool = False
 
 
 class EtfSearchResult(ShanghaiBaseModel):

@@ -17,6 +17,7 @@ from models.portfolio_dca_state import PortfolioDcaState
 from models.dca_signal_config import DcaSignalConfig
 from models.scheduler_job_config import SchedulerJobConfig
 from models.user import User
+from models.watchlist_item import WatchlistItem
 from services.advisor_service import AdvisorService
 from services.market_service import MarketService
 from services.industry_fundamental_service import IndustryFundamentalService
@@ -44,6 +45,37 @@ async def _get_active_portfolio_codes(task_name: str) -> list[str]:
             return codes
         except Exception as e:
             print(f"[Scheduler] 加载ETF列表失败，跳过{task_name}: {e}")
+            return []
+
+
+async def _get_active_market_refresh_codes(task_name: str) -> list[str]:
+    async with async_session_maker() as db:
+        try:
+            portfolio_result = await db.execute(
+                select(Portfolio.etf_code)
+                .join(User, Portfolio.user_id == User.id)
+                .where(User.is_active == True)
+                .distinct()
+            )
+            watchlist_result = await db.execute(
+                select(WatchlistItem.code)
+                .join(User, WatchlistItem.user_id == User.id)
+                .where(User.is_active == True)
+                .distinct()
+            )
+            portfolio_codes = {code for code in portfolio_result.scalars().all() if code}
+            watchlist_codes = {code for code in watchlist_result.scalars().all() if code}
+            codes = sorted(portfolio_codes | watchlist_codes)
+            if not codes:
+                print(f"[Scheduler] 无持仓或自选品种，跳过{task_name}")
+            else:
+                print(
+                    f"[Scheduler] {task_name}范围：持仓 {len(portfolio_codes)} 只，"
+                    f"自选 {len(watchlist_codes)} 只，去重后 {len(codes)} 只"
+                )
+            return codes
+        except Exception as e:
+            print(f"[Scheduler] 加载持仓/自选品种失败，跳过{task_name}: {e}")
             return []
 
 
@@ -735,16 +767,16 @@ async def analyze_all_accounts():
 
 
 async def refresh_market_quotes():
-    """轻刷新：定时刷新活跃用户持仓涉及的最新行情快照。"""
+    """轻刷新：定时刷新活跃用户持仓和自选品种的最新行情快照。"""
     print(f"[Scheduler] {now_in_shanghai()} 开始执行行情轻刷新任务...")
 
-    codes = await _get_active_portfolio_codes("行情轻刷新")
+    codes = await _get_active_market_refresh_codes("行情轻刷新")
     if not codes:
         return
 
-    print(f"[Scheduler] 共 {len(codes)} 只ETF待轻刷新行情")
+    print(f"[Scheduler] 共 {len(codes)} 只品种待轻刷新行情")
     quotes = await MarketService.refresh_quotes(codes)
-    print(f"[Scheduler] 行情轻刷新完成，成功缓存 {len(quotes)} 只ETF")
+    print(f"[Scheduler] 行情轻刷新完成，成功缓存 {len(quotes)} 只品种")
 
 
 async def _refresh_one_market_history(code: str, semaphore: asyncio.Semaphore) -> dict:

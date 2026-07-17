@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart, GitBranch, SlidersHorizontal, Activity, Database } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Lightbulb, LogOut, User, Bell, CalendarClock, ChevronDown, Users, Bot, LineChart, GitBranch, SlidersHorizontal, Activity, Database, Star } from 'lucide-react'
 import { authApi, isAuthenticated, getCurrentUser, removeToken, setCurrentUser } from '@/services/authApi'
 import { LLMSelector } from '@/components/LLMSelector'
 import { FloatingAssistant } from '@/components/FloatingAssistant'
@@ -18,6 +18,9 @@ const DashboardPage = lazy(() =>
 )
 const PortfolioPage = lazy(() =>
   import('@/pages/PortfolioPage').then((module) => ({ default: module.PortfolioPage })),
+)
+const WatchlistPage = lazy(() =>
+  import('@/pages/WatchlistPage').then((module) => ({ default: module.WatchlistPage })),
 )
 const AdvicePage = lazy(() =>
   import('@/pages/AdvicePage').then((module) => ({ default: module.AdvicePage })),
@@ -63,6 +66,7 @@ function AppContent() {
   const navItems = [
     { to: '/', label: '仪表盘', icon: LayoutDashboard },
     { to: '/portfolio', label: '持仓管理', icon: Briefcase },
+    { to: '/watchlist', label: '自选行情', icon: Star },
     { to: '/strategies', label: '交易策略', icon: LineChart },
     { to: '/macro', label: '宏观时钟', icon: Activity },
     { to: '/advice', label: '决策历史', icon: Lightbulb },
@@ -99,7 +103,7 @@ function AppContent() {
           <div className="container mx-auto px-3 py-3 sm:px-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex items-center justify-between gap-3">
-                <h1 className="text-lg font-bold sm:text-xl">ETF投资智能体</h1>
+                <h1 className="text-lg font-bold sm:text-xl">投资智能体</h1>
                 <div className="flex items-center gap-2 lg:hidden">
                   <LLMSelector />
                 </div>
@@ -195,6 +199,7 @@ function AppContent() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
             <Route path="/portfolio" element={<PrivateRoute><PortfolioPage /></PrivateRoute>} />
+            <Route path="/watchlist" element={<PrivateRoute><WatchlistPage /></PrivateRoute>} />
             <Route path="/strategies" element={<PrivateRoute><StrategyPage /></PrivateRoute>} />
             <Route path="/macro" element={<PrivateRoute><MacroClockPage /></PrivateRoute>} />
             <Route path="/advice" element={<PrivateRoute><AdvicePage /></PrivateRoute>} />

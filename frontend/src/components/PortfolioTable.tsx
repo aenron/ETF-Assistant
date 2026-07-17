@@ -538,7 +538,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
             type="button"
             size="icon"
             variant="ghost"
-            className="h-8 w-8"
+            className="h-7 w-7"
             title="定投灯说明"
             onClick={() => setShowDcaHelp(true)}
           >
@@ -551,7 +551,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
         </Button>
       </CardHeader>
       <CardContent>
-        <div className="space-y-3 md:hidden">
+        <div className="space-y-3 lg:hidden">
           {sortedPortfolios.map((p) => {
             const tradeSignal = getTradeSignal(p)
             return (
@@ -630,7 +630,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     onClick={() => setDetailPortfolio(p)}
                     title="查看详情"
                   >
-                    <Eye className="h-4 w-4" />
+                    <Eye className="h-3.5 w-3.5" />
                   </Button>
                   <Button
                     size="icon"
@@ -639,7 +639,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     disabled={adviceLoading === p.id}
                     title="生成AI建议"
                   >
-                    <Lightbulb className={`h-4 w-4 ${adviceLoading === p.id ? 'animate-pulse text-yellow-500' : ''}`} />
+                    <Lightbulb className={`h-3.5 w-3.5 ${adviceLoading === p.id ? 'animate-pulse text-yellow-500' : ''}`} />
                   </Button>
                   <Button
                     size="icon"
@@ -648,13 +648,13 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     disabled={refreshingCode === p.etf_code}
                     title="刷新行情"
                   >
-                    <RefreshCw className={`h-4 w-4 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-3.5 w-3.5 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
                   </Button>
                   <Button size="icon" variant="outline" onClick={() => handleEdit(p)}>
-                    <Pencil className="h-4 w-4" />
+                    <Pencil className="h-3.5 w-3.5" />
                   </Button>
                   <Button size="icon" variant="outline" onClick={() => setDeleteTarget(p)}>
-                    <Trash2 className="h-4 w-4 text-destructive" />
+                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
                   </Button>
                 </div>
               </div>
@@ -668,32 +668,32 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
           )}
         </div>
 
-        <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[1268px] table-fixed text-[13px]">
+        <div className="hidden lg:block">
+          <table className="w-full table-fixed text-[12px] xl:text-[13px]">
             <colgroup>
-              <col className="w-[82px]" />
-              <col className="w-[150px]" />
-              <col className="w-[108px]" />
-              <col className="w-[116px]" />
-              <col className="w-[118px]" />
-              <col className="w-[128px]" />
-              <col className="w-[118px]" />
-              <col className="w-[168px]" />
-              <col className="w-[96px]" />
-              <col className="w-[184px]" />
+              <col className="w-[7.5%]" />
+              <col className="w-[12%]" />
+              <col className="w-[8.5%]" />
+              <col className="w-[10%]" />
+              <col className="w-[9.5%]" />
+              <col className="w-[10.5%]" />
+              <col className="w-[9.5%]" />
+              <col className="w-[14.5%]" />
+              <col className="w-[8%]" />
+              <col className="w-[10%]" />
             </colgroup>
             <thead>
               <tr className="border-b">
-                <th className="whitespace-nowrap px-2 py-2.5 text-left">代码</th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-left">名称</th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="shares">份额</SortHeader></th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-right">成本/现价</th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="market_value">市值</SortHeader></th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-right">盈亏</th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-right"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-left">定投灯</th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-center"><SortHeader sortKey="advice" align="center">日线建议</SortHeader></th>
-                <th className="whitespace-nowrap px-2 py-2.5 text-center">操作</th>
+                <th className="px-1.5 py-2 text-left">代码</th>
+                <th className="px-1.5 py-2 text-left">名称</th>
+                <th className="px-1.5 py-2 text-right"><SortHeader sortKey="shares">份额</SortHeader></th>
+                <th className="px-1.5 py-2 text-right">成本/现价</th>
+                <th className="px-1.5 py-2 text-right"><SortHeader sortKey="market_value">市值</SortHeader></th>
+                <th className="px-1.5 py-2 text-right">盈亏</th>
+                <th className="px-1.5 py-2 text-right"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
+                <th className="px-1.5 py-2 text-left">定投灯</th>
+                <th className="px-1.5 py-2 text-center"><SortHeader sortKey="advice" align="center">日线建议</SortHeader></th>
+                <th className="px-1.5 py-2 text-center">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -701,32 +701,32 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 const tradeSignal = getTradeSignal(p)
                 return (
                 <tr key={p.id} className="border-b hover:bg-muted/50 cursor-pointer" onClick={() => setDetailPortfolio(p)}>
-                  <td className="whitespace-nowrap px-2 py-2.5">
-                    <div className="font-mono">{p.etf_code}</div>
+                  <td className="px-1.5 py-2">
+                    <div className="truncate font-mono" title={p.etf_code}>{p.etf_code}</div>
                     <Badge variant="outline" className="mt-1 text-[10px]">{getAssetTypeLabel(p.asset_type)}</Badge>
                   </td>
-                  <td className="px-2 py-2.5">
+                  <td className="px-1.5 py-2">
                     <div className="truncate" title={p.etf_name || '-'}>{p.etf_name || '-'}</div>
                     {p.current_price == null && <div className="mt-1 truncate text-[11px] text-amber-700">行情缓存刷新中</div>}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right">{p.shares.toLocaleString()}</td>
-                  <td className="px-2 py-2.5 text-right">
-                    <div className="flex flex-col items-end">
-                      <span className="whitespace-nowrap">{p.cost_price.toFixed(4)} / {p.current_price?.toFixed(3) || '-'}</span>
+                  <td className="px-1.5 py-2 text-right tabular-nums"><div className="truncate" title={p.shares.toLocaleString()}>{p.shares.toLocaleString()}</div></td>
+                  <td className="px-1.5 py-2 text-right">
+                    <div className="flex min-w-0 flex-col items-end leading-5">
+                      <span className="truncate tabular-nums" title={`${p.cost_price.toFixed(4)} / ${p.current_price?.toFixed(3) || '-'}`}>{p.cost_price.toFixed(4)} / {p.current_price?.toFixed(3) || '-'}</span>
                       {isOtcFund(p) && <span className="whitespace-nowrap text-[10px] text-muted-foreground">成本净值 / 最新净值</span>}
                       <span className="whitespace-nowrap text-[10px] text-muted-foreground">
                         {formatMarketRefreshedAt(p.market_refreshed_at)}
                       </span>
                     </div>
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right">{p.market_value?.toFixed(2) || '-'}</td>
-                  <td className={`whitespace-nowrap px-2 py-2.5 text-right ${getPnlColorClass(p.pnl)}`}>
-                    {formatPnl(p.pnl, p.pnl_pct)}
+                  <td className="px-1.5 py-2 text-right tabular-nums"><div className="truncate" title={p.market_value?.toFixed(2) || '-'}>{p.market_value?.toFixed(2) || '-'}</div></td>
+                  <td className={`px-1.5 py-2 text-right tabular-nums ${getPnlColorClass(p.pnl)}`}>
+                    <div className="truncate" title={formatPnl(p.pnl, p.pnl_pct)}>{formatPnl(p.pnl, p.pnl_pct)}</div>
                   </td>
-                  <td className={`whitespace-nowrap px-2 py-2.5 text-right ${getPnlColorClass(p.today_pnl)}`}>
-                    {formatPnl(p.today_pnl, p.today_pnl_pct)}
+                  <td className={`px-1.5 py-2 text-right tabular-nums ${getPnlColorClass(p.today_pnl)}`}>
+                    <div className="truncate" title={formatPnl(p.today_pnl, p.today_pnl_pct)}>{formatPnl(p.today_pnl, p.today_pnl_pct)}</div>
                   </td>
-                  <td className="px-2 py-2.5" title={p.dca_reason || undefined} onClick={e => e.stopPropagation()}>
+                  <td className="px-1.5 py-2" title={p.dca_reason || undefined} onClick={e => e.stopPropagation()}>
                     <button
                       type="button"
                       className={`inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium transition-colors hover:bg-muted ${getDcaTextClass(p.dca_light, p.dca_label)}`}
@@ -735,11 +735,11 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       <span className={`h-2.5 w-2.5 rounded-full ${getDcaLightClass(p.dca_light, p.dca_label)}`} />
                       <span>{p.dca_label || '待计算'}</span>
                     </button>
-                    <div className="mt-1 max-w-44 truncate text-[10px] text-muted-foreground">
+                    <div className="mt-1 truncate text-[10px] text-muted-foreground">
                       {p.dca_budget_label || p.dca_action || '-'} · {formatDcaMeta(p)}
                     </div>
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                  <td className="px-1.5 py-2 text-center" onClick={e => e.stopPropagation()}>
                     {tradeSignal ? (
                       <button type="button" onClick={() => setDetailPortfolio(p)} className="inline-flex">
                         <Badge
@@ -754,42 +754,42 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       <span className="text-xs text-muted-foreground">计算中</span>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-center" onClick={e => e.stopPropagation()}>
-                    <div className="flex flex-nowrap items-center justify-center gap-1">
+                  <td className="px-1.5 py-2 text-center" onClick={e => e.stopPropagation()}>
+                    <div className="mx-auto grid max-w-[76px] grid-cols-2 justify-center gap-0.5 xl:max-w-none xl:grid-cols-5">
                     <Button
                       size="icon"
                       variant="ghost"
-                      className="h-8 w-8"
+                      className="h-7 w-7"
                       onClick={() => setDetailPortfolio(p)}
                       title="查看详情"
                     >
-                      <Eye className="h-4 w-4" />
+                      <Eye className="h-3.5 w-3.5" />
                     </Button>
                     <Button
                       size="icon"
                       variant="ghost"
-                      className="h-8 w-8"
+                      className="h-7 w-7"
                       onClick={() => handleGetAdvice(p.id)}
                       disabled={adviceLoading === p.id}
                       title="生成AI建议"
                     >
-                      <Lightbulb className={`h-4 w-4 ${adviceLoading === p.id ? 'animate-pulse text-yellow-500' : ''}`} />
+                      <Lightbulb className={`h-3.5 w-3.5 ${adviceLoading === p.id ? 'animate-pulse text-yellow-500' : ''}`} />
                     </Button>
                     <Button 
                       size="icon" 
                       variant="ghost" 
-                      className="h-8 w-8"
+                      className="h-7 w-7"
                       onClick={() => handleRefreshQuote(p.etf_code)}
                       disabled={refreshingCode === p.etf_code}
                       title="刷新行情"
                     >
-                      <RefreshCw className={`h-4 w-4 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
+                      <RefreshCw className={`h-3.5 w-3.5 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
                     </Button>
-                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => handleEdit(p)}>
-                      <Pencil className="h-4 w-4" />
+                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => handleEdit(p)}>
+                      <Pencil className="h-3.5 w-3.5" />
                     </Button>
-                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setDeleteTarget(p)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
+                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setDeleteTarget(p)}>
+                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
                     </Button>
                     </div>
                   </td>

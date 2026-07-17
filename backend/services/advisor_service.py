@@ -1113,6 +1113,22 @@ class AdvisorService:
             kline_summary=kline_summary,
             indicators=indicators_dict,
         )
+        if analysis_mode == "watchlist":
+            holding_block = (
+                "## 持仓状态\n"
+                f"- 份额: {p.shares}, 成本价: {float(p.cost_price):.4f}\n"
+                f"- 当前价: {quote.price:.4f}, 浮动盈亏: {pnl_pct:.2f}%\n"
+                f"- 持仓天数: {holding_days or '未知'}"
+            )
+            prompt = prompt.replace(
+                holding_block,
+                "## 观察状态\n"
+                "- 来源: 自选观察品种，当前未建仓\n"
+                f"- 当前价: {quote.price:.4f}\n"
+                "- 持仓份额、成本价、浮动盈亏和持仓天数: 不适用\n"
+                "- 建议口径: 仅给观察、买入条件、风险和跟踪重点，不要基于已持仓盈亏给减仓/止盈建议"
+            )
+
         if asset_type == "otc_fund":
             prompt = prompt.replace("你是一名专业的ETF投资顾问", "你是一名专业的场外基金投资顾问")
             prompt = prompt.replace("## 品种信息\n- 代码:", "## 品种信息\n- 资产类型: 场外基金（净值型资产，不适用场内溢价、IOPV、成交量追价规则）\n- 代码:")
@@ -1353,6 +1369,87 @@ class AdvisorService:
             created_at=payload["created_at"],
         )
     
+    @classmethod
+    async def generate_advice_for_symbol(
+        cls,
+        session: AsyncSession,
+        code: str,
+        name: str | None = None,
+        asset_type: str = "etf",
+        user_id: Optional[int] = None,
+    ) -> Optional[AdviceResponse]:
+        """按代码生成观察建议，不要求已有持仓。"""
+        if user_id is None:
+            raise ValueError("generate_advice_for_symbol requires user_id")
+        clean_code = (code or "").strip().upper()
+        if not clean_code:
+            return None
+
+        quotes = await MarketService.get_quotes_for_codes([clean_code])
+        quote = quotes.get(clean_code)
+        if not quote:
+            return None
+
+        resolved_name = name or quote.name or clean_code
+        resolved_asset_type = asset_type if asset_type in {"etf", "stock", "otc_fund", "cash", "money_fund"} else "etf"
+        observation = type("ObservationPortfolio", (), {})()
+        observation.etf_code = clean_code
+        observation.asset_type = resolved_asset_type
+        observation.shares = Decimal("0")
+        observation.cost_price = Decimal(str(quote.price or 1))
+        observation.buy_date = None
+
+        llm = cls.get_llm_client()
+        payload = await cls._build_advice_payload(observation, quote.model_copy(update={"name": resolved_name}), llm, analysis_mode="watchlist")
+        payload["main_judgment"] = payload["main_judgment"].replace("持有", "观察")
+        payload["summary"] = (payload["summary"] or "").replace("当前持仓", "当前自选观察品种")
+        payload["reason"] = cls.format_multi_horizon_reason(
+            payload["main_judgment"],
+            payload["summary"],
+            payload["action"],
+            payload["why"],
+            payload["news_basis"],
+            payload["policy_basis"],
+            payload["event_context"],
+            payload["short_term"],
+            payload["medium_term"],
+            payload["long_term"],
+        )
+
+        log = AdviceLog(
+            user_id=user_id,
+            etf_code=clean_code,
+            advice_type=payload["advice_type"],
+            reason=payload["reason"],
+            confidence=payload["confidence"],
+            llm_provider=settings.llm_provider,
+            llm_model=llm.model if hasattr(llm, 'model') else None,
+            created_at=cls.now_in_utc_naive(),
+        )
+        session.add(log)
+        await session.flush()
+
+        return AdviceResponse(
+            etf_code=clean_code,
+            etf_name=resolved_name,
+            advice_type=payload["advice_type"],
+            main_judgment=payload["main_judgment"],
+            summary=payload["summary"],
+            action=payload["action"],
+            why=payload["why"],
+            news_basis=payload["news_basis"],
+            policy_basis=payload["policy_basis"],
+            event_context=payload["event_context"],
+            reason=payload["reason"],
+            confidence=payload["confidence"],
+            short_term=payload["short_term"],
+            medium_term=payload["medium_term"],
+            long_term=payload["long_term"],
+            current_price=quote.price,
+            pnl_pct=None,
+            created_at=payload["created_at"],
+        )
+
     @classmethod
     async def get_history(
         cls,

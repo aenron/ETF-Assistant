@@ -195,6 +195,7 @@ function LegacyAdviceContent({ reason }: { reason: string | null }) {
 export type CandlePoint = {
   date: string
   fullDate: string
+  provisional?: boolean
   open: number
   close: number
   high: number
@@ -568,6 +569,7 @@ export function buildTradeSignalFromHistory(
   const data = (history?.data || []).map((k) => ({
     date: k.trade_date.slice(5),
     fullDate: k.trade_date,
+    provisional: k.provisional || false,
     open: k.open_price,
     close: k.close_price,
     high: k.high_price,
@@ -577,6 +579,24 @@ export function buildTradeSignalFromHistory(
     change: k.change_pct,
   }))
   return buildTradeSignal(data, benchmarks)
+}
+
+function getShanghaiDateKey(date: Date) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
+}
+
+function isCurrentShanghaiIntradayPoint(item: MarketHistoryResponse['data'][number]) {
+  if (!item.trade_time) return false
+  const tradeTime = new Date(item.trade_time)
+  if (Number.isNaN(tradeTime.getTime())) return false
+  const now = new Date()
+  if (tradeTime.getTime() > now.getTime() + 60_000) return false
+  return getShanghaiDateKey(tradeTime) === getShanghaiDateKey(now)
 }
 
 function calculateRsi(data: CandlePoint[], period = 14) {
@@ -842,6 +862,7 @@ function CandlestickChart({
           const bodyY = bodyHeight <= 1.5 ? bodyTop - 0.75 : bodyTop
           const isUp = item.close >= item.open
           const candleColor = isUp ? '#ef4444' : '#10b981'
+          const isProvisional = item.provisional === true
           const volumeY = getVolumeY(item.volume)
           const volumeHeightValue = volumeTop + volumeHeight - volumeY
           return (
@@ -854,8 +875,16 @@ function CandlestickChart({
                 height={bodyHeight}
                 rx="1"
                 fill={candleColor}
-                fillOpacity={isUp ? 0.88 : 0.82}
+                fillOpacity={isProvisional ? 0.42 : isUp ? 0.88 : 0.82}
+                stroke={isProvisional ? candleColor : undefined}
+                strokeWidth={isProvisional ? 1.4 : undefined}
+                strokeDasharray={isProvisional ? '3 2' : undefined}
               />
+              {isProvisional ? (
+                <text x={x} y={Math.max(padding.top + 10, bodyY - 6)} textAnchor="middle" fontSize="10" fill={candleColor} fontWeight="600">
+                  盘中
+                </text>
+              ) : null}
               {!visibleIndicators.macd ? (
                 <rect
                   x={x - candleWidth / 2}
@@ -873,7 +902,7 @@ function CandlestickChart({
                 </text>
               ) : null}
               <title>
-                {`${item.fullDate}
+                {`${item.fullDate}${isProvisional ? ' 盘中估算' : ''}
 开 ${item.open.toFixed(3)} / 高 ${item.high.toFixed(3)} / 低 ${item.low.toFixed(3)} / 收 ${item.close.toFixed(3)}
 ${changeLabel} ${item.change >= 0 ? '+' : ''}${item.change.toFixed(2)}% / 量 ${formatVolumeLabel(item.volume)}`}
               </title>
@@ -926,6 +955,7 @@ ${changeLabel} ${item.change >= 0 ? '+' : ''}${item.change.toFixed(2)}% / 量 ${
 export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'chart' | 'advice' | 'profile'>('chart')
   const supportsIntraday = !['otc_fund', 'cash', 'money_fund'].includes(p.asset_type)
+  const isVirtualPortfolio = p.id < 0
   const [activeChartRange, setActiveChartRange] = useState<ChartRangeKey>(supportsIntraday ? 'today' : 60)
   const [historyDays, setHistoryDays] = useState<HistoryRangeDays>(60)
   const [chartFullscreen, setChartFullscreen] = useState(false)
@@ -1049,14 +1079,16 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const fetchAdvice = async () => {
     setAdviceLoading(true)
     try {
-      const res = await adviceApi.generateForPortfolio(p.id)
+      const res = isVirtualPortfolio
+        ? await adviceApi.generateForSymbol({ code: p.etf_code, name: p.etf_name, asset_type: p.asset_type })
+        : await adviceApi.generateForPortfolio(p.id)
       setAdvice(res.data)
       // 刷新最新建议
       fetchLatestAdvice()
     } catch (e: any) {
       const msg = e?.code === 'ECONNABORTED'
         ? '请求超时，AI正在搜索最新信息，请稍后重试'
-        : '获取建议失败'
+        : (e?.response?.data?.detail || '获取建议失败')
       alert(msg)
     } finally {
       setAdviceLoading(false)
@@ -1065,7 +1097,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
 
   const indicators = historyData?.indicators
   const klines = historyData?.data || []
-  const intradayKlines = intradayData?.data || []
+  const intradayKlines = (intradayData?.data || []).filter(isCurrentShanghaiIntradayPoint)
 
   const toChartPoint = (k: typeof klines[number], mode: 'daily' | 'intraday'): CandlePoint => {
     const timeLabel = k.trade_time
@@ -1074,6 +1106,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     return {
       date: mode === 'intraday' ? timeLabel : k.trade_date.slice(5),
       fullDate: k.trade_time || k.trade_date,
+      provisional: k.provisional || false,
       open: k.open_price,
       close: k.close_price,
       high: k.high_price,
@@ -1105,7 +1138,8 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
     if (value == null) return ''
     return value >= 0 ? 'text-red-500' : 'text-green-500'
   }
-  const tradeSignal = buildTradeSignal(chartData, benchmarkHistory)
+  const confirmedChartData = chartData.filter((item) => !item.provisional)
+  const tradeSignal = buildTradeSignal(confirmedChartData, benchmarkHistory)
   const renderRuleCheck = (check: RuleCheck) => (
     <div key={check.label} className="rounded-md border bg-background/70 px-2.5 py-2">
       <div className="flex items-start justify-between gap-2">
@@ -1139,6 +1173,9 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   }
   const latestIntradayTime = intradayChartData.at(-1)?.date || null
   const intradayPointCount = intradayChartData.length
+  const latestDailyDate = historyData?.latest_trade_date || chartData.at(-1)?.fullDate?.slice(0, 10) || null
+  const hasProvisionalDailyPoint = historyData?.has_provisional || chartData.some((item) => item.provisional)
+  const quoteTimeLabel = p.market_refreshed_at ? formatBeijingTime(p.market_refreshed_at) : null
   const activeChartData = activeChartRange === 'today' ? intradayChartData : chartData
   const activeChartLoading = activeChartRange === 'today' ? intradayLoading : historyLoading
   const activeChartIndicators = activeChartRange === 'today' ? intradayIndicators : visibleIndicators
@@ -1229,6 +1266,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                 <p className="mt-1 text-xs text-muted-foreground">
                   当前价 {p.current_price?.toFixed(3) || '-'}
                   {p.change_pct != null ? ` / ${p.change_pct >= 0 ? '+' : ''}${p.change_pct.toFixed(2)}%` : ''}
+                  {quoteTimeLabel ? ` / 实时 ${quoteTimeLabel}` : ''}
                 </p>
               </div>
               <div>{renderChartControls('fullscreen')}</div>
@@ -1350,8 +1388,10 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                       <h3 className="text-sm font-semibold">行情趋势</h3>
                       {activeChartRange === 'today' ? (
-                        <span className="text-xs text-muted-foreground">分钟K：{intradayPointCount}根 · 最新分钟：{latestIntradayTime || '暂无更新'}</span>
-                      ) : null}
+                        <span className="text-xs text-muted-foreground">分钟K：{intradayPointCount}根 · 最新分钟：{latestIntradayTime || '暂无更新'}{quoteTimeLabel ? ` · 实时 ${quoteTimeLabel}` : ''}</span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">日K最新：{latestDailyDate || '暂无'}{hasProvisionalDailyPoint ? ' · 含盘中估算' : ''}{quoteTimeLabel ? ` · 实时 ${quoteTimeLabel}` : ''}</span>
+                      )}
                     </div>
                     <div>{renderChartControls()}</div>
                   </div>
@@ -1538,7 +1578,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                       </div>
                       <Button size="sm" variant="outline" onClick={fetchAdvice}>
                         <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                        重新分析
+                        {isVirtualPortfolio ? '重新观察' : '重新分析'}
                       </Button>
                     </div>
                     <div>
@@ -1621,11 +1661,16 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
               {!adviceLoading && !displayAdvice && !latestLoading && (
                 <div className="text-center py-12">
                   <Lightbulb className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
-                  <p className="text-muted-foreground mb-4">暂无决策建议</p>
+                  <p className="text-muted-foreground mb-2">暂无决策建议</p>
                   <Button onClick={fetchAdvice} size="lg">
                     <Lightbulb className="h-4 w-4 mr-2" />
-                    生成AI决策建议
+                    {isVirtualPortfolio ? '生成AI观察建议' : '生成AI决策建议'}
                   </Button>
+                  {isVirtualPortfolio && (
+                    <p className="mx-auto mt-3 max-w-md text-xs leading-5 text-muted-foreground">
+                      自选品种会按观察口径分析，不包含持仓成本、盈亏和仓位建议。
+                    </p>
+                  )}
                 </div>
               )}
               {latestLoading && !adviceLoading && (

@@ -83,18 +83,23 @@ async def get_history(
     详情页首次打开需要直接拿到图表数据；这里使用 get_history_kline 的缓存/数据库/外部源
     降级链路，而不是只读 Redis 后异步预热。
     """
-    kline_data = await MarketService.get_history_kline(code, days=days)
+    confirmed_kline_data = await MarketService.get_history_kline(code, days=days)
+    indicators = MarketService.calculate_technical_indicators(confirmed_kline_data)
+    kline_data = await MarketService.append_realtime_daily_point(code, confirmed_kline_data)
 
     quote = await MarketService.get_quote_from_cache(code)
 
-    # 计算技术指标
-    indicators = MarketService.calculate_technical_indicators(kline_data)
+    latest_trade_date = MarketService._latest_kline_trade_date(kline_data)
+    has_provisional = any(item.provisional for item in kline_data)
     
     return MarketDailyResponse(
         code=code,
         name=quote.name if quote else "",
         data=kline_data,
         indicators=indicators,
+        latest_trade_date=latest_trade_date,
+        source="history+realtime_quote" if has_provisional else "history",
+        has_provisional=has_provisional,
     )
 
 
@@ -105,14 +110,18 @@ async def get_intraday(
     limit: int = Query(default=240, ge=20, le=480),
 ):
     """获取当日分钟K线，用于详情页实时趋势图。"""
-    kline_data = await MarketService.get_intraday_kline(code, period=period, limit=limit)
+    kline_data, source = await MarketService.get_intraday_kline_with_source(code, period=period, limit=limit)
     quote = await MarketService.get_quote_from_cache(code)
     indicators = MarketService.calculate_technical_indicators(kline_data)
+    has_provisional = any(item.provisional for item in kline_data)
     return MarketDailyResponse(
         code=code,
         name=quote.name if quote else "",
         data=kline_data,
         indicators=indicators,
+        latest_trade_date=MarketService._latest_kline_trade_date(kline_data),
+        source=source,
+        has_provisional=has_provisional,
     )
 
 

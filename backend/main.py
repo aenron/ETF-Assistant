@@ -11,6 +11,7 @@ from routers.macro import router as macro_router
 from routers.auth import router as auth_router
 from routers.llm_config import router as llm_config_router
 from routers.notification_config import router as notification_config_router
+from routers.watchlist import router as watchlist_router
 from config import settings
 from services.redis_service import RedisService
 from services.scheduler import apply_scheduler_job_configs, start_scheduler, shutdown_scheduler
@@ -67,6 +68,11 @@ async def run_migrations():
         ("macro_indicator.source_function", "ALTER TABLE macro_indicator ADD COLUMN source_function VARCHAR(100)"),
         ("macro_indicator.source_column", "ALTER TABLE macro_indicator ADD COLUMN source_column VARCHAR(100)"),
         ("macro_indicator.raw_period", "ALTER TABLE macro_indicator ADD COLUMN raw_period VARCHAR(50)"),
+        ("watchlist_item.table", "CREATE TABLE IF NOT EXISTS watchlist_item (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), code VARCHAR(20) NOT NULL, name VARCHAR(100), asset_type VARCHAR(20) DEFAULT 'etf' NOT NULL, note TEXT, sort_order INTEGER DEFAULT 0 NOT NULL, created_at TIMESTAMP DEFAULT NOW() NOT NULL, updated_at TIMESTAMP DEFAULT NOW() NOT NULL)"),
+        ("watchlist_item.uq", "CREATE UNIQUE INDEX IF NOT EXISTS uq_watchlist_item_user_code ON watchlist_item (user_id, code)"),
+        ("watchlist_item.user_idx", "CREATE INDEX IF NOT EXISTS ix_watchlist_item_user_id ON watchlist_item (user_id)"),
+        ("watchlist_item.code_idx", "CREATE INDEX IF NOT EXISTS ix_watchlist_item_code ON watchlist_item (code)"),
+        ("watchlist_item.asset_type_idx", "CREATE INDEX IF NOT EXISTS ix_watchlist_item_asset_type ON watchlist_item (asset_type)"),
     ]
 
     for label, statement in migration_statements:
@@ -153,6 +159,7 @@ app.include_router(admin_router)
 app.include_router(macro_router)
 app.include_router(multi_agent_router)
 app.include_router(strategy_router)
+app.include_router(watchlist_router)
 
 
 @app.get("/")

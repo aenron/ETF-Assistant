@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from schemas.multi_agent import MultiAgentContextSummary, MultiAgentRoleOpinion, MultiAgentScene
-from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
+from services.agents.providers.base import NativeAgentClient
 from services.agents.tool_registry import ToolRegistry
 from services.agents.types import AgentMessage, AgentRunEvent, AgentTool
 from utils.timezone import now_in_shanghai
@@ -23,7 +23,7 @@ class RoleAgentExecutor:
         question: str | None,
         context_summary: MultiAgentContextSummary,
         tools: list[AgentTool],
-        client: GeminiNativeAgentClient,
+        client: NativeAgentClient,
         previous_opinion: MultiAgentRoleOpinion | None = None,
         opposing_points: Sequence[str] = (),
         disagreement_summary: str = "",

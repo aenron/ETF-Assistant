@@ -7,6 +7,7 @@ from typing import List, Optional, Dict
 from database import get_session
 from schemas.advice import (
     AdviceGenerateRequest,
+    AdviceByCodeRequest,
     AdviceResponse,
     AdviceLogResponse,
     AccountAnalysisResponse,
@@ -27,6 +28,26 @@ async def generate_advice(
 ):
     """生成投资建议（可指定ETF代码列表）"""
     return await AdvisorService.generate_advice(db, request.etf_codes, user_id=current_user.id)
+
+
+@router.post("/generate-symbol", response_model=AdviceResponse)
+async def generate_advice_by_code(
+    request: AdviceByCodeRequest,
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """按代码生成观察建议，不要求已有持仓。"""
+    advice = await AdvisorService.generate_advice_for_symbol(
+        db,
+        request.code,
+        name=request.name,
+        asset_type=request.asset_type,
+        user_id=current_user.id,
+    )
+    if not advice:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="未找到该品种行情，无法生成建议")
+    return advice
 
 
 @router.post("/account-analysis", response_model=AccountAnalysisResponse)

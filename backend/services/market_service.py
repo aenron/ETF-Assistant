@@ -3,7 +3,7 @@ import akshare as ak
 import httpx
 import pandas as pd
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as datetime_time
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select
@@ -44,6 +44,10 @@ class MarketService:
     _THS_INDUSTRY_NAME_MAP: Dict[str, str] | None = None
     _TUSHARE_PRO = None
     _KLINE_WARMING_KEYS: set[str] = set()
+    _EASTMONEY_INTRADAY_FAILURES: Dict[str, int] = {}
+    _EASTMONEY_INTRADAY_BREAKER_UNTIL: Dict[str, float] = {}
+    EASTMONEY_INTRADAY_FAILURE_THRESHOLD = 2
+    EASTMONEY_INTRADAY_BREAKER_SECONDS = 180
 
     @staticmethod
     def _with_refresh_time(
@@ -72,7 +76,33 @@ class MarketService:
         return f"{cls.REDIS_KEY_KLINE_PREFIX}{code}:{days}"
 
     @staticmethod
-    def _is_kline_recent(data: List[KLineItem], max_lag_days: int = 4) -> bool:
+    def _last_weekday_before(value: date) -> date:
+        candidate = value - timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+        return candidate
+
+    @classmethod
+    def _expected_kline_min_date(cls, now: Optional[datetime] = None) -> date:
+        """Return the minimum acceptable daily K-line date for cache reuse.
+
+        During the trading session most public daily-K sources do not publish the
+        current day yet, so yesterday's trading day is acceptable. After 15:10 we
+        try to refresh toward today's final daily bar.
+        """
+        current = now or now_in_shanghai()
+        today = current.date()
+        if today.weekday() >= 5:
+            candidate = today
+            while candidate.weekday() >= 5:
+                candidate -= timedelta(days=1)
+            return candidate
+        if current.time() >= datetime_time(15, 10):
+            return today
+        return cls._last_weekday_before(today)
+
+    @classmethod
+    def _is_kline_recent(cls, data: List[KLineItem], max_lag_days: int = 4) -> bool:
         """Return whether cached daily K-line data is recent enough to reuse."""
         if not data:
             return False
@@ -80,7 +110,54 @@ class MarketService:
         if not latest_dates:
             return False
         latest_date = max(latest_dates)
-        return latest_date >= now_in_shanghai().date() - timedelta(days=max_lag_days)
+        expected_date = cls._expected_kline_min_date()
+        if latest_date >= expected_date:
+            return True
+        return False
+
+    @classmethod
+    def _latest_kline_trade_date(cls, data: List[KLineItem]) -> Optional[date]:
+        dates = [item.trade_date for item in data if item.trade_date]
+        return max(dates) if dates else None
+
+    @classmethod
+    async def append_realtime_daily_point(cls, code: str, data: List[KLineItem]) -> List[KLineItem]:
+        """Append a non-persistent intraday daily bar when quote is newer than daily K-line."""
+        if not data:
+            return data
+        quote = await cls.get_quote_from_cache(code)
+        if not quote or not quote.refreshed_at or quote.price <= 0:
+            return data
+
+        refreshed_at = quote.refreshed_at.astimezone(SHANGHAI_TZ) if quote.refreshed_at.tzinfo else quote.refreshed_at.replace(tzinfo=SHANGHAI_TZ)
+        quote_date = refreshed_at.date()
+        if quote_date.weekday() >= 5:
+            return data
+        latest_date = cls._latest_kline_trade_date(data)
+        if latest_date is None or latest_date >= quote_date:
+            return data
+
+        previous_close = data[-1].close_price if data[-1].close_price > 0 else quote.price
+        open_price = quote.open_price if quote.open_price and quote.open_price > 0 else previous_close
+        high_price = max(quote.high_price or quote.price, quote.price, open_price)
+        low_price = min(quote.low_price or quote.price, quote.price, open_price)
+        change_pct = quote.change_pct
+        if (change_pct is None or change_pct == 0) and previous_close > 0:
+            change_pct = (quote.price - previous_close) / previous_close * 100
+
+        provisional = KLineItem(
+            trade_date=quote_date,
+            trade_time=refreshed_at,
+            provisional=True,
+            open_price=open_price,
+            close_price=quote.price,
+            high_price=high_price,
+            low_price=low_price,
+            volume=quote.volume or 0,
+            amount=quote.amount,
+            change_pct=round(change_pct or 0.0, 2),
+        )
+        return [*data, provisional]
 
     @staticmethod
     def _has_kline_amount(data: List[KLineItem]) -> bool:
@@ -700,6 +777,61 @@ class MarketService:
         return []
 
     @staticmethod
+    def _payload_value_summary(value: Any) -> str:
+        if isinstance(value, dict):
+            parts = [f"dict(keys={list(value.keys())[:8]})"]
+            for nested_key in ("records", "data", "items", "columns", "index", "type"):
+                if nested_key not in value:
+                    continue
+                nested_value = value.get(nested_key)
+                if isinstance(nested_value, list):
+                    parts.append(f"{nested_key}=list(len={len(nested_value)})")
+                elif isinstance(nested_value, dict):
+                    parts.append(f"{nested_key}=dict(keys={list(nested_value.keys())[:6]})")
+                elif isinstance(nested_value, (str, int, float, bool)) or nested_value is None:
+                    text = str(nested_value)
+                    if len(text) > 60:
+                        text = text[:57] + "..."
+                    parts.append(f"{nested_key}={text!r}")
+                else:
+                    parts.append(f"{nested_key}={type(nested_value).__name__}")
+            return " ".join(parts)
+        if isinstance(value, list):
+            return f"list(len={len(value)})"
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            text = str(value)
+            if len(text) > 80:
+                text = text[:77] + "..."
+            return repr(text)
+        return type(value).__name__
+
+    @classmethod
+    def _payload_summary(cls, payload: Any) -> str:
+        if isinstance(payload, dict):
+            keys = list(payload.keys())[:12]
+            parts = [f"keys={keys}"]
+            for key in ("code", "status", "success", "message", "error", "item", "data", "records", "items"):
+                if key in payload:
+                    parts.append(f"{key}={cls._payload_value_summary(payload.get(key))}")
+            return ", ".join(parts)
+        if isinstance(payload, list):
+            first_type = type(payload[0]).__name__ if payload else "none"
+            return f"list(len={len(payload)}, first_type={first_type})"
+        return f"type={type(payload).__name__}"
+
+    @classmethod
+    async def _fetch_qmt_agent(cls, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        base_url = settings.qmt_agent_base_url.rstrip("/")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{base_url}{path}",
+                params=params,
+                headers=cls._qmt_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    @staticmethod
     def _qmt_timestamp_to_date(value: Any) -> Optional[date]:
         if value in (None, "", "-"):
             return None
@@ -907,6 +1039,30 @@ class MarketService:
             if quote:
                 result[code] = quote
         return result
+
+    @staticmethod
+    def _looks_like_listed_security_code(code: str) -> bool:
+        clean = str(code or "").strip().upper()
+        if not clean.isdigit() or len(clean) != 6:
+            return clean.startswith(("BK", "GN"))
+        return clean.startswith((
+            "5", "15", "16", "18",
+            "000", "002", "003", "300", "301",
+            "600", "601", "603", "605", "688",
+            "399", "88",
+        ))
+
+    @classmethod
+    def _otc_fund_candidate_codes(cls, codes: List[str], existing: Dict[str, MarketQuote]) -> List[str]:
+        candidates: List[str] = []
+        for code in codes:
+            clean = str(code or "").strip()
+            if not clean or clean in existing:
+                continue
+            if cls._looks_like_listed_security_code(clean):
+                continue
+            candidates.append(clean)
+        return list(dict.fromkeys(candidates))
 
     @classmethod
     async def _fetch_otc_fund_quote(cls, code: str) -> Optional[MarketQuote]:
@@ -1322,7 +1478,6 @@ class MarketService:
             return []
 
         symbol = cls._qmt_symbol(code)
-        base_url = settings.qmt_agent_base_url.rstrip("/")
         params = {
             "period": "1d",
             "count": str(days),
@@ -1331,17 +1486,14 @@ class MarketService:
         }
         try:
             print(f"[MarketService] >>> QMT Agent获取历史K线: {code} ({symbol})")
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"{base_url}/symbols/{symbol}/kline",
-                    params=params,
-                    headers=cls._qmt_headers(),
-                )
-                response.raise_for_status()
-                payload = response.json()
+            payload = await cls._fetch_qmt_agent(f"/symbols/{symbol}/kline", params=params)
 
             records = cls._qmt_records(payload)
+            if not records:
+                print(f"[MarketService] QMT Agent历史K线返回空数据: {code} ({symbol}), payload_type={type(payload).__name__}, summary={cls._payload_summary(payload)}")
+                return []
             result: List[KLineItem] = []
+            skipped_count = 0
             for record in records[-days:]:
                 trade_date = cls._qmt_timestamp_to_date(
                     record.get("time") or record.get("date") or record.get("trade_date")
@@ -1351,6 +1503,7 @@ class MarketService:
                 high = cls._to_float(record.get("high"))
                 low = cls._to_float(record.get("low"))
                 if trade_date is None or close is None or open_price is None or high is None or low is None:
+                    skipped_count += 1
                     continue
                 prev_close = cls._to_float(record.get("preClose") or record.get("pre_close"))
                 if prev_close and prev_close > 0:
@@ -1371,6 +1524,8 @@ class MarketService:
                 ))
             if result:
                 print(f"[MarketService] ✓ QMT Agent获取到 {len(result)} 条K线")
+            else:
+                print(f"[MarketService] QMT Agent历史K线解析后为空: {code} ({symbol}), records={len(records)}, skipped={skipped_count}")
             return result
         except Exception as e:
             print(f"[MarketService] QMT Agent历史K线获取失败: {code}, {e}")
@@ -1534,7 +1689,6 @@ class MarketService:
         if not cls._qmt_enabled():
             return []
         symbol = cls._qmt_symbol(code)
-        base_url = settings.qmt_agent_base_url.rstrip("/")
         params = {
             "period": period,
             "count": str(limit),
@@ -1543,16 +1697,14 @@ class MarketService:
         }
         try:
             print(f"[MarketService] >>> QMT Agent获取分钟K线: {code} ({symbol})")
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"{base_url}/symbols/{symbol}/kline",
-                    params=params,
-                    headers=cls._qmt_headers(),
-                )
-                response.raise_for_status()
-                payload = response.json()
+            payload = await cls._fetch_qmt_agent(f"/symbols/{symbol}/kline", params=params)
+            records = cls._qmt_records(payload)
+            if not records:
+                print(f"[MarketService] QMT Agent分钟K线返回空数据: {code} ({symbol}), period={period}, payload_type={type(payload).__name__}, summary={cls._payload_summary(payload)}")
+                return []
             result: List[KLineItem] = []
-            for record in cls._qmt_records(payload):
+            skipped_count = 0
+            for record in records:
                 trade_time = cls._qmt_timestamp_to_datetime(
                     record.get("time") or record.get("datetime") or record.get("date") or record.get("trade_time")
                 )
@@ -1561,6 +1713,7 @@ class MarketService:
                 high = cls._to_float(record.get("high"))
                 low = cls._to_float(record.get("low"))
                 if trade_time is None or close is None or open_price is None or high is None or low is None:
+                    skipped_count += 1
                     continue
                 result.append(KLineItem(
                     trade_date=trade_time.date(),
@@ -1573,13 +1726,49 @@ class MarketService:
                     amount=cls._to_float(record.get("amount")),
                     change_pct=0.0,
                 ))
+            if not result:
+                print(f"[MarketService] QMT Agent分钟K线解析后为空: {code} ({symbol}), period={period}, records={len(records)}, skipped={skipped_count}")
+                return []
             return cls._normalize_intraday_items(result, limit)
         except Exception as e:
             print(f"[MarketService] QMT Agent分钟K线获取失败: {code}, {e}")
             return []
 
     @classmethod
+    def _eastmoney_intraday_breaker_key(cls, code: str, period: str) -> str:
+        return str(code or "").strip()
+
+    @classmethod
+    def _is_eastmoney_intraday_breaker_open(cls, code: str, period: str) -> bool:
+        key = cls._eastmoney_intraday_breaker_key(code, period)
+        until = cls._EASTMONEY_INTRADAY_BREAKER_UNTIL.get(key, 0.0)
+        if until <= time.time():
+            cls._EASTMONEY_INTRADAY_BREAKER_UNTIL.pop(key, None)
+            return False
+        remaining = max(0, int(until - time.time()))
+        print(f"[MarketService] 东方财富分钟K线代码级熔断中: {code}, skip_period={period}, remaining={remaining}s")
+        return True
+
+    @classmethod
+    def _record_eastmoney_intraday_success(cls, code: str, period: str) -> None:
+        key = cls._eastmoney_intraday_breaker_key(code, period)
+        cls._EASTMONEY_INTRADAY_FAILURES.pop(key, None)
+        cls._EASTMONEY_INTRADAY_BREAKER_UNTIL.pop(key, None)
+
+    @classmethod
+    def _record_eastmoney_intraday_failure(cls, code: str, period: str) -> None:
+        key = cls._eastmoney_intraday_breaker_key(code, period)
+        failures = cls._EASTMONEY_INTRADAY_FAILURES.get(key, 0) + 1
+        cls._EASTMONEY_INTRADAY_FAILURES[key] = failures
+        if failures >= cls.EASTMONEY_INTRADAY_FAILURE_THRESHOLD:
+            cls._EASTMONEY_INTRADAY_BREAKER_UNTIL[key] = time.time() + cls.EASTMONEY_INTRADAY_BREAKER_SECONDS
+            cls._EASTMONEY_INTRADAY_FAILURES[key] = 0
+            print(f"[MarketService] 东方财富分钟K线连续失败，开启代码级熔断: {code}, failed_period={period}, duration={cls.EASTMONEY_INTRADAY_BREAKER_SECONDS}s")
+
+    @classmethod
     async def _fetch_intraday_kline_eastmoney(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+        if cls._is_eastmoney_intraday_breaker_open(code, period):
+            return []
         klt_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60"}
         klt = klt_map.get(period, "1")
         url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -1623,23 +1812,94 @@ class MarketService:
                     ))
                 normalized = cls._normalize_intraday_items(result, limit)
                 if normalized:
+                    cls._record_eastmoney_intraday_success(code, period)
                     print(f"[MarketService] ✓ 东方财富分钟K线获取到 {len(normalized)} 条")
                     return normalized
             except Exception as e:
                 print(f"[MarketService] 东方财富分钟K线获取失败: {code} {secid}, {e}")
+        cls._record_eastmoney_intraday_failure(code, period)
         return []
 
     @classmethod
-    async def get_intraday_kline(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+    def _filter_today_intraday_items(cls, items: List[KLineItem]) -> List[KLineItem]:
+        now = now_in_shanghai()
+        today = now.date()
+        market_start = datetime_time(9, 15)
+        market_end = datetime_time(15, 0)
+        filtered: List[KLineItem] = []
+        for item in items:
+            if item.trade_time is None:
+                continue
+            trade_time = item.trade_time.astimezone(SHANGHAI_TZ) if item.trade_time.tzinfo else item.trade_time.replace(tzinfo=SHANGHAI_TZ)
+            if trade_time.date() != today:
+                continue
+            if trade_time > now:
+                continue
+            if not (market_start <= trade_time.time() <= market_end):
+                continue
+            filtered.append(item.model_copy(update={"trade_date": today, "trade_time": trade_time}))
+        return filtered
+
+    @classmethod
+    async def _realtime_intraday_fallback(cls, code: str) -> List[KLineItem]:
+        quote = await cls.get_quote_from_cache(code)
+        if not quote or not quote.refreshed_at or quote.price <= 0:
+            return []
+        refreshed_at = quote.refreshed_at.astimezone(SHANGHAI_TZ) if quote.refreshed_at.tzinfo else quote.refreshed_at.replace(tzinfo=SHANGHAI_TZ)
+        now = now_in_shanghai()
+        if refreshed_at.date() != now.date() or refreshed_at > now + timedelta(minutes=1):
+            return []
+        if refreshed_at.time() < datetime_time(9, 15) or refreshed_at.time() > datetime_time(15, 5):
+            return []
+        open_price = quote.open_price if quote.open_price and quote.open_price > 0 else quote.price
+        return [KLineItem(
+            trade_date=refreshed_at.date(),
+            trade_time=refreshed_at,
+            provisional=True,
+            open_price=open_price,
+            close_price=quote.price,
+            high_price=max(quote.high_price or quote.price, quote.price, open_price),
+            low_price=min(quote.low_price or quote.price, quote.price, open_price),
+            volume=quote.volume or 0,
+            amount=quote.amount,
+            change_pct=round(quote.change_pct or 0.0, 2),
+        )]
+
+    @classmethod
+    def _intraday_period_candidates(cls, period: str) -> List[str]:
+        supported = ["1m", "5m", "15m", "30m", "60m"]
+        safe_period = period if period in supported else "1m"
+        if safe_period == "1m":
+            return ["1m", "5m", "15m"]
+        if safe_period == "5m":
+            return ["5m", "15m"]
+        return [safe_period]
+
+    @classmethod
+    async def get_intraday_kline_with_source(cls, code: str, period: str = "1m", limit: int = 240) -> tuple[List[KLineItem], str]:
         safe_limit = max(20, min(limit, 480))
-        safe_period = period if period in {"1m", "5m", "15m", "30m", "60m"} else "1m"
-        for fetcher in (cls._fetch_intraday_kline_qmt_agent, cls._fetch_intraday_kline_eastmoney):
-            result = await fetcher(code, safe_period, safe_limit)
-            if result:
-                today = now_in_shanghai().date()
-                today_items = [item for item in result if item.trade_date == today]
-                return today_items or result
-        return []
+        for candidate_period in cls._intraday_period_candidates(period):
+            for fetcher in (cls._fetch_intraday_kline_qmt_agent, cls._fetch_intraday_kline_eastmoney):
+                result = await fetcher(code, candidate_period, safe_limit)
+                if not result:
+                    continue
+                today_items = cls._filter_today_intraday_items(result)
+                if today_items:
+                    if candidate_period != period:
+                        print(f"[MarketService] 今日分钟线周期降级成功: {code}, requested={period}, used={candidate_period}")
+                    return cls._normalize_intraday_items(today_items, safe_limit), f"intraday_{candidate_period}"
+                latest_time = result[-1].trade_time if result else None
+                print(f"[MarketService] 分钟K无今日有效数据，忽略非今日或未来数据: {code}, period={candidate_period}, latest={latest_time}")
+        fallback = await cls._realtime_intraday_fallback(code)
+        if fallback:
+            print(f"[MarketService] 使用实时快照兜底今日分钟线: {code}, latest={fallback[-1].trade_time}")
+            return fallback, "intraday_realtime_quote"
+        return [], "intraday_empty"
+
+    @classmethod
+    async def get_intraday_kline(cls, code: str, period: str = "1m", limit: int = 240) -> List[KLineItem]:
+        data, _source = await cls.get_intraday_kline_with_source(code, period=period, limit=limit)
+        return data
 
     @classmethod
     async def get_history_kline(cls, code: str, days: int = 60, prefer_cache: bool = True) -> List[KLineItem]:
@@ -1907,7 +2167,7 @@ class MarketService:
                 for code, quote in tushare_result.items():
                     result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
-        missing_codes = [code for code in codes if cls._quote_needs_enrichment(result.get(code))]
+        missing_codes = cls._otc_fund_candidate_codes(codes, result)
         if missing_codes:
             print(f"[MarketService] >>> 尝试场外基金数据源: {missing_codes}")
             fund_result = await cls._fetch_from_otc_fund_api(missing_codes)

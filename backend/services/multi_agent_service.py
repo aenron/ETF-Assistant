@@ -140,7 +140,7 @@ class MultiAgentService:
 
     @classmethod
     def _supports_native_agent(cls, provider: str | None) -> bool:
-        return (provider or settings.llm_provider) == "gemini"
+        return (provider or settings.llm_provider) in {"gemini", "openai"}
 
     @classmethod
     def _build_role_agent_tools(
@@ -1223,10 +1223,15 @@ class MultiAgentService:
         opposing_points: Sequence[str] = (),
         disagreement_summary: str = "",
     ) -> MultiAgentRoleOpinion:
-        from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
         from services.agents.role_agent_executor import RoleAgentExecutor
 
         llm = cls._create_llm_client(provider)
+        if provider == "openai":
+            from services.agents.providers.openai_agent_client import OpenAINativeAgentClient
+            native_client = OpenAINativeAgentClient(llm)
+        else:
+            from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
+            native_client = GeminiNativeAgentClient(llm)
         executor = RoleAgentExecutor(
             scene=scene,
             role_id=role.key,
@@ -1243,7 +1248,7 @@ class MultiAgentService:
                 holdings_preview=holdings_preview,
                 account_balance=account_balance,
             ),
-            client=GeminiNativeAgentClient(llm),
+            client=native_client,
             previous_opinion=previous_opinion,
             opposing_points=opposing_points,
             disagreement_summary=disagreement_summary,
@@ -1371,7 +1376,6 @@ class MultiAgentService:
     ) -> AsyncIterator[str]:
         message_id = f"role-{round_index}-{role.key}"
         if cls._supports_native_agent(provider):
-            from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
             from services.agents.role_agent_executor import RoleAgentExecutor
 
             for attempt in range(1, cls.ROLE_MAX_ATTEMPTS + 1):
@@ -1386,6 +1390,12 @@ class MultiAgentService:
                     )
                 try:
                     llm = cls._create_llm_client(provider)
+                    if provider == "openai":
+                        from services.agents.providers.openai_agent_client import OpenAINativeAgentClient
+                        native_client = OpenAINativeAgentClient(llm)
+                    else:
+                        from services.agents.providers.gemini_agent_client import GeminiNativeAgentClient
+                        native_client = GeminiNativeAgentClient(llm)
                     executor = RoleAgentExecutor(
                         scene=scene,
                         role_id=role.key,
@@ -1402,7 +1412,7 @@ class MultiAgentService:
                             holdings_preview=holdings_preview,
                             account_balance=account_balance,
                         ),
-                        client=GeminiNativeAgentClient(llm),
+                        client=native_client,
                         previous_opinion=previous_opinion,
                         opposing_points=opposing_points,
                         disagreement_summary=disagreement_summary,

@@ -33,6 +33,8 @@ api.interceptors.response.use(
 
 // 类型定义
 
+export type AssetType = 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
+
 export interface IndustryFundamentalData {
   industry_key: string | null
   industry_name: string | null
@@ -73,7 +75,7 @@ export interface IndustryFundamentalRefreshResponse extends IndustryFundamentalL
 
 export interface PortfolioCreate {
   etf_code: string
-  asset_type?: 'auto' | 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
+  asset_type?: 'auto' | AssetType
   shares: number
   cost_price: number
   buy_date?: string
@@ -82,7 +84,7 @@ export interface PortfolioCreate {
 }
 
 export interface PortfolioUpdate {
-  asset_type?: 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
+  asset_type?: AssetType
   shares?: number
   cost_price?: number
   buy_date?: string
@@ -139,7 +141,7 @@ export interface PortfolioTrendSignal {
 export interface PortfolioWithMarket {
   id: number
   etf_code: string
-  asset_type: 'etf' | 'otc_fund' | 'stock' | 'cash' | 'money_fund'
+  asset_type: AssetType
   shares: number
   cost_price: number
   buy_date: string | null
@@ -267,6 +269,51 @@ export interface PortfolioSummary {
   rebalance_plan?: PortfolioRebalancePlan | null
 }
 
+
+export interface WatchlistItem {
+  id: number
+  code: string
+  name: string | null
+  asset_type: AssetType
+  note: string | null
+  sort_order: number
+  created_at: string
+  updated_at: string
+  current_price: number | null
+  change_pct: number | null
+  open_price: number | null
+  high_price: number | null
+  low_price: number | null
+  volume: number | null
+  amount: number | null
+  iopv: number | null
+  premium_rate: number | null
+  market_refreshed_at: string | null
+  is_holding: boolean
+  holding_market_value: number | null
+}
+
+export interface WatchlistCreate {
+  code: string
+  name?: string
+  asset_type?: AssetType
+  note?: string
+}
+
+export interface WatchlistUpdate {
+  name?: string | null
+  asset_type?: AssetType
+  note?: string | null
+  sort_order?: number
+}
+
+export interface WatchlistRefreshResponse {
+  success: boolean
+  message: string
+  refreshed: number
+  codes: string[]
+}
+
 export interface MarketQuote {
   code: string
   name: string
@@ -283,6 +330,7 @@ export interface MarketQuote {
 export interface KLineItem {
   trade_date: string
   trade_time?: string | null
+  provisional?: boolean
   open_price: number
   close_price: number
   high_price: number
@@ -307,6 +355,9 @@ export interface MarketHistoryResponse {
   name: string
   data: KLineItem[]
   indicators: TechnicalIndicators | null
+  latest_trade_date?: string | null
+  source?: string | null
+  has_provisional?: boolean
 }
 
 export interface EtfProfileResponse {
@@ -320,6 +371,12 @@ export interface EtfProfileResponse {
   errors: string[]
   source?: string | null
   refreshed_at?: string | null
+}
+
+export interface AdviceByCodeRequest {
+  code: string
+  name?: string | null
+  asset_type?: AssetType
 }
 
 export interface AdviceResponse {
@@ -817,6 +874,15 @@ export const portfolioApi = {
   delete: (id: number) => api.delete(`/portfolio/${id}`),
 }
 
+
+export const watchlistApi = {
+  getList: () => api.get<WatchlistItem[]>('/watchlist'),
+  create: (data: WatchlistCreate) => api.post<WatchlistItem>('/watchlist', data),
+  update: (id: number, data: WatchlistUpdate) => api.put<WatchlistItem>(`/watchlist/${id}`, data),
+  delete: (id: number) => api.delete(`/watchlist/${id}`),
+  refreshAll: () => api.post<WatchlistRefreshResponse>('/watchlist/refresh-all'),
+}
+
 export const marketApi = {
   getQuote: (code: string) => api.get<MarketQuote>(`/market/quote/${code}`),
   getHistory: (code: string, days = 60) => api.get<MarketHistoryResponse>(`/market/history/${code}`, { params: { days } }),
@@ -832,6 +898,7 @@ export const adviceApi = {
   analyzeAccount: () => api.post<AccountAnalysisResponse>('/advice/account-analysis'),
   getLatestAccountAnalysis: () => api.get<AccountAnalysisResponse | null>('/advice/account-analysis/latest'),
   generateForPortfolio: (portfolioId: number) => api.get<AdviceResponse>(`/advice/generate/${portfolioId}`),
+  generateForSymbol: (data: AdviceByCodeRequest) => api.post<AdviceResponse>('/advice/generate-symbol', data),
   getHistory: (limit = 50) => api.get<AdviceLogResponse[]>('/advice/history', { params: { limit } }),
   getLatest: () => api.get<Record<string, AdviceLogResponse>>('/advice/latest'),
 }

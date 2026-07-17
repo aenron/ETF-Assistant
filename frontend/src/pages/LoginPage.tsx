@@ -67,7 +67,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <CardTitle className="text-2xl">ETF投资智能体</CardTitle>
+          <CardTitle className="text-2xl">投资智能体</CardTitle>
         </CardHeader>
         <CardContent>
           <Tabs defaultValue="login" className="w-full">
@@ -79,13 +79,13 @@ export default function LoginPage() {
             <TabsContent value="login">
               <form onSubmit={handleLogin} className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="login-username">用户名</Label>
+                  <Label htmlFor="login-username">用户名 / 邮箱</Label>
                   <Input
                     id="login-username"
                     value={loginData.username}
                     onChange={(e) => setLoginData({ ...loginData, username: e.target.value })}
                     required
-                    placeholder="请输入用户名"
+                    placeholder="请输入用户名或邮箱"
                   />
                 </div>
                 <div className="space-y-2">

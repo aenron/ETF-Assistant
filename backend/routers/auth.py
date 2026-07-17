@@ -117,7 +117,7 @@ async def login(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
+            detail="用户名、邮箱或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
     

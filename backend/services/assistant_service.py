@@ -753,20 +753,25 @@ class AssistantService:
             summary = PortfolioService.build_summary_from_portfolios(portfolios, available_cash)
             total_assets = summary.total_assets if summary.total_assets is not None else summary.total_market_value + available_cash
             portfolio_lines = []
+            code_name_lines = []
             for item in portfolios:
                 asset_type = getattr(item, "asset_type", "etf") or "etf"
                 asset_label = asset_type_labels.get(asset_type, asset_type)
+                display_name = (item.etf_name or "名称未知").strip()
+                display_symbol = f"{display_name}（{item.etf_code}）" if display_name != "名称未知" else f"{item.etf_code}（名称未知）"
                 current_price = f"{item.current_price:.4f}" if item.current_price is not None else "N/A"
                 pnl_pct = f"{item.pnl_pct:.2f}%" if item.pnl_pct is not None else "N/A"
                 market_value = f"{item.market_value:.2f}" if item.market_value is not None else "0.00"
                 unit_label = "股数" if asset_type == "stock" else ("金额" if asset_type == "cash" else "份额")
                 cost_label = "成本净值" if asset_type == "otc_fund" else ("单位成本" if asset_type == "stock" else "成本")
                 price_label = "最新净值" if asset_type == "otc_fund" else ("账面单价" if asset_type in {"cash", "money_fund"} else "现价")
+                code_name_lines.append(f"- {item.etf_code}: {display_name} | 类型 {asset_label}")
                 portfolio_lines.append(
-                    f"- {item.etf_code} {item.etf_name or ''} | 类型 {asset_label} | {unit_label} {item.shares:.2f} | "
+                    f"- {display_symbol} | 类型 {asset_label} | {unit_label} {item.shares:.2f} | "
                     f"{cost_label} {item.cost_price:.4f} | {price_label} {current_price} | 盈亏 {pnl_pct} | 市值 {market_value}"
                 )
             portfolio_text = "\n".join(portfolio_lines) if portfolio_lines else "当前无持仓。"
+            code_name_text = "\n".join(code_name_lines) if code_name_lines else "当前无持仓映射。"
             portfolio_context = (
                 f"账户概况:\n"
                 f"- 账户总资产: {total_assets:.2f}\n"
@@ -777,6 +782,7 @@ class AssistantService:
                 f"- 今日盈亏: {f'{summary.today_pnl:.2f} ({summary.today_pnl_pct or 0:.2f}%)' if summary.today_pnl is not None else '暂无今日行情'}\n"
                 f"- 分类分布: {summary.category_distribution}\n\n"
                 f"{asset_guidance}\n"
+                f"标的代码名称映射（回答中引用这些标的时必须同时写名称和代码）:\n{code_name_text}\n\n"
                 f"当前持仓:\n{portfolio_text}\n\n"
             )
         else:
@@ -794,10 +800,12 @@ class AssistantService:
         return (
             f"{role_context}"
             "不要编造不存在的持仓、资产类型、收益数据或交易限制；如果上下文里没有，就明确说没有。"
+            "回答中凡引用当前持仓或上下文映射里的具体标的，必须同时输出名称和代码，优先使用“名称（代码）”格式；不要只写 159509 这类裸代码。"
+            "如果标的名称未知，需要写成“代码（名称未知）”，并说明需要刷新行情或资料来补全名称。"
             "不要把股票、场外基金、现金/货币基金强行当作ETF分析；不同资产必须使用不同风险口径。"
             f"{search_instruction}"
             "回答使用简体中文，优先简洁、直接、可操作。请直接输出 Markdown 正文，不要返回 JSON、代码块外壳或 response 字段包装。"
-            "如果适合，使用 Markdown 标题、项目符号、编号列表、加粗重点和分段来提升可读性。\n\n"
+            "如果适合，使用 Markdown 标题、项目符号、编号列表、加粗重点和分段来提升可读性；Markdown 标题（#、##、###）必须单独成行，标题前后保留空行，不要把 ## 今日结论 接在上一句话后面。\n\n"
             f"当前时间:\n"
             f"- {current_time}\n\n"
             f"{portfolio_context}"

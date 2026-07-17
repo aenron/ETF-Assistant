@@ -18,6 +18,7 @@ from models.strategy_run_cache import StrategyRunCache
 from models.macro_cycle_state import MacroCycleState
 from models.macro_indicator import MacroIndicator
 from models.multi_agent_run import MultiAgentRun
+from models.watchlist_item import WatchlistItem
 from models.user import User
 
 __all__ = [
@@ -41,5 +42,6 @@ __all__ = [
     "MacroCycleState",
     "MacroIndicator",
     "MultiAgentRun",
+    "WatchlistItem",
     "User",
 ]

@@ -1,7 +1,7 @@
 """用户认证服务"""
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 import bcrypt
 from jose import JWTError, jwt
@@ -101,20 +101,31 @@ class AuthService:
     
     @classmethod
     async def authenticate_user(cls, session: AsyncSession, username: str, password: str) -> Optional[User]:
-        """验证用户登录"""
+        """验证用户登录，支持用户名或邮箱作为登录标识"""
+        login_identifier = username.strip()
+        if not login_identifier:
+            return None
+
         result = await session.execute(
-            select(User).where(User.username == username)
+            select(User).where(User.username == login_identifier)
         )
         user = result.scalar_one_or_none()
-        
-        if not user:
-            return None
-        if not cls.verify_password(password, user.hashed_password):
-            return None
-        if not user.is_active:
-            return None
-        
-        return user
+        candidates = [user] if user else []
+
+        if not candidates and "@" in login_identifier:
+            result = await session.execute(
+                select(User).where(func.lower(User.email) == login_identifier.lower())
+            )
+            candidates = result.scalars().all()
+
+        for candidate in candidates:
+            if not cls.verify_password(password, candidate.hashed_password):
+                continue
+            if not candidate.is_active:
+                return None
+            return candidate
+
+        return None
     
     @staticmethod
     async def get_user_by_id(session: AsyncSession, user_id: int) -> Optional[User]:

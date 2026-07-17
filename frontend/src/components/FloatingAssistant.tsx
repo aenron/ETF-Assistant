@@ -21,12 +21,30 @@ function getAssistantPhaseText(message: AssistantMessage) {
   return ASSISTANT_PHASE_TEXT[message.stream_phase || 'calling_model']
 }
 
+function normalizeLooseMarkdownHeadings(content: string) {
+  const lines = content.split('\n')
+  let inFence = false
+
+  return lines.map((line) => {
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence
+      return line
+    }
+    if (inFence) return line
+
+    return line.replace(/([^\n])\s+(#{1,6})\s+([^#\n][^\n]*)/g, (_match, before, hashes, title) => {
+      return `${before}\n\n${hashes} ${title.trim()}`
+    })
+  }).join('\n')
+}
+
 function normalizeStreamingMarkdown(content: string) {
-  const fenceMatches = content.match(/```/g)
+  const normalized = normalizeLooseMarkdownHeadings(content)
+  const fenceMatches = normalized.match(/```/g)
   if (fenceMatches && fenceMatches.length % 2 === 1) {
-    return `${content}\n` + "```"
+    return `${normalized}\n` + "```"
   }
-  return content
+  return normalized
 }
 
 function CodeBlock({ className, children, ...props }: ComponentPropsWithoutRef<'code'>) {
@@ -533,26 +551,42 @@ export function FloatingAssistant() {
               {!loadingSessions && sessions.length === 0 && <div className="rounded-lg border border-dashed border-slate-200 bg-white px-3 py-4 text-xs text-muted-foreground">暂无会话，点击上方新建。</div>}
               <div className="space-y-1.5">
                 {sessions.map((session) => (
-                  <button
+                  <div
                     key={session.id}
-                    onClick={() => {
-                      setActiveSessionId(session.id)
-                      if (isMobile) {
-                        setShowMobileSessions(false)
-                      }
-                    }}
-                    className={`group relative w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${activeSessionId === session.id ? 'border-emerald-200 bg-white shadow-sm shadow-emerald-900/5' : 'border-transparent hover:border-slate-200 hover:bg-white'}`}
+                    className={`group relative rounded-lg border transition-colors ${activeSessionId === session.id ? 'border-emerald-200 bg-white shadow-sm shadow-emerald-900/5' : 'border-transparent hover:border-slate-200 hover:bg-white'}`}
                   >
                     {activeSessionId === session.id && <span className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r bg-emerald-500" />}
-                    <div className="truncate pr-2 text-[13px] font-medium text-slate-900">{session.title}</div>
-                    <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{session.last_message_preview || '暂无消息'}</div>
-                    <div className="mt-2 text-[10px] text-slate-400">{formatBeijingTime(session.updated_at, {
-                      month: '2-digit',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}</div>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveSessionId(session.id)
+                        if (isMobile) {
+                          setShowMobileSessions(false)
+                        }
+                      }}
+                      className="block w-full px-3 py-2.5 pr-10 text-left"
+                    >
+                      <div className="truncate text-[13px] font-medium text-slate-900">{session.title}</div>
+                      <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{session.last_message_preview || '暂无消息'}</div>
+                      <div className="mt-2 text-[10px] text-slate-400">{formatBeijingTime(session.updated_at, {
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}</div>
+                    </button>
+                    <button
+                      type="button"
+                      className="absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus:bg-red-50 focus:text-red-600"
+                      title="删除会话"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setSessionToDelete(session)
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>

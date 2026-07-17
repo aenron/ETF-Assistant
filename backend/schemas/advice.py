@@ -42,6 +42,13 @@ class AdviceGenerateRequest(ShanghaiBaseModel):
     etf_codes: Optional[List[str]] = None  # 为空则生成全部持仓建议
 
 
+class AdviceByCodeRequest(ShanghaiBaseModel):
+    """按代码生成观察建议，不要求已有持仓"""
+    code: str
+    name: Optional[str] = None
+    asset_type: str = "etf"
+
+
 class AdviceResponse(ShanghaiBaseModel):
     """单条建议"""
     etf_code: str

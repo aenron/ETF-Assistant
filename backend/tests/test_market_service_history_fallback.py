@@ -22,6 +22,56 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(MarketService._sina_symbol("688111"), "sh688111")
         self.assertEqual(MarketService._sina_symbol("513300"), "sh513300")
 
+    def test_expected_kline_min_date_uses_previous_trading_day_intraday(self) -> None:
+        from datetime import datetime
+        from utils.timezone import SHANGHAI_TZ
+
+        self.assertEqual(
+            MarketService._expected_kline_min_date(datetime(2026, 7, 7, 14, 30, tzinfo=SHANGHAI_TZ)),
+            date(2026, 7, 6),
+        )
+        self.assertEqual(
+            MarketService._expected_kline_min_date(datetime(2026, 7, 7, 15, 11, tzinfo=SHANGHAI_TZ)),
+            date(2026, 7, 7),
+        )
+
+    async def test_append_realtime_daily_point_marks_provisional(self) -> None:
+        from datetime import datetime
+        from utils.timezone import SHANGHAI_TZ
+
+        history = [
+            KLineItem(
+                trade_date=date(2026, 7, 6),
+                open_price=1.46,
+                close_price=1.49,
+                high_price=1.50,
+                low_price=1.45,
+                volume=1000,
+                amount=100000.0,
+                change_pct=1.8,
+            )
+        ]
+        quote = MarketQuote(
+            code="515080",
+            name="中证红利ETF招商",
+            price=1.473,
+            change_pct=-1.14,
+            open_price=1.492,
+            high_price=1.492,
+            low_price=1.464,
+            volume=2564587,
+            amount=377439400.0,
+            refreshed_at=datetime(2026, 7, 7, 14, 34, tzinfo=SHANGHAI_TZ),
+        )
+
+        with patch.object(MarketService, "get_quote_from_cache", new=AsyncMock(return_value=quote)):
+            result = await MarketService.append_realtime_daily_point("515080", history)
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[-1].provisional)
+        self.assertEqual(result[-1].trade_date, date(2026, 7, 7))
+        self.assertEqual(result[-1].close_price, 1.473)
+
     async def test_history_kline_uses_db_before_public_sources(self) -> None:
         db_kline = [
             KLineItem(
@@ -31,6 +81,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
                 high_price=1.03,
                 low_price=0.99,
                 volume=1000,
+                amount=1020.0,
                 change_pct=2.0,
             )
         ]
@@ -162,6 +213,68 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         qmt_fetch.assert_awaited_once_with("513300", 60)
         akshare_fetch.assert_not_called()
 
+    async def test_intraday_period_falls_back_to_5m_before_quote(self) -> None:
+        from datetime import datetime
+        from utils.timezone import SHANGHAI_TZ
+
+        five_minute_data = [KLineItem(
+            trade_date=date(2026, 7, 8),
+            trade_time=datetime(2026, 7, 8, 13, 20, tzinfo=SHANGHAI_TZ),
+            open_price=1.0,
+            close_price=1.01,
+            high_price=1.02,
+            low_price=0.99,
+            volume=1000,
+            amount=10000.0,
+            change_pct=0.0,
+        )]
+        calls: list[str] = []
+
+        async def qmt_fetch(_code: str, period: str, _limit: int):
+            calls.append(period)
+            return five_minute_data if period == "5m" else []
+
+        with (
+            patch.object(MarketService, "_fetch_intraday_kline_qmt_agent", new=qmt_fetch),
+            patch.object(MarketService, "_fetch_intraday_kline_eastmoney", new=AsyncMock(return_value=[])),
+            patch("services.market_service.now_in_shanghai", return_value=datetime(2026, 7, 8, 13, 25, tzinfo=SHANGHAI_TZ)),
+        ):
+            result, source = await MarketService.get_intraday_kline_with_source("589850", period="1m", limit=240)
+
+        self.assertEqual(source, "intraday_5m")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(calls, ["1m", "5m"])
+
+    async def test_intraday_falls_back_to_realtime_quote(self) -> None:
+        from datetime import datetime
+        from utils.timezone import SHANGHAI_TZ
+
+        quote = MarketQuote(
+            code="515080",
+            name="中证红利ETF招商",
+            price=1.473,
+            change_pct=0.14,
+            open_price=1.471,
+            high_price=1.491,
+            low_price=1.462,
+            volume=1640504,
+            amount=242263500.0,
+            refreshed_at=datetime(2026, 7, 8, 13, 15, tzinfo=SHANGHAI_TZ),
+        )
+
+        with (
+            patch.object(MarketService, "_fetch_intraday_kline_qmt_agent", new=AsyncMock(return_value=[])),
+            patch.object(MarketService, "_fetch_intraday_kline_eastmoney", new=AsyncMock(return_value=[])),
+            patch.object(MarketService, "get_quote_from_cache", new=AsyncMock(return_value=quote)),
+            patch("services.market_service.now_in_shanghai", return_value=datetime(2026, 7, 8, 13, 20, tzinfo=SHANGHAI_TZ)),
+        ):
+            result = await MarketService.get_intraday_kline("515080", period="1m", limit=240)
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0].provisional)
+        self.assertEqual(result[0].trade_date, date(2026, 7, 8))
+        self.assertEqual(result[0].close_price, 1.473)
+
     def test_qmt_dataframe_records_convert_to_kline_items(self) -> None:
         records = MarketService._qmt_records({
             "symbol": "513300.SH",
@@ -230,6 +343,22 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].amount, 123456.0)
 
+    def test_otc_fund_candidates_skip_listed_securities_and_existing_quotes(self) -> None:
+        existing = {
+            "001513": MarketQuote(code="001513", name="已有基金", price=1.0, change_pct=0.0),
+        }
+
+        result = MarketService._otc_fund_candidate_codes([
+            "000725",
+            "000811",
+            "515080",
+            "589850",
+            "001513",
+            "004432",
+        ], existing)
+
+        self.assertEqual(result, ["004432"])
+
     async def test_cache_quote_keeps_cached_name_when_new_quote_name_empty(self) -> None:
         cached_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.0, change_pct=0.0)
         fresh_quote = MarketQuote(code="513300", name="", price=1.2, change_pct=1.0)
@@ -258,6 +387,40 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["513300"].name, "纳斯达克ETF")
         self.assertEqual(result["513300"].price, 1.2)
+
+    def test_payload_summary_includes_safe_shape(self) -> None:
+        summary = MarketService._payload_summary({
+            "code": 0,
+            "message": "ok",
+            "item": {"type": "dataframe", "records": [], "columns": ["time", "close"]},
+            "data": {"records": [], "extra": "hidden"},
+            "items": [1, 2, 3],
+        })
+
+        self.assertIn("keys=", summary)
+        self.assertIn("code='0'", summary)
+        self.assertIn("item=dict", summary)
+        self.assertIn("records=list(len=0)", summary)
+        self.assertIn("data=dict", summary)
+        self.assertIn("items=list(len=3)", summary)
+
+    def test_eastmoney_intraday_breaker_opens_after_consecutive_failures(self) -> None:
+        key = MarketService._eastmoney_intraday_breaker_key("589850", "1m")
+        MarketService._EASTMONEY_INTRADAY_FAILURES.pop(key, None)
+        MarketService._EASTMONEY_INTRADAY_BREAKER_UNTIL.pop(key, None)
+
+        with patch("services.market_service.time.time", return_value=1000.0):
+            MarketService._record_eastmoney_intraday_failure("589850", "1m")
+            self.assertFalse(MarketService._is_eastmoney_intraday_breaker_open("589850", "1m"))
+            MarketService._record_eastmoney_intraday_failure("589850", "1m")
+            self.assertTrue(MarketService._is_eastmoney_intraday_breaker_open("589850", "1m"))
+            self.assertTrue(MarketService._is_eastmoney_intraday_breaker_open("589850", "5m"))
+
+        with patch("services.market_service.time.time", return_value=1200.0):
+            self.assertFalse(MarketService._is_eastmoney_intraday_breaker_open("589850", "1m"))
+
+        MarketService._EASTMONEY_INTRADAY_FAILURES.pop(key, None)
+        MarketService._EASTMONEY_INTRADAY_BREAKER_UNTIL.pop(key, None)
 
 
 if __name__ == "__main__":
