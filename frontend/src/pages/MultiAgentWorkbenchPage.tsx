@@ -200,7 +200,10 @@ function applyTranscriptEvent(messages: DebateChatMessage[], eventName: string, 
         roundIndex: payload.round_index,
         speaker: '系统',
         content: payload.title || `第 ${payload.round_index} 轮`,
-        detail: payload.summary,
+        detail: [
+          payload.summary,
+          Array.isArray(payload.roles) && payload.roles.length ? `本轮角色：${payload.roles.join('、')}` : '',
+        ].filter(Boolean).join('\n'),
       },
     ]
   }
@@ -214,12 +217,13 @@ function applyTranscriptEvent(messages: DebateChatMessage[], eventName: string, 
         roundIndex: payload.round_index,
         speaker: payload.role_name,
         content: '',
+        streaming: true,
       },
     ]
   }
   if (eventName === 'role_chunk') {
     return messages.map((item) => (
-      item.id === payload.message_id ? { ...item, content: `${item.content}${payload.content || ''}` } : item
+      item.id === payload.message_id ? { ...item, content: `${item.content}${payload.content || ''}`, streaming: true } : item
     ))
   }
   if (eventName === 'tool_call_start') {
@@ -238,12 +242,16 @@ function applyTranscriptEvent(messages: DebateChatMessage[], eventName: string, 
   }
   if (eventName === 'role_done') {
     const message = opinionToMessage(payload.opinion as MultiAgentRoleOpinion)
+    if (!messages.some((item) => item.id === payload.message_id)) {
+      return [...messages, { ...message, id: payload.message_id, streaming: false }]
+    }
     return messages.map((item) => (
       item.id === payload.message_id
-        ? { ...message, id: payload.message_id, detail: [item.detail, message.detail].filter(Boolean).join('\n\n') }
+        ? { ...message, id: payload.message_id, detail: [item.detail, message.detail].filter(Boolean).join('\n\n'), streaming: false }
         : item
     ))
   }
+  if (eventName === 'role_opinion') return [...messages, opinionToMessage(payload as MultiAgentRoleOpinion)]
   if (eventName === 'arbiter') return [...messages, arbiterToMessage(payload as MultiAgentArbiterSummary)]
   if (eventName === 'final') return [...messages, finalToMessage(payload as MultiAgentFinalConclusion)]
   if (eventName === 'error') {
@@ -821,112 +829,17 @@ export function MultiAgentWorkbenchPage() {
           if (!eventName || !dataLine) continue
 
           const payload = JSON.parse(dataLine)
-          if (eventName === 'status') {
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `status-${prev.length}-${Date.now()}`,
-                kind: 'status',
-                speaker: '系统',
-                content: payload.message || '处理中',
-              },
-            ])
-          }
-          if (eventName === 'round_start') {
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `round-${payload.round_index}-${prev.length}`,
-                kind: 'round',
-                roundIndex: payload.round_index,
-                speaker: '系统',
-                content: payload.title || `第 ${payload.round_index} 轮`,
-                detail: [
-                  payload.summary,
-                  Array.isArray(payload.roles) && payload.roles.length ? `本轮角色：${payload.roles.join('、')}` : '',
-                ].filter(Boolean).join('\n'),
-              },
-            ])
-          }
           if (eventName === 'context') {
             setLiveContext(payload as MultiAgentContextSummary)
-          }
-          if (eventName === 'role_start') {
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: payload.message_id,
-                kind: 'role',
-                roleId: payload.role_id,
-                roundIndex: payload.round_index,
-                speaker: payload.role_name,
-                content: '',
-                streaming: true,
-              },
-            ])
-          }
-          if (eventName === 'role_chunk') {
-            setChatMessages((prev) => prev.map((item) => (
-              item.id === payload.message_id
-                ? { ...item, content: `${item.content}${payload.content || ''}`, streaming: true }
-                : item
-            )))
-          }
-          if (eventName === 'tool_call_start') {
-            setChatMessages((prev) => prev.map((item) => (
-              item.id === payload.message_id
-                ? appendMessageDetail(
-                  item,
-                  `调用工具：${payload.tool_name}\n参数：${summarizeToolResult(payload.arguments || {})}`,
-                )
-                : item
-            )))
-          }
-          if (eventName === 'tool_call_done') {
-            setChatMessages((prev) => prev.map((item) => (
-              item.id === payload.message_id
-                ? appendMessageDetail(
-                  item,
-                  `工具结果：${payload.tool_name}\n${summarizeToolResult(payload.result || {})}`,
-                )
-                : item
-            )))
-          }
-          if (eventName === 'role_done') {
-            const message = opinionToMessage(payload.opinion as MultiAgentRoleOpinion)
-            setChatMessages((prev) => prev.map((item) => (
-              item.id === payload.message_id
-                ? { ...message, id: payload.message_id, detail: [item.detail, message.detail].filter(Boolean).join('\n\n'), streaming: false }
-                : item
-            )))
-          }
-          if (eventName === 'role_opinion') {
-            setChatMessages((prev) => [...prev, opinionToMessage(payload as MultiAgentRoleOpinion)])
-          }
-          if (eventName === 'arbiter') {
-            setChatMessages((prev) => [...prev, arbiterToMessage(payload as MultiAgentArbiterSummary)])
-          }
-          if (eventName === 'final') {
-            setChatMessages((prev) => [...prev, finalToMessage(payload as MultiAgentFinalConclusion)])
-          }
-          if (eventName === 'error') {
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `error-${prev.length}-${Date.now()}`,
-                kind: 'error',
-                speaker: '系统',
-                content: payload.message || '研判失败',
-              },
-            ])
-          }
-          if (eventName === 'done') {
+          } else if (eventName === 'done') {
             const run = payload as MultiAgentRunResponse
             setCurrentRun(run)
             setChatMessages(buildMessagesFromRun(run))
             setShowTranscript(!run.collapse_debate_by_default)
             setRuns((prev) => [run, ...prev.filter((item) => item.run_id !== run.run_id)])
             setMessageInput('')
+          } else {
+            setChatMessages((prev) => applyTranscriptEvent(prev, eventName, payload))
           }
         }
       }

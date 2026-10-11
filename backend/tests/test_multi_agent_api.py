@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ from schemas.multi_agent import (
     MultiAgentContextSummary,
     MultiAgentDebateRound,
     MultiAgentFinalConclusion,
+    MultiAgentRunCreate,
     MultiAgentRunListResponse,
     MultiAgentRunResponse,
     MultiAgentRunUpdate,
@@ -69,121 +71,32 @@ class MultiAgentApiTests(unittest.TestCase):
         self.app.dependency_overrides[auth_module.get_current_user] = get_current_user
         self.client = TestClient(self.app)
 
-    def test_create_run_returns_run_payload(self):
-        payload = MultiAgentRunResponse(
-            run_id=10,
-            title="最近黄金还能加吗",
-            scene=MultiAgentScene.GENERAL,
-            question="最近黄金还能加吗",
-            use_portfolio_context=True,
-            max_debate_rounds=3,
-            collapse_debate_by_default=True,
-            created_at="2026-05-07T15:06:02+08:00",
-            context_summary=MultiAgentContextSummary(
-                scenario=MultiAgentScene.GENERAL,
-                title="通用投资问答研判",
-                question="最近黄金还能加吗",
-                bullets=["用户问题：最近黄金还能加吗"],
-                metrics={},
-            ),
-            initial_role_opinions=[
-                MultiAgentRoleOpinion(
-                    round_index=1,
-                    role_id="researcher",
-                    role_name="研究员角色",
-                    stance="neutral",
-                    action="先看问题边界",
-                    summary="等待更多证据",
-                    evidence=["信息不足"],
-                    risk_notes=["波动较大"],
-                    confidence=61.0,
-                )
-            ],
-            debate_rounds=[
-                MultiAgentDebateRound(
-                    round_index=2,
-                    role_opinions=[],
-                    round_summary="仍需辩论",
-                    open_disagreements=["信息不足"],
-                    convergence_state="contested",
-                )
-            ],
-            search_metadata=[
-                MultiAgentSearchMetadata(
-                    query="黄金 最新 新闻 政策",
-                    answer=None,
-                    result_count=1,
-                    results=[{"title": "示例", "url": "https://example.com", "content": "snippet"}],
-                )
-            ],
-            arbiter_summary=MultiAgentArbiterSummary(
-                round_index=2,
-                consensus_reached=True,
-                why_stop="分歧可忽略",
-                strong_opposition=[],
-                confidence=76.0,
-                final_recommendation="hold",
-                recommended_action="继续观察",
-                conclusion="建议继续观察",
-                supporting_roles=["研究员角色"],
-                disagreements=[],
-                risk_notes=[],
-                convergence_state="converged",
-            ),
-            final_conclusion=MultiAgentFinalConclusion(
-                recommended_action="hold",
-                action="继续观察",
-                conclusion="证据不足时先观望",
-                confidence=66.0,
-                supporting_roles=["研究员角色"],
-                disagreements=[],
-                risk_notes=["未检索到可靠新信息"],
-            ),
-            status="success",
-        )
-
-        with patch("routers.multi_agent.MultiAgentService.create_run", new=AsyncMock(return_value=payload)):
-            response = self.client.post(
-                "/api/multi-agent/runs",
-                json={
-                    "scene": "general",
-                    "question": "最近黄金还能加吗",
-                    "use_portfolio_context": True,
-                    "max_debate_rounds": 3,
-                    "collapse_debate_by_default": True,
-                },
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["run_id"], 10)
-        self.assertEqual(response.json()["title"], "最近黄金还能加吗")
-        self.assertEqual(response.json()["final_conclusion"]["recommended_action"], "hold")
-        self.assertEqual(response.json()["max_debate_rounds"], 3)
-        self.assertEqual(response.json()["collapse_debate_by_default"], True)
-        self.assertEqual(len(response.json()["initial_role_opinions"]), 1)
-        self.assertIn("debate_rounds", response.json())
+    def test_create_run_uses_stream_endpoint_only(self):
+        post_paths = {
+            route.path
+            for route in multi_agent_router.routes
+            if "POST" in getattr(route, "methods", set())
+        }
+        self.assertEqual(post_paths, {"/api/multi-agent/runs/stream"})
 
     def test_stream_run_returns_event_stream(self):
         async def fake_stream(*args, **kwargs):
             yield 'event: status\ndata: {"message":"开始"}\n\n'
             yield 'event: done\ndata: {"run_id":1}\n\n'
 
-        with patch("routers.multi_agent.MultiAgentService.create_run_stream", new=fake_stream):
-            response = self.client.post(
-                "/api/multi-agent/runs/stream",
-                json={
-                    "scene": "general",
-                    "question": "最近黄金还能加吗",
-                    "use_portfolio_context": True,
-                    "max_debate_rounds": 3,
-                    "collapse_debate_by_default": True,
-                },
-            )
+        async def run_case():
+            with patch("routers.multi_agent.MultiAgentService.create_run_stream_with_managed_session", new=fake_stream):
+                response = await multi_agent_module.stream_run(
+                    request=MultiAgentRunCreate(scene=MultiAgentScene.GENERAL, question="最近黄金还能加吗"),
+                    current_user=await get_current_user(),
+                )
+                body = "".join([chunk async for chunk in response.body_iterator])
+                return response, body
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("text/event-stream", response.headers["content-type"])
-        self.assertIn("event: status", response.text)
-        self.assertIn("event: done", response.text)
+        response, body = asyncio.run(run_case())
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertIn("event: status", body)
+        self.assertIn("event: done", body)
 
     def test_list_runs_returns_history_wrapper(self):
         payload = MultiAgentRunResponse(

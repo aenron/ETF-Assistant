@@ -17,15 +17,6 @@ from services.multi_agent_service import MultiAgentService
 router = APIRouter(prefix="/api/multi-agent", tags=["multi-agent"])
 
 
-@router.post("/runs", response_model=MultiAgentRunResponse)
-async def create_run(
-    request: MultiAgentRunCreate,
-    db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    return await MultiAgentService.create_run(db, current_user.id, request)
-
-
 @router.post("/runs/stream")
 async def stream_run(
     request: MultiAgentRunCreate,

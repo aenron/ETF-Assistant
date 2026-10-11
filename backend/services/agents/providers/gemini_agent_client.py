@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -108,17 +107,24 @@ class GeminiNativeAgentClient(NativeAgentClient):
             "tool_config": self._tool_config(tools),
             "system_instruction": self._system_instruction(messages),
         }
-        response = await asyncio.to_thread(
-            self.llm.client.models.generate_content,
+        response_stream = await self.llm.client.aio.models.generate_content_stream(
             model=self.llm.model_name,
             contents=self._contents(messages),
             config=config,
         )
-        for call in self._extract_tool_calls(response):
-            yield AgentLLMEvent(type="tool_call", tool_call=call)
-        text = self._extract_text(response)
-        if text:
-            yield AgentLLMEvent(type="content", content=text)
+        call_index = 0
+        async for chunk in response_stream:
+            for call in self._extract_tool_calls(chunk):
+                call = AgentToolCall(
+                    id=f"gemini-call-{call_index}-{call.name}",
+                    name=call.name,
+                    arguments=call.arguments,
+                )
+                call_index += 1
+                yield AgentLLMEvent(type="tool_call", tool_call=call)
+            text = self._extract_text(chunk)
+            if text:
+                yield AgentLLMEvent(type="content", content=text)
         yield AgentLLMEvent(type="done")
 
     @staticmethod

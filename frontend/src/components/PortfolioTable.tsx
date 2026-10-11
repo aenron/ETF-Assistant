@@ -281,7 +281,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
       }
     } catch (error) {
       console.error('Failed to refresh quote:', error)
-      alert('刷新行情失败')
+      alert('刷新行情/净值失败')
     } finally {
       setRefreshingCode(null)
     }
@@ -564,7 +564,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     </div>
                     <div className="mt-1 text-sm text-muted-foreground">{p.etf_name || '-'}</div>
                     {p.current_price == null && (
-                      <div className="mt-2 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">行情缓存刷新中</div>
+                      <div className="mt-2 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">{isOtcFund(p) ? '净值缓存刷新中' : '行情缓存刷新中'}</div>
                     )}
                     <button
                       type="button"
@@ -646,7 +646,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                     variant="outline"
                     onClick={() => handleRefreshQuote(p.etf_code)}
                     disabled={refreshingCode === p.etf_code}
-                    title="刷新行情"
+                    title={isOtcFund(p) ? '刷新净值' : '刷新行情'}
                   >
                     <RefreshCw className={`h-3.5 w-3.5 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
                   </Button>
@@ -687,7 +687,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                 <th className="px-1.5 py-2 text-left">代码</th>
                 <th className="px-1.5 py-2 text-left">名称</th>
                 <th className="px-1.5 py-2 text-right"><SortHeader sortKey="shares">份额</SortHeader></th>
-                <th className="px-1.5 py-2 text-right">成本/现价</th>
+                <th className="px-1.5 py-2 text-right">成本/现价（净值）</th>
                 <th className="px-1.5 py-2 text-right"><SortHeader sortKey="market_value">市值</SortHeader></th>
                 <th className="px-1.5 py-2 text-right">盈亏</th>
                 <th className="px-1.5 py-2 text-right"><SortHeader sortKey="today_pnl_pct">今日涨跌</SortHeader></th>
@@ -707,7 +707,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                   </td>
                   <td className="px-1.5 py-2">
                     <div className="truncate" title={p.etf_name || '-'}>{p.etf_name || '-'}</div>
-                    {p.current_price == null && <div className="mt-1 truncate text-[11px] text-amber-700">行情缓存刷新中</div>}
+                    {p.current_price == null && <div className="mt-1 truncate text-[11px] text-amber-700">{isOtcFund(p) ? '净值缓存刷新中' : '行情缓存刷新中'}</div>}
                   </td>
                   <td className="px-1.5 py-2 text-right tabular-nums"><div className="truncate" title={p.shares.toLocaleString()}>{p.shares.toLocaleString()}</div></td>
                   <td className="px-1.5 py-2 text-right">
@@ -781,7 +781,7 @@ export function PortfolioTable({ portfolios, onRefresh }: PortfolioTableProps) {
                       className="h-7 w-7"
                       onClick={() => handleRefreshQuote(p.etf_code)}
                       disabled={refreshingCode === p.etf_code}
-                      title="刷新行情"
+                      title={isOtcFund(p) ? '刷新净值' : '刷新行情'}
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${refreshingCode === p.etf_code ? 'animate-spin' : ''}`} />
                     </Button>

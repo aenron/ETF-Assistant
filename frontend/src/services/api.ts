@@ -998,7 +998,6 @@ export const schedulerApi = {
 }
 
 export const multiAgentApi = {
-  createRun: (data: MultiAgentRunCreate) => api.post<MultiAgentRunResponse>('/multi-agent/runs', data),
   streamRun: async (data: MultiAgentRunCreate) =>
     fetch('/api/multi-agent/runs/stream', {
       method: 'POST',

@@ -152,17 +152,6 @@ class RoleAgentExecutor:
             rebuttals=self._string_list(raw.get("rebuttals"), limit=6),
         )
 
-    async def run(self) -> MultiAgentRoleOpinion:
-        final_text = ""
-        async for event in self.stream():
-            if event.type == "role_done":
-                opinion = event.payload.get("opinion")
-                if isinstance(opinion, MultiAgentRoleOpinion):
-                    return opinion
-            if event.type == "role_chunk":
-                final_text += str(event.payload.get("content") or "")
-        return self._normalize(self._extract_json(final_text))
-
     async def stream(self) -> AsyncIterator[AgentRunEvent]:
         message_id = f"role-{self.round_index}-{self.role_id}"
         yield AgentRunEvent(
