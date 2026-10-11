@@ -124,7 +124,12 @@ class OtcFundSupportTests(unittest.TestCase):
                 pass
 
             async def refresh(self, item):
-                pass
+                from datetime import datetime
+                # Emulate database-generated timestamps after flush/refresh.
+                if hasattr(item, "created_at") and item.created_at is None:
+                    item.created_at = datetime(2026, 10, 11)
+                if hasattr(item, "updated_at") and item.updated_at is None:
+                    item.updated_at = datetime(2026, 10, 11)
 
         async def run_test():
             session = FakeSession()

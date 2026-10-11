@@ -14,6 +14,7 @@ from routers.notification_config import router as notification_config_router
 from routers.watchlist import router as watchlist_router
 from config import settings
 from services.redis_service import RedisService
+from services.market.http_client import close_market_http_clients
 from services.scheduler import apply_scheduler_job_configs, start_scheduler, shutdown_scheduler
 from services.strategy_service import StrategyService
 
@@ -75,14 +76,38 @@ async def run_migrations():
         ("watchlist_item.asset_type_idx", "CREATE INDEX IF NOT EXISTS ix_watchlist_item_asset_type ON watchlist_item (asset_type)"),
     ]
 
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS schema_migration (version VARCHAR(120) PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)"
+        ))
+        applied = set((await conn.execute(text("SELECT version FROM schema_migration"))).scalars())
+
     for label, statement in migration_statements:
+        if label in applied:
+            continue
         try:
             async with engine.begin() as conn:
+                if label == "macro_indicator.drop_old_uq":
+                    # Preserve uniqueness while replacing the old two-column
+                    # constraint with the region-aware key. A constraint owns
+                    # its index and must be dropped before any standalone index.
+                    await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_macro_indicator_region_code_period ON macro_indicator (region, indicator_code, period)"))
+                    await conn.execute(text("ALTER TABLE macro_indicator DROP CONSTRAINT IF EXISTS uq_macro_indicator_code_period"))
                 await conn.execute(text(statement))
-            print(f"[Migration] 添加字段 {label}")
+                await conn.execute(text("INSERT INTO schema_migration (version) VALUES (:version)"), {"version": label})
+            print(f"[Migration] 已应用 {label}")
         except Exception as exc:
-            # PostgreSQL 中某条 DDL 失败会中止当前事务，这里必须逐条单独执行。
-            print(f"[Migration] 跳过字段 {label}: {exc}")
+            original = getattr(exc, "orig", exc)
+            sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            message = str(original).lower()
+            duplicate = sqlstate in {"42701", "42P07"} or "duplicate column name" in message
+            if not duplicate:
+                raise RuntimeError(f"Migration failed: {label}") from exc
+            # Existing databases predate the migration ledger. Record only known
+            # duplicate-column/index errors, never silently skip a real failure.
+            async with engine.begin() as conn:
+                await conn.execute(text("INSERT INTO schema_migration (version) VALUES (:version)"), {"version": label})
+
 
 
 async def ensure_admin_user():
@@ -128,6 +153,7 @@ async def lifespan(app: FastAPI):
     # 关闭时清理资源
     if settings.scheduler_enabled:
         shutdown_scheduler()
+    await close_market_http_clients()
     await RedisService.close()
 
 

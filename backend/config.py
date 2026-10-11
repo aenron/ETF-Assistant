@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import Literal
+from pydantic import Field, SecretStr
 
 
 class Settings(BaseSettings):
@@ -81,15 +82,23 @@ class Settings(BaseSettings):
     # Tushare 行情补充数据源
     tushare_token: str = ""
 
+    # 深交所公开网站行情，无需账户或密钥。
+    szse_enabled: bool = True
+
     # FRED 美国宏观数据 API Key；为空时使用 FRED CSV 公开下载端点
     fred_api_key: str = ""
 
     # 智兔数服行情数据源，用于ETF实时行情和指数历史行情补充
     zhitu_token: str = ""
+    zhitu_realtime_enabled: bool = False
 
-    # QMT Agent 行情数据源
-    qmt_agent_base_url: str = ""
-    qmt_agent_token: str = ""
+    # 东方财富妙想官方金融数据接口；未配置密钥时自动跳过。
+    mx_enabled: bool = True
+    mx_apikey: SecretStr = SecretStr("")
+    mx_timeout_seconds: float = Field(default=35.0, ge=1, le=60)
+    mx_min_interval_seconds: float = Field(default=3.0, ge=0)
+    mx_quote_cache_seconds: int = Field(default=300, ge=1)
+    mx_history_cache_seconds: int = Field(default=7200, ge=1)
     
     class Config:
         env_file = ".env"

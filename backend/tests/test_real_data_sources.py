@@ -62,23 +62,23 @@ class RealDataSourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_quote_enrichment_keeps_price_and_adds_iopv(self) -> None:
         from schemas.market import MarketQuote
 
-        qmt_quote = MarketService._merge_quote(
+        exchange_quote = MarketService._merge_quote(
             existing=MarketQuote(code="513300", name="纳斯达克ETF", price=1.05, change_pct=1.2),
             incoming=MarketQuote(code="513300", name="纳斯达克ETF", price=1.04, change_pct=1.1, iopv=1.0, premium_rate=5.0),
         )
 
-        self.assertEqual(qmt_quote.price, 1.05)
-        self.assertEqual(qmt_quote.iopv, 1.0)
-        self.assertEqual(qmt_quote.premium_rate, 5.0)
+        self.assertEqual(exchange_quote.price, 1.05)
+        self.assertEqual(exchange_quote.iopv, 1.0)
+        self.assertEqual(exchange_quote.premium_rate, 5.0)
 
     async def test_fetch_quotes_continues_to_akshare_when_quote_lacks_iopv(self) -> None:
         from schemas.market import MarketQuote
 
-        qmt_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.05, change_pct=1.2)
+        exchange_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.05, change_pct=1.2)
         iopv_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.04, change_pct=1.1, iopv=1.0, premium_rate=5.0)
 
         with (
-            patch.object(MarketService, "_fetch_from_qmt_agent", new=AsyncMock(return_value={"513300": qmt_quote})),
+            patch.object(MarketService, "_fetch_from_sse_api", new=AsyncMock(return_value={"513300": exchange_quote})),
             patch.object(MarketService, "_fetch_from_eastmoney_api", new=AsyncMock(return_value={})),
             patch.object(MarketService, "_fetch_from_akshare_etf_spot", new=AsyncMock(return_value={"513300": iopv_quote})) as akshare_fetch,
             patch.object(MarketService, "cache_quote", new=AsyncMock(side_effect=lambda _code, quote: quote)),

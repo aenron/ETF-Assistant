@@ -10,6 +10,8 @@ sys.path.insert(0, str(backend_root))
 from schemas.market import KLineItem
 from schemas.market import MarketQuote
 from services.market_service import MarketService
+from services.miaoxiang_service import MiaoxiangService
+from services.szse_service import SzseService
 from utils.timezone import now_in_shanghai
 
 
@@ -149,11 +151,14 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
+            patch.object(MarketService, "_fetch_history_kline_zhitu_index", new=AsyncMock(return_value=[])),
+            patch.object(MarketService, "_fetch_history_kline_sse", new=AsyncMock(return_value=[])),
+            patch.object(SzseService, "fetch_history", new=AsyncMock(return_value=[])),
+            patch.object(MiaoxiangService, "fetch_history", new=AsyncMock(return_value=[])),
             patch.object(MarketService, "_fetch_history_kline_ths_industry", return_value=[]),
             patch.object(MarketService, "get_kline_from_cache", new=AsyncMock(return_value=None)),
             patch.object(MarketService, "get_kline_from_longer_cache", new=AsyncMock(return_value=None)),
             patch.object(MarketService, "get_kline_from_db", new=AsyncMock(return_value=None)),
-            patch.object(MarketService, "_fetch_history_kline_qmt_agent", new=AsyncMock(return_value=[])),
             patch.object(MarketService, "_fetch_history_kline_akshare", return_value=[]),
             patch.object(MarketService, "_fetch_history_kline_akshare_stock", return_value=[]),
             patch.object(MarketService, "_fetch_history_kline_eastmoney", new=AsyncMock(return_value=[])),
@@ -178,8 +183,8 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         sina_fetch.assert_awaited_once_with("513300", 60)
         otc_fetch.assert_not_called()
 
-    async def test_qmt_agent_runs_before_public_history_sources(self) -> None:
-        qmt_kline = [
+    async def test_sse_runs_before_secondary_history_sources(self) -> None:
+        sse_kline = [
             KLineItem(
                 trade_date=date(2026, 5, 8),
                 open_price=1.0,
@@ -196,7 +201,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
             patch.object(MarketService, "get_kline_from_cache", new=AsyncMock(return_value=None)),
             patch.object(MarketService, "get_kline_from_longer_cache", new=AsyncMock(return_value=None)),
             patch.object(MarketService, "get_kline_from_db", new=AsyncMock(return_value=None)),
-            patch.object(MarketService, "_fetch_history_kline_qmt_agent", new=AsyncMock(return_value=qmt_kline)) as qmt_fetch,
+            patch.object(MarketService, "_fetch_history_kline_sse", new=AsyncMock(return_value=sse_kline)) as sse_fetch,
             patch.object(MarketService, "_fetch_history_kline_akshare", return_value=[]) as akshare_fetch,
             patch.object(MarketService, "cache_kline", new=AsyncMock()),
             patch.object(MarketService, "_cache_and_store_kline", new=AsyncMock()),
@@ -209,8 +214,8 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
             result = await MarketService.get_history_kline("513300", days=60)
 
-        self.assertEqual(result, qmt_kline)
-        qmt_fetch.assert_awaited_once_with("513300", 60)
+        self.assertEqual(result, sse_kline)
+        sse_fetch.assert_awaited_once_with("513300", 60)
         akshare_fetch.assert_not_called()
 
     async def test_intraday_period_falls_back_to_5m_before_quote(self) -> None:
@@ -230,12 +235,12 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         )]
         calls: list[str] = []
 
-        async def qmt_fetch(_code: str, period: str, _limit: int):
+        async def sse_fetch(_code: str, period: str, _limit: int):
             calls.append(period)
             return five_minute_data if period == "5m" else []
 
         with (
-            patch.object(MarketService, "_fetch_intraday_kline_qmt_agent", new=qmt_fetch),
+            patch.object(MarketService, "_fetch_intraday_kline_sse", new=sse_fetch),
             patch.object(MarketService, "_fetch_intraday_kline_eastmoney", new=AsyncMock(return_value=[])),
             patch("services.market_service.now_in_shanghai", return_value=datetime(2026, 7, 8, 13, 25, tzinfo=SHANGHAI_TZ)),
         ):
@@ -263,7 +268,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch.object(MarketService, "_fetch_intraday_kline_qmt_agent", new=AsyncMock(return_value=[])),
+            patch.object(MarketService, "_fetch_intraday_kline_sse", new=AsyncMock(return_value=[])),
             patch.object(MarketService, "_fetch_intraday_kline_eastmoney", new=AsyncMock(return_value=[])),
             patch.object(MarketService, "get_quote_from_cache", new=AsyncMock(return_value=quote)),
             patch("services.market_service.now_in_shanghai", return_value=datetime(2026, 7, 8, 13, 20, tzinfo=SHANGHAI_TZ)),
@@ -275,53 +280,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].trade_date, date(2026, 7, 8))
         self.assertEqual(result[0].close_price, 1.473)
 
-    def test_qmt_dataframe_records_convert_to_kline_items(self) -> None:
-        records = MarketService._qmt_records({
-            "symbol": "513300.SH",
-            "item": {
-                "type": "dataframe",
-                "columns": ["time", "open", "high", "low", "close", "volume", "amount"],
-                "records": [
-                    {
-                        "time": "20260508",
-                        "open": 1.0,
-                        "high": 1.03,
-                        "low": 0.99,
-                        "close": 1.02,
-                        "volume": 1000,
-                        "amount": 123456.0,
-                    }
-                ],
-            },
-        })
 
-        self.assertEqual(len(records), 1)
-        self.assertEqual(MarketService._qmt_timestamp_to_date(records[0]["time"]), date(2026, 5, 8))
-        self.assertEqual(records[0]["amount"], 123456.0)
-
-    async def test_qmt_history_keeps_amount_on_kline_items(self) -> None:
-        payload = {
-            "item": {
-                "type": "records",
-                "records": [
-                    {
-                        "time": "20260508",
-                        "open": 1.0,
-                        "high": 1.03,
-                        "low": 0.99,
-                        "close": 1.02,
-                        "volume": 1000,
-                        "amount": 123456.0,
-                    }
-                ],
-            }
-        }
-
-        with patch.object(MarketService, "_fetch_qmt_agent", new=AsyncMock(return_value=payload)):
-            result = await MarketService._fetch_history_kline_qmt_agent("513300", days=60)
-
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].amount, 123456.0)
 
     def test_ohlcv_dataframe_keeps_amount_on_kline_items(self) -> None:
         pd = __import__("pandas")
@@ -359,6 +318,30 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, ["004432"])
 
+    def test_otc_fund_daily_snapshot_keeps_name_and_nav(self) -> None:
+        pd = __import__("pandas")
+        snapshot = MarketService._otc_fund_daily_snapshot_from_df(pd.DataFrame([
+            {"基金代码": "025857", "基金简称": "华夏中证电网设备主题ETF发起式联接C", "单位净值": 1.2345, "日增长率": 0.56},
+            {"基金代码": "000000", "基金简称": "无效净值基金", "单位净值": 0, "日增长率": 0},
+        ]))
+
+        self.assertEqual(snapshot["025857"]["name"], "华夏中证电网设备主题ETF发起式联接C")
+        self.assertEqual(snapshot["025857"]["price"], 1.2345)
+        self.assertEqual(snapshot["025857"]["change_pct"], 0.56)
+        self.assertNotIn("000000", snapshot)
+
+    async def test_otc_fund_daily_quote_uses_name_and_latest_nav(self) -> None:
+        snapshot = {
+            "025857": {"name": "华夏中证电网设备主题ETF发起式联接C", "price": 1.2345, "change_pct": 0.56},
+        }
+        with patch.object(MarketService, "_get_otc_fund_daily_snapshot", new=AsyncMock(return_value=snapshot)):
+            result = await MarketService._fetch_from_otc_fund_daily_api(["025857"])
+
+        quote = result["025857"]
+        self.assertEqual(quote.name, "华夏中证电网设备主题ETF发起式联接C")
+        self.assertEqual(quote.price, 1.2345)
+        self.assertEqual(quote.change_pct, 0.56)
+
     async def test_cache_quote_keeps_cached_name_when_new_quote_name_empty(self) -> None:
         cached_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.0, change_pct=0.0)
         fresh_quote = MarketQuote(code="513300", name="", price=1.2, change_pct=1.0)
@@ -374,13 +357,15 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.name, "纳斯达克ETF")
         redis_set.assert_awaited_once()
 
-    async def test_public_quote_source_enriches_qmt_empty_name(self) -> None:
-        qmt_quote = MarketQuote(code="513300", name="", price=1.2, change_pct=1.0)
+    async def test_public_quote_source_enriches_exchange_empty_name(self) -> None:
+        exchange_quote = MarketQuote(code="513300", name="", price=1.2, change_pct=1.0)
         public_quote = MarketQuote(code="513300", name="纳斯达克ETF", price=1.19, change_pct=0.8)
 
         with (
-            patch.object(MarketService, "_fetch_from_qmt_agent", new=AsyncMock(return_value={"513300": qmt_quote})),
-            patch.object(MarketService, "_fetch_from_eastmoney_api", new=AsyncMock(return_value={"513300": public_quote})),
+            patch.object(MarketService, "_fetch_from_sse_api", new=AsyncMock(return_value={"513300": exchange_quote})),
+            patch.object(SzseService, "fetch_quotes", new=AsyncMock(return_value={})),
+            patch.object(MarketService, "_fetch_from_sina_api", new=AsyncMock(return_value={"513300": public_quote})),
+            patch.object(MarketService, "_fetch_from_akshare_etf_spot", new=AsyncMock(return_value={})),
             patch.object(MarketService, "cache_quote", new=AsyncMock(side_effect=lambda _code, quote: quote)),
         ):
             result = await MarketService._fetch_quotes_from_akshare(["513300"])
@@ -388,21 +373,6 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["513300"].name, "纳斯达克ETF")
         self.assertEqual(result["513300"].price, 1.2)
 
-    def test_payload_summary_includes_safe_shape(self) -> None:
-        summary = MarketService._payload_summary({
-            "code": 0,
-            "message": "ok",
-            "item": {"type": "dataframe", "records": [], "columns": ["time", "close"]},
-            "data": {"records": [], "extra": "hidden"},
-            "items": [1, 2, 3],
-        })
-
-        self.assertIn("keys=", summary)
-        self.assertIn("code='0'", summary)
-        self.assertIn("item=dict", summary)
-        self.assertIn("records=list(len=0)", summary)
-        self.assertIn("data=dict", summary)
-        self.assertIn("items=list(len=3)", summary)
 
     def test_eastmoney_intraday_breaker_opens_after_consecutive_failures(self) -> None:
         key = MarketService._eastmoney_intraday_breaker_key("589850", "1m")
