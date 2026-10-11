@@ -97,6 +97,8 @@ class ThsProviderMixin(MarketFormatMixin):
             low_price=latest.low_price,
             volume=latest.volume,
             amount=latest.amount,
+            refreshed_at=cls._timestamp_to_datetime(f"{latest.trade_date} 15:00:00"),
+            quote_type="daily",
         )
 
 

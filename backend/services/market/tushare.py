@@ -93,8 +93,10 @@ class TushareProviderMixin(MarketFormatMixin):
                         open_price=cls._to_float(row.get("open")),
                         high_price=cls._to_float(row.get("high")),
                         low_price=cls._to_float(row.get("low")),
-                        volume=cls._to_int(row.get("vol")),
-                        amount=cls._to_float(row.get("amount")),
+                        volume=(cls._to_int(row.get("vol")) or 0) * 100,
+                        quote_type="daily",
+                        refreshed_at=cls._timestamp_to_datetime(str(row.get("trade_date")) + "150000"),
+                        amount=(cls._to_float(row.get("amount")) * 1000 if cls._to_float(row.get("amount")) is not None else None),
                     )
                     break
                 except Exception as e:
@@ -136,8 +138,8 @@ class TushareProviderMixin(MarketFormatMixin):
                         close_price=float(row.get("close") or 0),
                         high_price=float(row.get("high") or 0),
                         low_price=float(row.get("low") or 0),
-                        volume=cls._to_int(row.get("vol")) or 0,
-                        amount=cls._to_float(row.get("amount")),
+                        volume=(cls._to_int(row.get("vol")) or 0) * 100,
+                        amount=(cls._to_float(row.get("amount")) * 1000 if cls._to_float(row.get("amount")) is not None else None),
                         change_pct=float(row.get("pct_chg") or 0),
                     ))
                 if result:

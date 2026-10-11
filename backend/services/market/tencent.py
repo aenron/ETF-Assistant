@@ -70,6 +70,7 @@ class TencentProviderMixin(MarketFormatMixin):
                 low_price=cls._to_float(parts[34]),
                 volume=volume_lots * 100 if volume_lots is not None else None,
                 amount=amount,
+                refreshed_at=cls._timestamp_to_datetime(parts[30]),
             )
         return result
 

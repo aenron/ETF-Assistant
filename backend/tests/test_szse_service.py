@@ -142,8 +142,8 @@ class SzseRequestTests(unittest.IsolatedAsyncioTestCase):
             patch.object(MarketService, "_fetch_history_kline_sina", AsyncMock()) as sina,
             patch.object(MarketService, "_cache_and_store_kline", AsyncMock()) as store,
         ):
-            self.assertEqual(await MarketService.get_history_kline("159915", 2, prefer_cache=False), bars)
-            store.assert_awaited_once_with("159915", 2, bars)
+            self.assertEqual(await MarketService.get_history_kline("159915", 2, prefer_cache=False), MarketService._prepare_kline(bars, "szse_history"))
+            store.assert_awaited_once_with("159915", 2, MarketService._prepare_kline(bars, "szse_history"))
             mx.assert_not_awaited()
             sina.assert_not_awaited()
 

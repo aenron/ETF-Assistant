@@ -325,9 +325,16 @@ export interface MarketQuote {
   volume: number | null
   amount: number | null
   refreshed_at: string | null
+  fetched_at?: string | null
+  source?: string | null
+  quote_type?: "realtime" | "daily" | "nav" | "estimate"
+  stale?: boolean
 }
 
 export interface KLineItem {
+  source?: string | null
+  adjustment?: "none" | "qfq" | "hfq"
+  amount_estimated?: boolean
   trade_date: string
   trade_time?: string | null
   provisional?: boolean

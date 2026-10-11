@@ -61,6 +61,8 @@ class OtcProviderMixin(MarketFormatMixin):
             code=code,
             name=str(data.get("name") or ""),
             price=price,
+            refreshed_at=cls._timestamp_to_datetime(data.get("gztime") or data.get("jzrq")),
+            quote_type="estimate" if cls._to_float(data.get("gsz")) else "nav",
             change_pct=cls._to_float(data.get("gszzl")) or 0.0,
             open_price=None,
             high_price=None,
@@ -135,6 +137,7 @@ class OtcProviderMixin(MarketFormatMixin):
             snapshot[code] = {
                 "name": str(row.get("基金简称") or "").strip(),
                 "price": price,
+                "nav_date": str(row.get("净值日期") or ""),
                 "change_pct": cls._to_float(row.get("日增长率")) or 0.0,
             }
         return snapshot
@@ -175,6 +178,8 @@ class OtcProviderMixin(MarketFormatMixin):
             code=code,
             name="",
             price=latest.close_price,
+            refreshed_at=cls._timestamp_to_datetime(str(latest.trade_date)),
+            quote_type="nav",
             change_pct=latest.change_pct,
             open_price=None,
             high_price=None,
@@ -220,6 +225,8 @@ class OtcProviderMixin(MarketFormatMixin):
                 code=code,
                 name=str(item.get("name") or ""),
                 price=cls._to_float(item.get("price")) or 0.0,
+                refreshed_at=cls._timestamp_to_datetime(item.get("nav_date")),
+                quote_type="nav",
                 change_pct=cls._to_float(item.get("change_pct")) or 0.0,
                 open_price=None,
                 high_price=None,

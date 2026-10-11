@@ -1,4 +1,4 @@
-from sqlalchemy import String, Numeric, BigInteger, DateTime, Date, UniqueConstraint
+from sqlalchemy import String, Numeric, BigInteger, DateTime, Date, UniqueConstraint, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import date
 from decimal import Decimal
@@ -19,3 +19,6 @@ class MarketDaily(Base):
     volume: Mapped[int | None] = mapped_column(BigInteger)
     amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     change_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    source: Mapped[str | None] = mapped_column(String(64))
+    adjustment: Mapped[str] = mapped_column(String(10), default="none", server_default="none", nullable=False)
+    amount_estimated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)

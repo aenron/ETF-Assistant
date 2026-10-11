@@ -20,7 +20,7 @@ class MarketOptimizationTests(unittest.IsolatedAsyncioTestCase):
         async with engine.begin() as conn:
             await conn.run_sync(MarketDaily.__table__.create)
         maker = async_sessionmaker(engine, expire_on_commit=False)
-        bars = [KLineItem(trade_date=date(2026, 1, 1), open_price=1, close_price=1.1, high_price=1.2, low_price=.9, volume=100, amount=110, change_pct=10)]
+        bars = [KLineItem(trade_date=date(2026, 1, 1), open_price=1, close_price=1.1, high_price=1.2, low_price=.9, volume=100, amount=110, change_pct=10, source="sse_history", amount_estimated=True)]
         async with maker() as session:
             statements.clear()
             await MarketService.save_market_daily(session, '159915', bars + bars)
@@ -31,6 +31,9 @@ class MarketOptimizationTests(unittest.IsolatedAsyncioTestCase):
             rows = (await session.execute(select(MarketDaily))).scalars().all()
             self.assertEqual(len(rows), 1)
             self.assertEqual(float(rows[0].amount), 120)
+            self.assertEqual(rows[0].source, "sse_history")
+            self.assertEqual(rows[0].adjustment, "none")
+            self.assertTrue(rows[0].amount_estimated)
         await engine.dispose()
 
     async def test_http_client_is_reused_and_closed(self):

@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import time
 
 
-# 设置环境变量模拟浏览器
 
 from models import MarketDaily
 from schemas.market import MarketQuote, KLineItem, EtfSearchResult
@@ -30,11 +29,11 @@ from services.market.indicators import TechnicalIndicatorMixin
 
 
 class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMixin):
-    """行情服务 - AKShare封装"""
+    """Market source orchestration, cache policy and historical storage."""
 
     # Redis缓存key
-    REDIS_KEY_QUOTE_PREFIX = "etf:quote:"
-    REDIS_KEY_KLINE_PREFIX = "etf:kline:"
+    REDIS_KEY_QUOTE_PREFIX = "etf:quote:v2:"
+    REDIS_KEY_KLINE_PREFIX = "etf:kline:v2:"
     REDIS_KEY_PROFILE_PREFIX = "etf:profile:"
     REDIS_KEY_OTC_FUND_DAILY_SNAPSHOT = "fund:otc:daily_snapshot"
     REDIS_KEY_ALL_QUOTES = "etf:all_quotes"
@@ -76,11 +75,42 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         cached = await RedisService.get(f"{cls.REDIS_KEY_QUOTE_PREFIX}{code}")
         if cached and "data" in cached:
             data = dict(cached["data"])
-            data["refreshed_at"] = data.get("refreshed_at") or cached.get("cached_at")
+            data["refreshed_at"] = data.get("refreshed_at")
             quote = MarketQuote(**data)
+            quote = quote.model_copy(update={"stale": not cls._quote_is_fresh(quote)})
             cls._log_quote_source(code, "redis_cache", quote)
             return quote
         return None
+
+    @staticmethod
+    def _quote_is_fresh(quote: MarketQuote, now: Optional[datetime] = None) -> bool:
+        current = now or now_in_shanghai()
+        stamp = quote.refreshed_at
+        if stamp is None or quote.price <= 0:
+            return False
+        stamp = stamp.astimezone(SHANGHAI_TZ) if stamp.tzinfo else stamp.replace(tzinfo=SHANGHAI_TZ)
+        age = (current - stamp).total_seconds()
+        if age < -60 or age > 10 * 86400:
+            return False
+        if quote.quote_type in {"nav", "estimate"}:
+            return age <= 4 * 86400
+        trading = current.weekday() < 5 and (
+            datetime_time(9, 15) <= current.time() <= datetime_time(11, 35)
+            or datetime_time(13) <= current.time() <= datetime_time(15, 5)
+        )
+        if trading:
+            return quote.quote_type == "realtime" and age <= 180
+        expected = current.date()
+        if current.time() < datetime_time(9, 15):
+            expected -= timedelta(days=1)
+        while expected.weekday() >= 5:
+            expected -= timedelta(days=1)
+        # Lunch break: morning close is current-session data.
+        return stamp.date() >= expected
+
+    @classmethod
+    def _prepare_kline(cls, data: List[KLineItem], source: str) -> List[KLineItem]:
+        return cls._normalize_kline_amounts([item.model_copy(update={"source": source}) for item in data])
 
     @classmethod
     def _kline_cache_key(cls, code: str, days: int) -> str:
@@ -160,6 +190,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             trade_date=quote_date,
             trade_time=refreshed_at,
             provisional=True,
+            source=quote.source,
             open_price=open_price,
             close_price=quote.price,
             high_price=high_price,
@@ -202,7 +233,8 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         logger.info(
             f"[MarketService] 数据来源 kline code={code} source={source} rows={total_rows} "
             f"latest={latest.trade_date} close={latest.close_price:.4f} "
-            f"amount={latest_amount:.2f} amount_rate={amount_rate:.1f}%"
+            f"amount={latest_amount:.2f} amount_rate={amount_rate:.1f}% "
+            f"estimated_rows={sum(item.amount_estimated for item in data)}"
         )
 
     @classmethod
@@ -216,7 +248,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
                 if avg_price > 0:
                     amount = float(item.volume) * avg_price
             if amount != item.amount:
-                item = item.model_copy(update={"amount": amount})
+                item = item.model_copy(update={"amount": amount, "amount_estimated": True})
             normalized.append(item)
         return normalized
 
@@ -278,7 +310,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             async with async_session_maker() as session:
                 result = await session.execute(
                     select(MarketDaily)
-                    .where(MarketDaily.etf_code == code)
+                    .where(MarketDaily.etf_code == code, MarketDaily.source.is_not(None), MarketDaily.adjustment == "none")
                     .order_by(MarketDaily.trade_date.desc())
                     .limit(days)
                 )
@@ -287,7 +319,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             logger.info(f"[MarketService] 数据库K线读取失败: {code}, {e}")
             return None
 
-        min_rows = min(days, 30)
+        min_rows = days
         if len(rows) < min_rows:
             logger.info(f"[MarketService] 数据库K线缓存不足: {code}, {len(rows)}/{min_rows} 条")
             return None
@@ -303,6 +335,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
                 volume=int(row.volume or 0),
                 amount=float(row.amount) if getattr(row, "amount", None) is not None else None,
                 change_pct=float(row.change_pct) if row.change_pct is not None else 0.0,
+                source=row.source, adjustment=row.adjustment, amount_estimated=row.amount_estimated,
             )
             for row in rows
         ]
@@ -350,7 +383,8 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             if cached_quote and cached_quote.name:
                 quote = quote.model_copy(update={"name": cached_quote.name})
 
-        quote_with_time = cls._with_refresh_time(quote, quote.refreshed_at)
+        quote_with_time = quote if quote.source else cls._with_refresh_time(quote, quote.refreshed_at)
+        quote_with_time = quote_with_time.model_copy(update={"fetched_at": now_in_shanghai(), "stale": not cls._quote_is_fresh(quote_with_time)})
         if settings.redis_enabled:
             cache_data = {
                 "data": quote_with_time.model_dump(mode="json"),
@@ -367,33 +401,24 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
     @classmethod
     async def get_quotes_for_codes(cls, codes: List[str]) -> Dict[str, MarketQuote]:
         """获取指定ETF代码的行情（优先从Redis缓存，失败时使用旧缓存）"""
-        result = {}
-        uncached_codes = []
-
-        # 先从Redis获取
-        for code in codes:
-            cached = await cls.get_quote_from_cache(code)
-            if cached:
-                result[code] = cached
-            else:
-                uncached_codes.append(code)
-
-        # 未缓存的从AKShare获取
-        if uncached_codes:
+        result: Dict[str, MarketQuote] = {}
+        stale: Dict[str, MarketQuote] = {}
+        for code in dict.fromkeys(codes):
+            quote = await cls.get_quote_from_cache(code)
+            if quote and cls._quote_is_fresh(quote):
+                result[code] = quote
+            elif quote:
+                stale[code] = quote.model_copy(update={"stale": True})
+        missing = [code for code in dict.fromkeys(codes) if code not in result]
+        if missing:
             try:
-                quotes = await cls._fetch_quotes_from_akshare(uncached_codes)
-                for code, quote in quotes.items():
-                    result[code] = quote
-            except Exception as e:
-                logger.info(f"[MarketService] ✗ 获取行情失败: {e}")
-                # 尝试从旧缓存获取（即使过期）
-                for code in uncached_codes:
-                    if code not in result:
-                        cached = await cls._get_expired_cache(code)
-                        if cached:
-                            logger.info(f"[MarketService] ⚠ 使用过期缓存数据: {code}")
-                            result[code] = cached
-
+                refreshed = await cls.refresh_quotes(missing)
+                result.update({code: quote for code, quote in refreshed.items() if quote.price > 0})
+            except Exception as exc:
+                logger.warning("Quote refresh failed: %s", type(exc).__name__)
+            for code in missing:
+                if code not in result and code in stale:
+                    result[code] = stale[code]
         return result
 
     @classmethod
@@ -456,21 +481,6 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         return result
 
     @classmethod
-    async def _get_expired_cache(cls, code: str) -> Optional[MarketQuote]:
-        """获取过期的缓存数据（作为降级方案）"""
-        if not settings.redis_enabled:
-            return None
-        try:
-            cached = await RedisService.get(f"{cls.REDIS_KEY_QUOTE_PREFIX}{code}")
-            if cached and "data" in cached:
-                quote = MarketQuote(**cached["data"])
-                cls._log_quote_source(code, "expired_redis_cache", quote)
-                return quote
-        except Exception:
-            pass
-        return None
-
-    @classmethod
     def _normalize_intraday_items(cls, items: List[KLineItem], limit: int) -> List[KLineItem]:
         ordered = sorted(
             [item for item in items if item.trade_time is not None],
@@ -486,7 +496,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
     @classmethod
     async def _realtime_intraday_fallback(cls, code: str) -> List[KLineItem]:
         quote = await cls.get_quote_from_cache(code)
-        if not quote or not quote.refreshed_at or quote.price <= 0:
+        if not quote or not quote.refreshed_at or quote.price <= 0 or quote.quote_type != "realtime":
             return []
         refreshed_at = quote.refreshed_at.astimezone(SHANGHAI_TZ) if quote.refreshed_at.tzinfo else quote.refreshed_at.replace(tzinfo=SHANGHAI_TZ)
         now = now_in_shanghai()
@@ -499,6 +509,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             trade_date=refreshed_at.date(),
             trade_time=refreshed_at,
             provisional=True,
+            source=quote.source,
             open_price=open_price,
             close_price=quote.price,
             high_price=max(quote.high_price or quote.price, quote.price, open_price),
@@ -581,6 +592,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await cls._fetch_history_kline_zhitu_index(code, days)
             if result:
+                result = cls._prepare_kline(result, "zhitu_index_history")
                 cls._log_kline_source(code, "zhitu_index_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -591,6 +603,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_ths_industry, code, days)
             if result:
+                result = cls._prepare_kline(result, "ths_industry_history")
                 cls._log_kline_source(code, "ths_industry_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -607,6 +620,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await cls._fetch_history_kline_sse(code, days)
             if result:
+                result = cls._prepare_kline(result, "sse_history")
                 cls._log_kline_source(code, "sse_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -616,6 +630,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await SzseService.fetch_history(code, days)
             if result:
+                result = cls._prepare_kline(result, "szse_history")
                 cls._log_kline_source(code, "szse_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -628,6 +643,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             try:
                 result = await cls._fetch_history_kline_tushare(code, days)
                 if result:
+                    result = cls._prepare_kline(result, "tushare_history")
                     cls._log_kline_source(code, "tushare_history", result)
                     await cls._cache_and_store_kline(code, days, result)
                     return result
@@ -638,6 +654,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await MiaoxiangService.fetch_history(code, days)
             if result:
+                result = cls._prepare_kline(result, "miaoxiang_history")
                 cls._log_kline_source(code, "miaoxiang_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -650,7 +667,8 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await cls._fetch_history_kline_sina(code, days)
             if result:
-                cls._log_kline_source(code, "sina_history_estimated_amount", cls._normalize_kline_amounts(result))
+                result = cls._prepare_kline(result, "sina_history_estimated_amount")
+                cls._log_kline_source(code, "sina_history_estimated_amount", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
         except Exception as e:
@@ -661,6 +679,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare, code, days)
             if result:
+                result = cls._prepare_kline(result, "akshare_etf_history")
                 cls._log_kline_source(code, "akshare_etf_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -671,6 +690,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_stock, code, days)
             if result:
+                result = cls._prepare_kline(result, "akshare_stock_history")
                 cls._log_kline_source(code, "akshare_stock_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -681,6 +701,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await cls._fetch_history_kline_eastmoney(code, days)
             if result:
+                result = cls._prepare_kline(result, "eastmoney_history")
                 cls._log_kline_source(code, "eastmoney_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -691,6 +712,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         try:
             result = await asyncio.to_thread(cls._fetch_history_kline_akshare_otc_fund, code, days)
             if result:
+                result = cls._prepare_kline(result, "akshare_otc_fund_history")
                 cls._log_kline_source(code, "akshare_otc_fund_history", result)
                 await cls._cache_and_store_kline(code, days, result)
                 return result
@@ -710,8 +732,9 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         logger.info(f"[MarketService] 开始获取 {len(codes)} 个品种行情: {codes}")
         result: Dict[str, MarketQuote] = {}
 
-        def merge_quotes(incoming: Dict[str, MarketQuote]) -> None:
+        def merge_quotes(incoming: Dict[str, MarketQuote], source: str, quote_type: str = "realtime") -> None:
             for code, quote in incoming.items():
+                quote = quote.model_copy(update={"source": source, "quote_type": quote_type})
                 result[code] = cls._merge_quote(result[code], quote) if code in result else quote
 
         def core_missing() -> List[str]:
@@ -721,14 +744,14 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
         if missing_codes:
             logger.info(f"[MarketService] >>> 尝试上交所实时行情: {missing_codes}")
             sse_result = await cls._fetch_from_sse_api(missing_codes)
-            merge_quotes(sse_result)
+            merge_quotes(sse_result, "sse_quote", "realtime")
 
         missing_codes = core_missing()
         if missing_codes:
             szse_result = await SzseService.fetch_quotes(missing_codes)
             for code, quote in szse_result.items():
                 cls._log_quote_source(code, "szse_quote", quote)
-            merge_quotes(szse_result)
+            merge_quotes(szse_result, "szse_quote", "realtime")
 
         # THS only has a matching catalog for 88xxxx industry indices.
         missing_codes = [code for code in core_missing() if str(code).startswith("88")]
@@ -737,7 +760,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             ths_result = await cls._fetch_from_ths_industry_api(missing_codes)
             if ths_result:
                 logger.info(f"[MarketService] ✓ 同花顺行业指数成功: {len(ths_result)} 个")
-                merge_quotes(ths_result)
+                merge_quotes(ths_result, "ths_daily_quote", "daily")
 
         # Sina was consistently available in the observed refreshes. Use it before
         # Tencent (whose volume is normalized in its parser) and the flaky batch APIs.
@@ -747,7 +770,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             sina_result = await cls._fetch_from_sina_api(missing_codes)
             if sina_result:
                 logger.info(f"[MarketService] ✓ 新浪API成功: {len(sina_result)} 个")
-                merge_quotes(sina_result)
+                merge_quotes(sina_result, "sina_quote", "realtime")
 
         missing_codes = core_missing()
         if missing_codes:
@@ -755,7 +778,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             tencent_result = await cls._fetch_from_tencent_api(missing_codes)
             if tencent_result:
                 logger.info(f"[MarketService] ✓ 腾讯财经API成功: {len(tencent_result)} 个")
-                merge_quotes(tencent_result)
+                merge_quotes(tencent_result, "tencent_quote", "realtime")
 
         # 妙想提供最近完成交易日的场内报价；仅在实时源未覆盖时兜底。
         missing_codes = [code for code in core_missing() if cls._looks_like_listed_security_code(code)]
@@ -764,7 +787,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
                 mx_result = await MiaoxiangService.fetch_quotes(missing_codes)
                 for code, quote in mx_result.items():
                     cls._log_quote_source(code, "miaoxiang_daily_quote", quote)
-                merge_quotes(mx_result)
+                merge_quotes(mx_result, "miaoxiang_daily_quote", "daily")
             except Exception as e:
                 logger.info(f"[MarketService] 妙想报价异常: {type(e).__name__}")
 
@@ -783,7 +806,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             akshare_etf_result = await cls._fetch_from_akshare_etf_spot(etf_codes)
             if akshare_etf_result:
                 logger.info(f"[MarketService] ✓ AkShare ETF实时列表成功: {len(akshare_etf_result)} 个")
-                merge_quotes(akshare_etf_result)
+                merge_quotes(akshare_etf_result, "eastmoney_etf_spot", "realtime")
 
         missing_codes = [
             code for code in core_missing()
@@ -793,7 +816,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             etf_result = await cls._fetch_from_eastmoney_api(missing_codes)
             if etf_result:
                 logger.info(f"[MarketService] ✓ 东方财富ETF批量API成功: {len(etf_result)} 个")
-                merge_quotes(etf_result)
+                merge_quotes(etf_result, "eastmoney_etf_quote", "realtime")
 
         missing_codes = core_missing()
         if missing_codes:
@@ -801,7 +824,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             broad_result = await cls._fetch_from_eastmoney_quote_api(missing_codes)
             if broad_result:
                 logger.info(f"[MarketService] ✓ 东方财富通用证券API成功: {len(broad_result)} 个")
-                merge_quotes(broad_result)
+                merge_quotes(broad_result, "eastmoney_quote", "realtime")
 
         missing_codes = core_missing()
         if missing_codes and settings.tushare_token.strip():
@@ -809,7 +832,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             tushare_result = await cls._fetch_from_tushare_api(missing_codes)
             if tushare_result:
                 logger.info(f"[MarketService] ✓ Tushare成功: {len(tushare_result)} 个")
-                merge_quotes(tushare_result)
+                merge_quotes(tushare_result, "tushare_daily_quote", "daily")
 
         missing_codes = cls._otc_fund_candidate_codes(codes, result)
         if missing_codes:
@@ -817,7 +840,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             fund_result = await cls._fetch_from_otc_fund_daily_api(missing_codes)
             if fund_result:
                 logger.info(f"[MarketService] ✓ 场外基金每日净值API成功: {len(fund_result)} 个")
-                merge_quotes(fund_result)
+                merge_quotes(fund_result, "eastmoney_fund_nav", "nav")
 
         # This endpoint is only an optional intraday estimate now. The disclosed
         # NAV snapshot above remains the source of truth for OTC fund names/prices.
@@ -827,7 +850,7 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             fund_result = await cls._fetch_from_otc_fund_api(missing_codes)
             if fund_result:
                 logger.info(f"[MarketService] ✓ 场外基金估值备用源成功: {len(fund_result)} 个")
-                merge_quotes(fund_result)
+                merge_quotes(fund_result, "eastmoney_fund_estimate", "estimate")
 
         if result:
             for code, quote in list(result.items()):
@@ -996,15 +1019,16 @@ class MarketService(MarketProviderMixin, FundProfileMixin, TechnicalIndicatorMix
             "open_price": item.open_price, "close_price": item.close_price,
             "high_price": item.high_price, "low_price": item.low_price,
             "volume": item.volume, "amount": item.amount, "change_pct": item.change_pct,
+            "source": item.source, "adjustment": item.adjustment, "amount_estimated": item.amount_estimated,
         } for item in data}
         values = list(rows.values())
-        # Bound SQLite parameters; a 250-day history normally needs 3 statements.
-        for offset in range(0, len(values), 100):
-            statement = insert(MarketDaily).values(values[offset:offset + 100])
+        # Bound SQLite parameters; a 250-day history normally needs 4 statements.
+        for offset in range(0, len(values), 64):
+            statement = insert(MarketDaily).values(values[offset:offset + 64])
             statement = statement.on_conflict_do_update(
                 index_elements=["etf_code", "trade_date"],
                 set_={field: getattr(statement.excluded, field) for field in (
-                    "open_price", "close_price", "high_price", "low_price", "volume", "amount", "change_pct",
+                    "open_price", "close_price", "high_price", "low_price", "volume", "amount", "change_pct", "source", "adjustment", "amount_estimated",
                 )},
             )
             await session.execute(statement)

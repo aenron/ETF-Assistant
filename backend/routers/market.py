@@ -26,6 +26,8 @@ async def get_quote(code: str):
     """获取单个证券/基金行情。默认只读缓存，避免普通页面查询阻塞。"""
     quote = await MarketService.get_quote_from_cache(code)
     if quote:
+        if quote.stale:
+            asyncio.create_task(MarketService.refresh_quote(code))
         return MarketQuote.model_validate(quote)
 
     asyncio.create_task(MarketService.refresh_quote(code))
@@ -98,7 +100,7 @@ async def get_history(
         data=kline_data,
         indicators=indicators,
         latest_trade_date=latest_trade_date,
-        source="history+realtime_quote" if has_provisional else "history",
+        source=next((item.source for item in confirmed_kline_data if item.source), "history"),
         has_provisional=has_provisional,
     )
 

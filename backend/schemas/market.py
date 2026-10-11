@@ -2,7 +2,7 @@ import math
 
 from pydantic import field_validator
 from datetime import date, datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from schemas.base import ShanghaiBaseModel
 
@@ -55,6 +55,10 @@ class MarketQuote(ShanghaiBaseModel):
     iopv: Optional[float] = None
     premium_rate: Optional[float] = None
     refreshed_at: Optional[datetime] = None
+    fetched_at: Optional[datetime] = None
+    source: Optional[str] = None
+    quote_type: Literal["realtime", "daily", "nav", "estimate"] = "realtime"
+    stale: bool = False
 
     @field_validator("price", "change_pct", mode="before")
     @classmethod
@@ -84,6 +88,10 @@ class KLineItem(ShanghaiBaseModel):
     volume: int
     amount: Optional[float] = None
     change_pct: float
+
+    source: Optional[str] = None
+    adjustment: Literal["none", "qfq", "hfq"] = "none"
+    amount_estimated: bool = False
 
     @field_validator("open_price", "close_price", "high_price", "low_price", "change_pct", mode="before")
     @classmethod

@@ -1,5 +1,5 @@
 import { type IndicatorLineKey, type BenchmarkKey, type RuleCheck, type CandlePoint, buildTradeSignal, isCurrentShanghaiIntradayPoint, CandlestickChart } from "./market/EtfChart"
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -228,9 +228,29 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const [adviceLoading, setAdviceLoading] = useState(false)
   const [latestAdvice, setLatestAdvice] = useState<AdviceLogResponse | null>(null)
   const [latestLoading, setLatestLoading] = useState(true)
+  const requestIds = useRef<Record<string, number>>({})
+  const currentSelection = useRef({ code: p.etf_code, days: historyDays })
+  currentSelection.current = { code: p.etf_code, days: historyDays }
+  const startRequest = (key: string) => {
+    const id = (requestIds.current[key] || 0) + 1
+    requestIds.current[key] = id
+    const code = p.etf_code
+    const days = historyDays
+    return () => requestIds.current[key] === id && currentSelection.current.code === code
+      && (key !== 'history' && key !== 'benchmark' || currentSelection.current.days === days)
+  }
+  useEffect(() => () => {
+    for (const key of Object.keys(requestIds.current)) requestIds.current[key]++
+  }, [])
 
   useEffect(() => {
     setActiveChartRange(supportsIntraday ? 'today' : 60)
+    setHistoryData(null)
+    setIntradayData(null)
+    setProfile(null)
+    setAdvice(null)
+    setLatestAdvice(null)
+    setAdviceLoading(false)
   }, [p.etf_code, supportsIntraday])
 
   useEffect(() => {
@@ -244,7 +264,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
 
   useEffect(() => {
     fetchBenchmarkHistory()
-  }, [historyDays])
+  }, [p.etf_code, historyDays])
 
   useEffect(() => {
     fetchProfile()
@@ -252,87 +272,110 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   }, [p.etf_code])
 
   const fetchLatestAdvice = async () => {
+    const isCurrent = startRequest('latest')
     setLatestLoading(true)
     try {
       const res = await adviceApi.getLatest()
       const data = res.data || {}
+      if (!isCurrent()) return
       setLatestAdvice(data[p.etf_code] || null)
     } catch (e) {
+      if (!isCurrent()) return
       console.error('Failed to fetch latest advice:', e)
     } finally {
+      if (!isCurrent()) return
       setLatestLoading(false)
     }
   }
 
   const fetchHistory = async () => {
+    const isCurrent = startRequest('history')
     setHistoryLoading(true)
     try {
       const res = await marketApi.getHistory(p.etf_code, historyDays)
+      if (!isCurrent()) return
       setHistoryData(res.data)
     } catch (e) {
+      if (!isCurrent()) return
       console.error('Failed to fetch history:', e)
     } finally {
+      if (!isCurrent()) return
       setHistoryLoading(false)
     }
   }
 
   const fetchIntraday = async () => {
+    const isCurrent = startRequest('intraday')
     setIntradayLoading(true)
     try {
       const res = await marketApi.getIntraday(p.etf_code, '1m', 240)
+      if (!isCurrent()) return
       setIntradayData(res.data)
     } catch (e) {
+      if (!isCurrent()) return
       console.error('Failed to fetch intraday history:', e)
       setIntradayData(null)
     } finally {
+      if (!isCurrent()) return
       setIntradayLoading(false)
     }
   }
 
   const fetchBenchmarkHistory = async () => {
+    const isCurrent = startRequest('benchmark')
     try {
       const [hs300Res, csiA500Res] = await Promise.allSettled([
         marketApi.getHistory('000300', historyDays),
         marketApi.getHistory('000510', historyDays),
       ])
+      if (!isCurrent()) return
       setBenchmarkHistory({
         hs300: hs300Res.status === 'fulfilled' ? hs300Res.value.data : null,
         csiA500: csiA500Res.status === 'fulfilled' ? csiA500Res.value.data : null,
       })
     } catch (e) {
+      if (!isCurrent()) return
       console.error('Failed to fetch benchmark history:', e)
       setBenchmarkHistory({ hs300: null, csiA500: null })
     }
   }
 
   const fetchProfile = async (forceRefresh = false) => {
+    const isCurrent = startRequest('profile')
     setProfileLoading(true)
     try {
       const res = await marketApi.getEtfProfile(p.etf_code, undefined, forceRefresh)
+      if (!isCurrent()) return
       setProfile(res.data)
     } catch (e) {
+      if (!isCurrent()) return
       console.error('Failed to fetch ETF profile:', e)
       setProfile(null)
     } finally {
+      if (!isCurrent()) return
       setProfileLoading(false)
     }
   }
 
   const fetchAdvice = async () => {
+    const isCurrent = startRequest('advice')
     setAdviceLoading(true)
     try {
       const res = isVirtualPortfolio
         ? await adviceApi.generateForSymbol({ code: p.etf_code, name: p.etf_name, asset_type: p.asset_type })
         : await adviceApi.generateForPortfolio(p.id)
+      if (!isCurrent()) return
       setAdvice(res.data)
       // 刷新最新建议
       fetchLatestAdvice()
     } catch (e: any) {
+      if (!isCurrent()) return
       const msg = e?.code === 'ECONNABORTED'
         ? '请求超时，AI正在搜索最新信息，请稍后重试'
         : (e?.response?.data?.detail || '获取建议失败')
       alert(msg)
     } finally {
+      if (!isCurrent()) return
       setAdviceLoading(false)
     }
   }
@@ -422,6 +465,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
   const activeChartLoading = activeChartRange === 'today' ? intradayLoading : historyLoading
   const activeChartIndicators = activeChartRange === 'today' ? intradayIndicators : visibleIndicators
   const activeToggleIndicator = activeChartRange === 'today' ? toggleIntradayIndicator : toggleIndicator
+  const hasEstimatedAmount = (activeChartRange === 'today' ? intradayKlines : klines).some(item => item.amount_estimated)
   const activeChartEmptyText = activeChartRange === 'today' ? '今日分钟线暂不可用，可刷新或切换周期' : '暂无K线数据'
   const historyRangeOptions: Array<{ key: ChartRangeKey; days?: HistoryRangeDays; label: string; title: string }> = [
     ...(supportsIntraday ? [{ key: 'today' as const, label: '今日', title: '今日实时趋势' }] : []),
@@ -505,6 +549,7 @@ export function EtfDetailModal({ portfolio: p, onClose }: EtfDetailModalProps) {
                   <span className="text-sm text-muted-foreground">{p.etf_name || '-'}</span>
                 </div>
                 <h3 className="mt-1 text-base font-semibold">{activeHistoryRange.title}</h3>
+                {hasEstimatedAmount && <span className="text-xs text-amber-600">部分成交额为估算</span>}
                 <p className="mt-1 text-xs text-muted-foreground">
                   {p.asset_type === 'otc_fund' ? '最新净值' : '当前价'} {p.current_price?.toFixed(3) || '-'}
                   {p.change_pct != null ? ` / ${p.change_pct >= 0 ? '+' : ''}${p.change_pct.toFixed(2)}%` : ''}

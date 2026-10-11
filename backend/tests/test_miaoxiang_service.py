@@ -165,5 +165,5 @@ class MiaoxiangIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(MarketService, "_fetch_history_kline_sina", AsyncMock()) as sina,
             patch.object(MarketService, "_cache_and_store_kline", AsyncMock()),
         ):
-            self.assertEqual(await MarketService.get_history_kline("510300", 2, prefer_cache=False), bars)
+            self.assertEqual(await MarketService.get_history_kline("510300", 2, prefer_cache=False), MarketService._prepare_kline(bars, "miaoxiang_history"))
             sina.assert_not_awaited()

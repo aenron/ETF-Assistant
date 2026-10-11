@@ -133,9 +133,9 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await MarketService.get_history_kline("513300", days=60)
 
-        self.assertEqual(result, fresh_kline)
+        self.assertEqual(result, MarketService._prepare_kline(fresh_kline, "ths_industry_history"))
         ths_fetch.assert_called_once_with("513300", 60)
-        cache_store.assert_awaited_once_with("513300", 60, fresh_kline)
+        cache_store.assert_awaited_once_with("513300", 60, result)
 
     async def test_sina_fallback_runs_before_otc_fund_nav(self) -> None:
         sina_kline = [
@@ -179,7 +179,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
             result = await MarketService.get_history_kline("513300", days=60)
 
-        self.assertEqual(result, sina_kline)
+        self.assertEqual(result, MarketService._prepare_kline(sina_kline, "sina_history_estimated_amount"))
         sina_fetch.assert_awaited_once_with("513300", 60)
         otc_fetch.assert_not_called()
 
@@ -214,7 +214,7 @@ class MarketServiceHistoryFallbackTests(unittest.IsolatedAsyncioTestCase):
 
             result = await MarketService.get_history_kline("513300", days=60)
 
-        self.assertEqual(result, sse_kline)
+        self.assertEqual(result, MarketService._prepare_kline(sse_kline, "sse_history"))
         sse_fetch.assert_awaited_once_with("513300", 60)
         akshare_fetch.assert_not_called()
 

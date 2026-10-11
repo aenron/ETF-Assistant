@@ -89,7 +89,9 @@ class MarketFormatMixin:
                 "amount": existing.amount if existing.amount is not None else incoming.amount,
                 "iopv": existing.iopv if existing.iopv is not None else incoming.iopv,
                 "premium_rate": existing.premium_rate if existing.premium_rate is not None else incoming.premium_rate,
-                "refreshed_at": existing.refreshed_at or incoming.refreshed_at,
+                "refreshed_at": existing.refreshed_at if existing.price > 0 else incoming.refreshed_at,
+                "source": existing.source if existing.price > 0 else incoming.source,
+                "quote_type": existing.quote_type if existing.price > 0 else incoming.quote_type,
             }
         )
 

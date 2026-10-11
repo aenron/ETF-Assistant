@@ -60,6 +60,7 @@ class SinaProviderMixin(MarketFormatMixin):
                                 change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
                                 result[code] = MarketQuote(
+                                    refreshed_at=cls._timestamp_to_datetime(f"{parts[30]} {parts[31]}") if len(parts) > 31 else None,
                                     code=code,
                                     name=name,
                                     price=price,
@@ -77,7 +78,6 @@ class SinaProviderMixin(MarketFormatMixin):
         return {}
 
 
-    @classmethod
     @classmethod
     def _sina_symbol(cls, code: str) -> str:
         clean = str(code or "").strip()

@@ -57,7 +57,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                 "ut": "bd1d9ddb04089700cf9c27f6267cc896",
                 "fltt": 2,
                 "invt": 2,
-                "fields": "f43,f44,f45,f46,f47,f48,f58,f107,f116,f117,f152,f168,f169,f170",
+                "fields": "f43,f44,f45,f46,f47,f48,f58,f107,f116,f117,f152,f168,f169,f170,f124",
                 "secid": secid,
             }
             try:
@@ -82,7 +82,8 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                 open_price=cls._to_float(data.get("f46")),
                 high_price=cls._to_float(data.get("f44")),
                 low_price=cls._to_float(data.get("f45")),
-                volume=cls._to_int(data.get("f47")),
+                refreshed_at=cls._timestamp_to_datetime(data.get("f124")),
+                volume=(cls._to_int(data.get("f47")) or 0) * 100,
                 amount=cls._to_float(data.get("f48")),
             )
         if errors:
@@ -119,7 +120,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
             "invt": 2,
             "fid": "f3",
             "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
-            "fields": "f1,f2,f3,f4,f5,f6,f7,f12,f13,f14,f15,f16,f17,f18"
+            "fields": "f1,f2,f3,f4,f5,f6,f7,f12,f13,f14,f15,f16,f17,f18,f124"
         }
         headers = cls._build_default_headers("https://quote.eastmoney.com/")
 
@@ -146,7 +147,8 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                             open_price=None,
                             high_price=None,
                             low_price=None,
-                            volume=cls._to_int(item.get("f5")),
+                            volume=(cls._to_int(item.get("f5")) or 0) * 100,
+                            refreshed_at=cls._timestamp_to_datetime(item.get("f124")),
                             amount=cls._to_float(item.get("f6")),
                         )
                 return result
@@ -178,8 +180,8 @@ class EastmoneyProviderMixin(MarketFormatMixin):
         """使用akshare获取场内ETF历史K线数据"""
         try:
             logger.info(f"[MarketService] >>> akshare获取历史K线: {code}")
-            df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
-            result = cls._items_from_ohlcv_df(df, days)
+            df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="")
+            result = [item.model_copy(update={"volume": item.volume * 100}) for item in cls._items_from_ohlcv_df(df, days)]
             if result:
                 logger.info(f"[MarketService] ✓ akshare获取到 {len(result)} 条K线")
                 return result
@@ -194,8 +196,8 @@ class EastmoneyProviderMixin(MarketFormatMixin):
         """使用akshare获取A股历史K线数据"""
         try:
             logger.info(f"[MarketService] >>> akshare获取股票历史K线: {code}")
-            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq")
-            result = cls._items_from_ohlcv_df(df, days)
+            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="")
+            result = [item.model_copy(update={"volume": item.volume * 100}) for item in cls._items_from_ohlcv_df(df, days)]
             if result:
                 logger.info(f"[MarketService] ✓ akshare股票K线获取到 {len(result)} 条")
                 return result
@@ -216,7 +218,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                 "fields1": "f1,f2,f3,f4,f5,f6",
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
                 "klt": "101",  # 日K
-                "fqt": "1",    # 前复权
+                "fqt": "0",    # 不复权
                 "end": "20500000",
                 "lmt": str(days),
             }
@@ -247,7 +249,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                                 close_price=close,
                                 high_price=float(parts[3]),
                                 low_price=float(parts[4]),
-                                volume=cls._to_int(parts[5]) or 0,
+                                volume=(cls._to_int(parts[5]) or 0) * 100,
                                 amount=cls._to_float(parts[6]) if len(parts) > 6 else None,
                                 change_pct=round(change_pct, 2),
                             ))
@@ -309,7 +311,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                 "fields1": "f1,f2,f3,f4,f5,f6",
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
                 "klt": klt,
-                "fqt": "1",
+                "fqt": "0",
                 "end": "20500000",
                 "lmt": str(limit),
             }
@@ -336,7 +338,7 @@ class EastmoneyProviderMixin(MarketFormatMixin):
                         close_price=float(parts[2]),
                         high_price=float(parts[3]),
                         low_price=float(parts[4]),
-                        volume=cls._to_int(parts[5]) or 0,
+                        volume=(cls._to_int(parts[5]) or 0) * 100,
                         amount=cls._to_float(parts[6]) if len(parts) > 6 else None,
                         change_pct=0.0,
                     ))

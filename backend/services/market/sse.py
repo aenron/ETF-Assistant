@@ -132,6 +132,7 @@ class SseProviderMixin(MarketFormatMixin):
             change_pct = (price - prev_close) / prev_close * 100
         return MarketQuote(
             code=code,
+            refreshed_at=cls._timestamp_to_datetime(f"{payload.get('date', '')}{str(payload.get('time', '')).zfill(6)}"),
             name=name,
             price=price,
             change_pct=round(change_pct or 0.0, 2),
